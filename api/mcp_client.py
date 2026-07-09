@@ -47,11 +47,18 @@ async def call_tool(tool_name: str, arguments: dict) -> dict:
     """
     Tek bir SellerSprite MCP tool'unu çağırır, JSON içeriğini döndürür.
     returnFields ASLA gönderilmez (bkz. modül docstring'i).
+
+    KRİTİK: SellerSprite'ın TÜM tool'ları parametreleri düz değil, "request"
+    adlı bir obje içine sarılı bekliyor — yani gerçek MCP çağrısı
+    {"request": {...}} şeklinde olmalı. Bu tespit, Claude'un tool_search'ü
+    üzerinden gerçek tool şemaları incelenerek doğrulandı (product_node,
+    keyword_miner, market_research_statistics, market_brand_concentration,
+    market_price_distribution, market_listing_date_distribution,
+    market_product_demand_trend, competitor_lookup — hepsi aynı örüntü).
     """
     arguments = {k: v for k, v in arguments.items() if k != "returnFields"}
     async with mcp_session() as session:
-        result = await session.call_tool(tool_name, arguments)
-        # MCP tool sonucu content bloklarından oluşur; ilk text bloğunu al
+        result = await session.call_tool(tool_name, {"request": arguments})
         for block in result.content:
             if hasattr(block, "text"):
                 try:
@@ -65,13 +72,14 @@ async def call_many(calls: list[tuple[str, dict]]) -> list[dict]:
     """
     Birden fazla tool çağrısını sıralı çalıştırır (aynı oturum içinde,
     bağlantı kurma maliyetini tekrarlamamak için).
-    calls: [(tool_name, arguments), ...]
+    calls: [(tool_name, arguments), ...] — arguments düz dict, "request"
+    sarmalı burada otomatik eklenir.
     """
     results = []
     async with mcp_session() as session:
         for tool_name, arguments in calls:
             arguments = {k: v for k, v in arguments.items() if k != "returnFields"}
-            result = await session.call_tool(tool_name, arguments)
+            result = await session.call_tool(tool_name, {"request": arguments})
             parsed = {}
             for block in result.content:
                 if hasattr(block, "text"):

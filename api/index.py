@@ -69,16 +69,16 @@ async def startup():
 # ---------------------------------------------------------------------------
 # Yardımcı: kategori node bul (market_* tool'ları için zorunlu)
 # ---------------------------------------------------------------------------
-async def resolve_category_node(seed_keyword: str, marketplace: str) -> dict | None:
+async def resolve_category_node(seed_keyword: str, marketplace: str) -> tuple[dict | None, dict]:
+    """Döndürür: (seçilen node ya da None, HAM tool yanıtı - debug için)."""
     result = await call_tool("product_node", {"keyword": seed_keyword, "marketplace": marketplace})
     nodes = result.get("data") or result.get("nodes") or []
     if isinstance(nodes, dict):
         nodes = nodes.get("list", [])
     if not nodes:
-        return None
-    # En yüksek ürün sayılı / en spesifik (en derin) node'u tercih et
+        return None, result
     best = max(nodes, key=lambda n: n.get("productCount", 0))
-    return best
+    return best, result
 
 
 # ---------------------------------------------------------------------------
@@ -112,7 +112,7 @@ async def analyze(req: AnalyzeRequest):
         })
 
         # 3) Kategori node'u bul
-        node = await resolve_category_node(req.keyword, req.marketplace)
+        node, product_node_raw = await resolve_category_node(req.keyword, req.marketplace)
         node_id_path = node.get("nodeIdPath") if node else None
 
         market_stats = {}
@@ -179,7 +179,8 @@ async def analyze(req: AnalyzeRequest):
             # Veri şekli netleşince bu alan kaldırılacak.
             "_debug": {
                 "node_id_path": node_id_path,
-                "product_node_raw": node,
+                "product_node_raw": product_node_raw,
+                "keyword_miner_raw": kw_data,
                 "market_stats_raw": market_stats,
                 "brand_concentration_raw": brand_conc,
                 "price_distribution_raw": price_dist,
