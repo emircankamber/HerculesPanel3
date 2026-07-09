@@ -14,6 +14,15 @@ Akış (bir keyword sorgusunda):
 Test edilmiş gerçek tool davranışları için mcp_client.py'nin docstring'ine bak.
 """
 import os
+import sys
+
+# Vercel'in Python runtime'ı bu dosyayı importlib ile dosya-yolu üzerinden
+# yüklüyor ve api/ klasörünü otomatik olarak sys.path'e eklemiyor — bu yüzden
+# aşağıdaki kardeş modül importları (mcp_client, database, scoring vb.)
+# eklemeden ModuleNotFoundError verir. Yerelde (api/ içinden çalıştırınca)
+# sorun çıkmaz, sadece Vercel'in çalıştırma şeklinde ortaya çıkar.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 import asyncio
 from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
