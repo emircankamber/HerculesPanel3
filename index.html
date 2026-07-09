@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Private Label Pazar Analiz Paneli</title>
+<link rel="stylesheet" href="styles.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">PL Pazar Paneli</div>
+  <nav class="topnav">
+    <button data-view="search" class="nav-btn active">Sorgu</button>
+    <button data-view="history" class="nav-btn">Geçmiş</button>
+  </nav>
+</header>
+
+<main id="app">
+
+  <section id="view-search" class="view active">
+    <form id="search-form" class="search-bar">
+      <input type="text" id="kw-input" placeholder="keyword gir (örn. samsung water filter for refrigerators)" required>
+      <select id="market-input">
+        <option value="US">US</option>
+        <option value="UK">UK</option>
+        <option value="CA">CA</option>
+      </select>
+      <button type="submit" id="search-btn">Analiz Et</button>
+    </form>
+    <div id="status-line" class="status-line"></div>
+    <div id="result-container"></div>
+  </section>
+
+  <section id="view-history" class="view">
+    <h2>Son Sorgulanan Keyword'ler</h2>
+    <div id="history-list"></div>
+  </section>
+
+</main>
+
+<template id="tpl-panel">
+  <div class="panel">
+    <div class="panel-head">
+      <div>
+        <div class="kw-title"></div>
+        <div class="kw-sub"></div>
+      </div>
+      <div class="verdict-block">
+        <div class="verdict-label">ön öneri</div>
+        <span class="verdict-badge"></span>
+      </div>
+    </div>
+
+    <div class="section-label">pazar kararı <small>(ekip kararı — kalıcı kaydedilir)</small></div>
+    <div class="decision-row">
+      <select class="decision-select">
+        <option value="">— seç —</option>
+        <option value="Uygun">Uygun</option>
+        <option value="Sınırda">Sınırda</option>
+        <option value="Elenmiş">Elenmiş</option>
+      </select>
+      <input type="text" class="decision-note" placeholder="karar notu (opsiyonel)">
+      <button class="decision-save">Kaydet</button>
+      <span class="decision-saved-msg"></span>
+    </div>
+
+    <div class="section-label">ön değerlendirme <small>(<span class="neg-count"></span>/6 olumsuz · 4+ = Elenmiş)</small></div>
+    <div class="crit-grid"></div>
+
+    <div class="section-label">pazar özeti</div>
+    <div class="stat-grid"></div>
+
+    <div class="charts-grid">
+      <div class="chart-card"><div class="chart-title">Marka Payı</div><canvas class="chart-brand"></canvas></div>
+      <div class="chart-card"><div class="chart-title">Fiyat Dağılımı</div><canvas class="chart-price"></canvas></div>
+      <div class="chart-card"><div class="chart-title">Launch Time Dağılımı</div><canvas class="chart-launch"></canvas></div>
+      <div class="chart-card"><div class="chart-title">Trafik Trendi</div><canvas class="chart-trend"></canvas></div>
+    </div>
+
+    <div class="section-label">relevant keywords <small>(CVR / ACOS hesaplanan)</small></div>
+    <div class="table-wrap">
+      <table class="kw-table">
+        <thead><tr>
+          <th>Keyword</th><th>Search</th><th>Clicks</th><th>Purchases</th>
+          <th>Click CVR</th><th>Bid</th><th>ACOS</th><th>CPA</th><th>Relevancy</th>
+        </tr></thead>
+        <tbody class="kw-tbody"></tbody>
+      </table>
+    </div>
+
+    <div class="section-label">top rakipler <small>(ASIN gir, gerçek satış/ciro/rating çekilir)</small></div>
+    <div class="competitor-fetch-row">
+      <input type="text" class="competitor-asins" placeholder="ASIN'leri virgülle ayır (örn. B071NFVVNG, B09HR7L313)">
+      <button class="competitor-fetch-btn">Rakip Verisi Çek</button>
+    </div>
+    <div class="table-wrap" style="margin-top:8px;">
+      <table class="comp-table">
+        <thead><tr><th>ASIN</th><th>Marka</th><th>Fiyat</th><th>Aylık Satış</th><th>Aylık Ciro</th><th>BSR</th><th>Rating</th><th>Review</th></tr></thead>
+        <tbody class="comp-tbody"></tbody>
+      </table>
+    </div>
+
+    <div class="section-label">hercules signal engine <small>v2.1 — Market / Demand / Truth / Risk sinyalleri</small></div>
+    <div class="signal-card">
+      <div class="signal-inputs">
+        <div class="signal-input-group">
+          <div class="sig-group-title">Risk bileşenleri (manuel, 0-100 — yüksek=riskli)</div>
+          <div class="signal-inputs-grid">
+            <label>Regülasyon<input type="number" class="s-reg" value="20" min="0" max="100"></label>
+            <label>IP/Marka<input type="number" class="s-ip" value="20" min="0" max="100"></label>
+            <label>Tedarikçi Konsantrasyonu<input type="number" class="s-supc" value="30" min="0" max="100"></label>
+            <label>Return Riski<input type="number" class="s-ret" value="30" min="0" max="100"></label>
+            <label>Mevsimsel Nakit Akışı<input type="number" class="s-seas" value="20" min="0" max="100"></label>
+            <label>Review Manipülasyonu<input type="number" class="s-revm" value="15" min="0" max="100"></label>
+          </div>
+        </div>
+        <div class="signal-input-group">
+          <div class="sig-group-title">Uygunluk / Sertifika (opsiyonel)</div>
+          <div class="signal-inputs-grid">
+            <label>Kategori Anahtarı<input type="text" class="s-category" placeholder="örn. water_filtration"></label>
+            <label>Sağlanan Sertifikalar<input type="text" class="s-certs" placeholder="virgülle ayır"></label>
+          </div>
+        </div>
+      </div>
+      <button class="signal-compute-btn">Sinyalleri Hesapla</button>
+      <div class="signal-status"></div>
+      <div class="signal-results" style="display:none;">
+        <div class="signal-bars"></div>
+        <div class="opp-score-row">
+          <div class="opp-score-block">
+            <div class="ps-l">Opportunity Score</div>
+            <div class="opp-score-val">—</div>
+          </div>
+          <div class="blue-ocean-badge">—</div>
+          <div class="stage-gate-badge">—</div>
+        </div>
+        <div class="gate-reasons"></div>
+        <div class="compliance-banner" style="display:none;"></div>
+      </div>
+    </div>
+
+    <div class="section-label">proof assets <small>(Aşama 2 — sourcing kanıtları, manuel)</small></div>
+    <div class="proof-card">
+      <div class="proof-add-row">
+        <select class="proof-type-select">
+          <option value="factory_video">Fabrika videosu (20p)</option>
+          <option value="sample_photo">Numune fotoğrafı (15p)</option>
+          <option value="measurement_video">Ölçü/tartı videosu (15p)</option>
+          <option value="packaging_proof">Ambalaj kanıtı (10p)</option>
+          <option value="coa_lab_cert">COA/lab raporu (25p veya regüle kategoride VETO)</option>
+          <option value="real_use_content">Gerçek kullanım foto/video (15p)</option>
+        </select>
+        <input type="text" class="proof-note" placeholder="not (opsiyonel)">
+        <button class="proof-add-btn">Ekle</button>
+      </div>
+      <div class="proof-list"></div>
+      <div class="proof-total">Proof Score: <strong class="proof-total-val">0</strong>/100</div>
+    </div>
+
+    <div class="section-label">kar analizi <small>(canlı — değerleri değiştir)</small></div>
+    <div class="profit-card">
+      <div class="profit-inputs">
+        <label>Alış / COGS ($)<input type="number" step="0.01" class="p-cogs" value="6.00"></label>
+        <label>Satış Fiyatı ($)<input type="number" step="0.01" class="p-sale" value="37.75"></label>
+        <label>FBA Fee ($)<input type="number" step="0.01" class="p-fba" value="5.50"></label>
+        <label>Referral Fee ($)<input type="number" step="0.01" class="p-ref" value="5.66"></label>
+        <label>ACOS (%)<input type="number" step="0.1" class="p-acos" value="40"></label>
+        <label>Return Rate (%)<input type="number" step="0.1" class="p-ret" value="3"></label>
+        <label>Genel Gider (%)<input type="number" step="0.1" class="p-gen" value="1"></label>
+      </div>
+      <div class="profit-outputs">
+        <div class="po"><span>Reklam Maliyeti</span><strong class="o-adv">—</strong></div>
+        <div class="po"><span>Return Maliyeti</span><strong class="o-retc">—</strong></div>
+        <div class="po"><span>Toplam Maliyet</span><strong class="o-tot">—</strong></div>
+      </div>
+      <div class="profit-summary">
+        <div class="ps"><div class="ps-l">Birim Kar</div><div class="ps-v o-profit">—</div></div>
+        <div class="ps"><div class="ps-l">Kar Marjı</div><div class="ps-v o-margin">—</div></div>
+        <div class="ps"><div class="ps-l">ROI</div><div class="ps-v o-roi">—</div></div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script src="app.js"></script>
+</body>
+</html>
