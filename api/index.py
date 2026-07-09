@@ -175,6 +175,17 @@ async def analyze(req: AnalyzeRequest):
             "demand_trend": demand_trend,
             "top_competitors": [],  # bkz /api/competitors — ayrı çağrı (ASIN listesi gerektirir)
             "pre_assessment": assessment,
+            # GEÇİCİ DEBUG ALANI — gerçek MCP yanıt şeklini görmek için.
+            # Veri şekli netleşince bu alan kaldırılacak.
+            "_debug": {
+                "node_id_path": node_id_path,
+                "product_node_raw": node,
+                "market_stats_raw": market_stats,
+                "brand_concentration_raw": brand_conc,
+                "price_distribution_raw": price_dist,
+                "launch_distribution_raw": launch_dist,
+                "demand_trend_raw": demand_trend,
+            },
         }
 
         await db.save_analysis(req.keyword, req.marketplace, payload, req.requested_by)

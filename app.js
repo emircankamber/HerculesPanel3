@@ -275,6 +275,12 @@ function renderPanel(data) {
   const container = $("#result-container");
   container.innerHTML = "";
   container.appendChild(tpl);
+
+  // --- Debug (geçici) ---
+  const debugEl = document.querySelector(".debug-json");
+  if (debugEl) {
+    debugEl.textContent = JSON.stringify(data._debug ?? { not_found: "..._debug alanı yok, backend güncel değil" }, null, 2);
+  }
 }
 
 function fmtNum(v) {
