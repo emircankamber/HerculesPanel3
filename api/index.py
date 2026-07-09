@@ -49,6 +49,8 @@ try:
 except ImportError:
     PORTFOLIO_AVAILABLE = False
 import database as db
+import supplier_scoring as sup
+import launch_control as lc
 
 app = FastAPI(title="SellerSprite PL Panel API")
 
@@ -63,6 +65,7 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup():
     await db.init_db()
+    await db.init_db_v3()
     await db.seed_cert_requirements_if_empty()
 
 
@@ -70,14 +73,30 @@ async def startup():
 # Yardımcı: kategori node bul (market_* tool'ları için zorunlu)
 # ---------------------------------------------------------------------------
 async def resolve_category_node(seed_keyword: str, marketplace: str) -> tuple[dict | None, dict]:
-    """Döndürür: (seçilen node ya da None, HAM tool yanıtı - debug için)."""
+    """
+    Döndürür: (seçilen node ya da None, HAM tool yanıtı - debug için).
+
+    KRİTİK DÜZELTME (gerçek veriyle test edilerek bulundu): SellerSprite'ın
+    gerçek alan adı "productCount" DEĞİL, "products". Ayrıca "en çok ürünü
+    olan kategoriyi seç" yanlış bir sezgiydi — "water filter" aramasında en
+    çok ürünlü kategori alakasız "Water Sports" çıkıyor. Bunun yerine
+    keyword'deki kelimelerin kategori adıyla örtüşme sayısına göre en
+    alakalı node'u seçiyoruz, eşitlikte ürün sayısı yüksek olanı tercih.
+    """
     result = await call_tool("product_node", {"keyword": seed_keyword, "marketplace": marketplace})
     nodes = result.get("data") or result.get("nodes") or []
     if isinstance(nodes, dict):
         nodes = nodes.get("list", [])
     if not nodes:
         return None, result
-    best = max(nodes, key=lambda n: n.get("productCount", 0))
+
+    kw_words = [w.rstrip("s") for w in seed_keyword.lower().split() if len(w) > 2]
+
+    def relevance(n):
+        label = (n.get("nodeLabelPath") or "").lower()
+        return sum(1 for w in kw_words if w in label)
+
+    best = max(nodes, key=lambda n: (relevance(n), n.get("products", 0)))
     return best, result
 
 
@@ -557,3 +576,159 @@ async def get_learning_state(keyword: str):
     p_result = bys.p_hat_with_interval(state["alpha_after"], state["beta_after"])
     return {"exists": True, "alpha": state["alpha_after"], "beta": state["beta_after"],
             **p_result, "scale_gate_passed": bys.scale_gate(p_result["p_hat"])}
+
+
+# ---------------------------------------------------------------------------
+# HERCULES v3 — SUPPLIER SCORE (§3A)
+# ---------------------------------------------------------------------------
+class SupplierScoreRequest(BaseModel):
+    supplier_name: str
+    keyword: str | None = None
+    scored_by: str
+    factory_verified: int = 0
+    moq_fit: int = 0
+    us_export: int = 0
+    fba_knowledge: int = 0
+    response_speed: int = 0
+    video_willingness: int = 0
+    cert_authenticity: int = 0
+    sample_quality: int = 0
+    price_stability: int = 0
+
+
+@app.post("/api/supplier-score")
+async def supplier_score(req: SupplierScoreRequest):
+    result = sup.score_supplier(req.dict(exclude={"supplier_name", "keyword", "scored_by"}))
+    supplier_id = await db.upsert_supplier(req.supplier_name)
+    score_id = await db.save_supplier_score(
+        supplier_id, req.scored_by, result["scores"], result["total_score"], result["blocked"])
+    return {**result, "supplier_id": supplier_id, "score_id": score_id}
+
+
+# ---------------------------------------------------------------------------
+# HERCULES v3 — CREATIVE PIPELINE (§3B) — 9 parçalık kanban
+# ---------------------------------------------------------------------------
+CREATIVE_DELIVERABLES = {
+    1: "Ham fabrika videosu", 2: "Numune açılış (unboxing) videosu",
+    3: "Ölçü/spec doğrulama videosu", 4: "Hero image (ana görsel)",
+    5: "6'lı görsel set (lifestyle+infografik)", 6: "30-45 sn Amazon ürün videosu",
+    7: "10-15 sn reklam cut'ları (dikey)", 8: "UGC tarzı kullanım videosu",
+    9: "Rakip görsel karşılaştırma matrisi",
+}
+
+
+class CreativeUpdateRequest(BaseModel):
+    keyword: str
+    deliverable_no: int
+    status: str  # pending | shooting | approved | live
+    owner: str | None = None
+    due_date: str | None = None
+
+
+@app.post("/api/creative-deliverables")
+async def update_creative(req: CreativeUpdateRequest):
+    if req.deliverable_no not in CREATIVE_DELIVERABLES:
+        raise HTTPException(400, f"Geçersiz deliverable_no. 1-9 arası olmalı: {CREATIVE_DELIVERABLES}")
+    await db.upsert_creative_deliverable(req.keyword, req.deliverable_no, req.status, req.owner, req.due_date)
+    return {"ok": True, "deliverable": CREATIVE_DELIVERABLES[req.deliverable_no]}
+
+
+@app.get("/api/creative-deliverables/{keyword}")
+async def get_creative(keyword: str):
+    existing = await db.list_creative_deliverables(keyword)
+    existing_nos = {d["deliverable_no"] for d in existing}
+    # Henüz hiç dokunulmamış teslimatları da "pending" olarak göster
+    full_list = existing + [
+        {"keyword": keyword, "deliverable_no": n, "status": "pending", "owner": None, "due_date": None}
+        for n in CREATIVE_DELIVERABLES if n not in existing_nos
+    ]
+    full_list.sort(key=lambda d: d["deliverable_no"])
+    for d in full_list:
+        d["label"] = CREATIVE_DELIVERABLES[d["deliverable_no"]]
+    launch_ready = all(
+        d["status"] in ("approved", "live") for d in full_list if d["deliverable_no"] in (1, 2, 3, 4, 5)
+    )
+    return {"deliverables": full_list, "launch_ready": launch_ready,
+            "launch_ready_note": "1-5 numaralı teslimatlar onaylanmadan lansman tarihi verilmez"}
+
+
+# ---------------------------------------------------------------------------
+# HERCULES v3 — LAUNCH CONTROL (§4)
+# ---------------------------------------------------------------------------
+class LaunchCheckpointRequest(BaseModel):
+    keyword: str
+    asin: str | None = None
+    checkpoint_day: str  # "14" | "30" | "60" | "90" | "ongoing"
+    ctr: float | None = None
+    cvr: float | None = None
+    acos: float | None = None
+    net_margin: float | None = None
+    review_avg: float | None = None
+    review_count: int | None = None
+    return_rate: float | None = None
+    has_impressions: bool = True
+    trend_flat_or_up: bool = False
+    category_avg_return_rate: float = 0.03
+    entered_by: str
+    source: str = "manual"
+
+
+@app.post("/api/launch-checkpoint")
+async def launch_checkpoint(req: LaunchCheckpointRequest):
+    metrics = req.dict()
+    result = lc.evaluate_checkpoint(req.checkpoint_day, metrics)
+    owner = lc.suggested_action_owner(result["verdict"], req.checkpoint_day)
+    checkpoint_id = await db.save_launch_checkpoint(
+        req.keyword, req.asin, req.checkpoint_day, metrics, result["verdict"], req.entered_by, req.source)
+    return {**result, "assigned_to": owner, "checkpoint_id": checkpoint_id}
+
+
+@app.get("/api/launch-checkpoints/{keyword}")
+async def get_launch_checkpoints(keyword: str):
+    return await db.list_launch_checkpoints(keyword)
+
+
+@app.get("/api/hit-rate")
+async def hit_rate():
+    """Ekibin gördüğü tek Bayesian-türevi metrik: geçmiş verdict dağılımı."""
+    return await db.get_hit_rate()
+
+
+# ---------------------------------------------------------------------------
+# HERCULES v3 — DISCOVERY ENGINE (§1) — İSKELET
+# ---------------------------------------------------------------------------
+# NOT (dürüstlük): Keepa çapraz kontrolü ve Google Trends (pytrends) entegrasyonu
+# HENÜZ YOK. Bu ortamda Keepa API erişimi/anahtarı yoktu, pytrends ayrı bir
+# bağımlılık + Google'a ağ erişimi gerektiriyor (Vercel prod'da muhtemelen
+# çalışır ama test edilmedi). Şimdilik yalnızca keyword_miner ile tarama
+# yapılıyor; Keepa/Trends filtreleri sonraki bir adımda eklenmeli.
+class DiscoveryRunRequest(BaseModel):
+    lane: str  # keyword_cluster | sub_niche | new_product_radar | replacement_consumable | competitor_watch
+    seed_keywords: list[str]
+    marketplace: str = "US"
+
+
+@app.post("/api/discovery/run")
+async def discovery_run(req: DiscoveryRunRequest):
+    run_id = await db.create_discovery_run(req.lane, {"seed_keywords": req.seed_keywords, "marketplace": req.marketplace})
+    candidates = []
+    for seed in req.seed_keywords:
+        kw_data = await call_tool("keyword_miner", {
+            "keyword": seed, "marketplace": req.marketplace, "minRelevancy": 50, "size": 10,
+        })
+        items = kw_data.get("data", {}).get("items", []) if isinstance(kw_data.get("data"), dict) else []
+        for item in items:
+            kw = item.get("keyword")
+            if not kw:
+                continue
+            # Keepa/Trends filtreleri henüz yok — bu alanlar şimdilik None
+            await db.add_discovery_candidate(run_id, kw, req.lane, keepa_flags=None, trends_score=None)
+            candidates.append(kw)
+    return {"run_id": run_id, "lane": req.lane, "candidates_found": len(candidates),
+            "candidates": candidates[:30],
+            "warning": "Keepa/Trends eleme filtreleri henüz entegre değil — tüm sonuçlar 'new' statüsünde, manuel gözden geçirme önerilir."}
+
+
+@app.get("/api/discovery/candidates")
+async def discovery_candidates(run_id: int | None = None, status: str | None = None):
+    return await db.list_discovery_candidates(run_id, status)

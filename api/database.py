@@ -290,3 +290,189 @@ async def get_latest_learning_state(keyword: str):
             (keyword,))
         row = await cur.fetchone()
         return dict(row) if row else None
+
+
+# ---------------------------------------------------------------------------
+# Hercules v3 — Discovery / Supplier / Creative / Launch Control şeması
+# ---------------------------------------------------------------------------
+async def init_db_v3():
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS discovery_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_at INTEGER NOT NULL, lane TEXT NOT NULL,
+                credits_used INTEGER DEFAULT 0, candidates_found INTEGER DEFAULT 0,
+                params_json TEXT
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS discovery_candidates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                discovery_run_id INTEGER, keyword TEXT NOT NULL, source_lane TEXT,
+                keepa_flags_json TEXT, trends_score REAL,
+                status TEXT DEFAULT 'new'   -- new | promoted | discarded
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS suppliers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL, contact TEXT, country TEXT,
+                is_factory INTEGER DEFAULT 0, notes TEXT
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS supplier_scores (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                supplier_id INTEGER NOT NULL, scored_by TEXT, scored_at INTEGER NOT NULL,
+                factory_verified INTEGER, moq_fit INTEGER, us_export INTEGER,
+                fba_knowledge INTEGER, response_speed INTEGER, video_willingness INTEGER,
+                cert_authenticity INTEGER, sample_quality INTEGER, price_stability INTEGER,
+                total_score INTEGER, blocked INTEGER DEFAULT 0
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS supplier_products (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                supplier_id INTEGER NOT NULL, keyword TEXT NOT NULL,
+                quoted_moq INTEGER, quoted_unit_cost REAL, pi_url TEXT
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS creative_deliverables (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                keyword TEXT NOT NULL, deliverable_no INTEGER NOT NULL,  -- 1-9
+                status TEXT DEFAULT 'pending',  -- pending | shooting | approved | live
+                proof_asset_id INTEGER, owner TEXT, due_date TEXT,
+                UNIQUE(keyword, deliverable_no)
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS launch_checkpoints (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                keyword TEXT NOT NULL, asin TEXT, checkpoint_day TEXT NOT NULL, -- 14|30|60|90|ongoing
+                ctr REAL, cvr REAL, acos REAL, net_margin REAL,
+                review_avg REAL, review_count INTEGER, return_rate REAL,
+                verdict TEXT,  -- scale | fix | stop_proposed
+                entered_by TEXT, source TEXT DEFAULT 'manual',  -- manual | sp_api
+                created_at INTEGER NOT NULL
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS launch_actions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                checkpoint_id INTEGER NOT NULL, action_type TEXT,
+                assigned_to TEXT, status TEXT DEFAULT 'open', note TEXT,
+                created_at INTEGER NOT NULL
+            )
+        """)
+        await db.commit()
+
+
+async def create_discovery_run(lane: str, params: dict) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "INSERT INTO discovery_runs (run_at, lane, params_json) VALUES (?,?,?)",
+            (int(time.time()), lane, json.dumps(params)))
+        await db.commit()
+        return cur.lastrowid
+
+
+async def add_discovery_candidate(run_id: int, keyword: str, source_lane: str,
+                                   keepa_flags: dict = None, trends_score: float = None):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            INSERT INTO discovery_candidates (discovery_run_id, keyword, source_lane, keepa_flags_json, trends_score)
+            VALUES (?,?,?,?,?)
+        """, (run_id, keyword, source_lane, json.dumps(keepa_flags or {}), trends_score))
+        await db.execute("UPDATE discovery_runs SET candidates_found = candidates_found + 1 WHERE id=?", (run_id,))
+        await db.commit()
+
+
+async def list_discovery_candidates(run_id: int = None, status: str = None):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        q = "SELECT * FROM discovery_candidates WHERE 1=1"
+        params = []
+        if run_id: q += " AND discovery_run_id=?"; params.append(run_id)
+        if status: q += " AND status=?"; params.append(status)
+        cur = await db.execute(q, params)
+        return [dict(r) for r in await cur.fetchall()]
+
+
+async def upsert_supplier(name: str, contact: str = None, country: str = None,
+                           is_factory: bool = False, notes: str = None) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "INSERT INTO suppliers (name, contact, country, is_factory, notes) VALUES (?,?,?,?,?)",
+            (name, contact, country, int(is_factory), notes))
+        await db.commit()
+        return cur.lastrowid
+
+
+async def save_supplier_score(supplier_id: int, scored_by: str, scores: dict, total: int, blocked: bool) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("""
+            INSERT INTO supplier_scores
+            (supplier_id, scored_by, scored_at, factory_verified, moq_fit, us_export,
+             fba_knowledge, response_speed, video_willingness, cert_authenticity,
+             sample_quality, price_stability, total_score, blocked)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, (supplier_id, scored_by, int(time.time()),
+              scores.get("factory_verified", 0), scores.get("moq_fit", 0), scores.get("us_export", 0),
+              scores.get("fba_knowledge", 0), scores.get("response_speed", 0), scores.get("video_willingness", 0),
+              scores.get("cert_authenticity", 0), scores.get("sample_quality", 0), scores.get("price_stability", 0),
+              total, int(blocked)))
+        await db.commit()
+        return cur.lastrowid
+
+
+async def upsert_creative_deliverable(keyword: str, deliverable_no: int, status: str = "pending",
+                                       owner: str = None, due_date: str = None):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            INSERT INTO creative_deliverables (keyword, deliverable_no, status, owner, due_date)
+            VALUES (?,?,?,?,?)
+            ON CONFLICT(keyword, deliverable_no) DO UPDATE SET
+                status=excluded.status, owner=excluded.owner, due_date=excluded.due_date
+        """, (keyword, deliverable_no, status, owner, due_date))
+        await db.commit()
+
+
+async def list_creative_deliverables(keyword: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM creative_deliverables WHERE keyword=? ORDER BY deliverable_no", (keyword,))
+        return [dict(r) for r in await cur.fetchall()]
+
+
+async def save_launch_checkpoint(keyword: str, asin: str, checkpoint_day: str, metrics: dict,
+                                  verdict: str, entered_by: str, source: str = "manual") -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("""
+            INSERT INTO launch_checkpoints
+            (keyword, asin, checkpoint_day, ctr, cvr, acos, net_margin,
+             review_avg, review_count, return_rate, verdict, entered_by, source, created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, (keyword, asin, checkpoint_day, metrics.get("ctr"), metrics.get("cvr"),
+              metrics.get("acos"), metrics.get("net_margin"), metrics.get("review_avg"),
+              metrics.get("review_count"), metrics.get("return_rate"), verdict, entered_by,
+              source, int(time.time())))
+        await db.commit()
+        return cur.lastrowid
+
+
+async def list_launch_checkpoints(keyword: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM launch_checkpoints WHERE keyword=? ORDER BY created_at", (keyword,))
+        return [dict(r) for r in await cur.fetchall()]
+
+
+async def get_hit_rate():
+    """Ekibin göreceği tek şey: geçmiş isabet oranı (scale önerilenlerden kaçı gerçekten iyi gitti)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT verdict, COUNT(*) FROM launch_checkpoints GROUP BY verdict")
+        rows = await cur.fetchall()
+        return {row[0]: row[1] for row in rows}
