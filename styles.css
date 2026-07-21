@@ -310,3 +310,6 @@ input:focus,select:focus,textarea:focus{outline:2px solid var(--blue);outline-of
 .export-report-btn:hover,.export-keywords-btn:hover{border-color:var(--teal);background:var(--surface);}
 .export-report-btn:active,.export-keywords-btn:active{transform:scale(0.96);}
 .export-report-btn:disabled,.export-keywords-btn:disabled{opacity:.5;cursor:wait;}
+
+/* --- Kar analizi kaynak notu --- */
+.profit-source-note{font-size:11px;color:var(--teal);margin-bottom:10px;font-style:italic;}

@@ -394,6 +394,15 @@ async def analyze(req: AnalyzeRequest):
             "price_distribution": _extract_list(price_dist),
             "launch_distribution": _extract_list(launch_dist),
             "demand_trend": demand_trend,
+            # GERÇEK PAZAR İADE ORANI — market_product_demand_trend'in "returnRatio"
+            # alanından (gerçek MCP çağrısıyla doğrulandı: örn. 3.1668 = %3.1668,
+            # yani ham değer zaten yüzde sayısı, /100 ile orana çevriliyor).
+            # Kar analizi hesaplayıcısını gerçek veriyle doldurmak için kullanılır.
+            "market_return_rate": (
+                (demand_trend.get("data", {}) or {}).get("returnRatio") / 100
+                if isinstance(demand_trend.get("data"), dict) and demand_trend.get("data", {}).get("returnRatio") is not None
+                else None
+            ),
             "top_competitors": top_competitors,  # otomatik çekildi (competitor_lookup, matchType=3)
             "pre_assessment": assessment,
             # GEÇİCİ DEBUG ALANI — gerçek MCP yanıt şeklini görmek için.

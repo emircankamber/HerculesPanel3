@@ -175,6 +175,26 @@ function renderPanel(data) {
 
   // --- Kar analizi (canlı) ---
   const profitInputs = ["cogs", "sale", "fba", "ref", "acos", "ret", "gen"].map(k => root.querySelector(`.p-${k}`));
+
+  // Gerçek pazar verisiyle önceden doldur (kullanıcı hâlâ istediği gibi değiştirebilir)
+  const mainRowForProfit = (data.keyword_rows || []).find(
+    r => (r.keyword || "").toLowerCase() === data.keyword.toLowerCase()
+  );
+  const marketAvgPrice = data.market_stats?.avgPrice;
+  if (marketAvgPrice) root.querySelector(".p-sale").value = marketAvgPrice.toFixed(2);
+  if (mainRowForProfit?.acos != null) root.querySelector(".p-acos").value = (mainRowForProfit.acos * 100).toFixed(1);
+  if (data.market_return_rate != null) root.querySelector(".p-ret").value = (data.market_return_rate * 100).toFixed(2);
+  // Kaynağını panelde belirt (şeffaflık — hangi değerler gerçek, hangileri hâlâ manuel varsayım)
+  const profitSourceNote = root.querySelector(".profit-source-note");
+  if (profitSourceNote) {
+    const sources = [];
+    if (marketAvgPrice) sources.push("Satış Fiyatı: pazar ortalaması");
+    if (mainRowForProfit?.acos != null) sources.push("ACOS: bu keyword için hesaplanan");
+    if (data.market_return_rate != null) sources.push("Return Rate: pazar ortalaması");
+    profitSourceNote.textContent = sources.length
+      ? `✓ Gerçek veriyle dolduruldu — ${sources.join(" · ")}. COGS/FBA/Referral Fee hâlâ manuel girilmeli.`
+      : "";
+  }
   let lastProfitResult = null;  // Excel export'ta kullanılacak
   const recalcProfit = async () => {
     const [cogs, sale, fba, ref, acos, ret, gen] = profitInputs.map(i => parseFloat(i.value) || 0);
