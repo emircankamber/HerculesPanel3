@@ -23,6 +23,17 @@ def _get_mcp_url() -> str:
     tüm uygulama çökmek yerine yalnızca MCP çağıran endpoint'ler net bir
     hata mesajıyla başarısız olur — /health, /api/thresholds gibi diğer
     her şey çalışmaya devam eder.
+
+    ESNEKLİK (gerçek üretim hatasından öğrenildi): Kullanıcı env var'a ya
+    sadece ham secret-key'i (e5e08f9d...) ya da SellerSprite'ın kendi
+    sitesinde gösterdiği TAM URL'yi (https://mcp.sellersprite.com/mcp?
+    secret-key=e5e08f9d...) yapıştırabilir. İkincisini ham key sanıp tekrar
+    URL şablonuna sokarsak "https://...?secret-key=https://...?secret-key=..."
+    şeklinde ÇİFT/BOZUK bir URL oluşur — sunucu buna 200 dönebilir ama kimlik
+    doğrulama geçersiz kalır ve gerçek tool listesi yerine sınırlı/farklı bir
+    yanıt döner (örn. "Tool X not listed by server" hatası). Bu yüzden burada
+    değerin zaten tam URL olup olmadığını kontrol edip iki duruma göre
+    davranıyoruz.
     """
     key = os.environ.get("SELLERSPRITE_SECRET_KEY")
     if not key:
@@ -31,6 +42,9 @@ def _get_mcp_url() -> str:
             "Vercel > Settings > Environment Variables'a ekleyip yeniden deploy et "
             "(env var eklemek otomatik redeploy tetiklemez)."
         )
+    key = key.strip()
+    if key.startswith("http://") or key.startswith("https://"):
+        return key  # zaten tam URL yapıştırılmış
     return f"https://mcp.sellersprite.com/mcp?secret-key={key}"
 
 
