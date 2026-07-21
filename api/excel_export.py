@@ -199,6 +199,53 @@ def build_report_xlsx(data: dict) -> bytes:
                 cell.number_format = "$#,##0.00"
         row += 1
 
+    # --- Kar Analizi (canlı formüllerle — panelde girilen değerlerle önceden doldurulur) ---
+    row += 1
+    row = _section(ws, row, 10, "KAR ANALİZİ  (sarı hücreler manuel — değiştirince otomatik yeniden hesaplanır)")
+    profit = data.get("profit_analysis") or {}
+    inputs = profit.get("inputs", {})
+    YELLOW = PatternFill("solid", fgColor="FFF2CC")
+    INPUT_FONT = Font(name=ARIAL, size=10, color="0000FF")
+    FORMULA_FONT = Font(name=ARIAL, size=10, color="000000")
+
+    def _plabel(r, text, bold=False):
+        c = ws.cell(r, 1, text)
+        c.font = LBLB if bold else LBL
+        c.border = BORDER
+        ws.cell(r, 2).border = BORDER
+        return r + 1
+
+    def _pinput(r, val, fmt):
+        cell = ws.cell(r, 2, val if val is not None else 0)
+        cell.font = INPUT_FONT
+        cell.fill = YELLOW
+        cell.border = BORDER
+        cell.number_format = fmt
+        ws.cell(r, 1).border = BORDER
+
+    def _pformula(r, formula, fmt, bold=False):
+        cell = ws.cell(r, 2, formula)
+        cell.font = Font(name=ARIAL, bold=bold, size=10, color="000000")
+        cell.border = BORDER
+        cell.number_format = fmt
+        ws.cell(r, 1).border = BORDER
+
+    r_cogs = row; row = _plabel(row, "Alış Fiyatı / COGS ($)"); _pinput(r_cogs, inputs.get("cogs"), '$#,##0.00')
+    r_sale = row; row = _plabel(row, "Satış Fiyatı ($)"); _pinput(r_sale, inputs.get("sale"), '$#,##0.00')
+    r_fba = row; row = _plabel(row, "FBA Fee ($)"); _pinput(r_fba, inputs.get("fba"), '$#,##0.00')
+    r_ref = row; row = _plabel(row, "Referral Fee ($)"); _pinput(r_ref, inputs.get("ref"), '$#,##0.00')
+    r_acos = row; row = _plabel(row, "ACOS (%)"); _pinput(r_acos, (inputs.get("acos") or 0) / 100, '0.0%')
+    r_ret = row; row = _plabel(row, "Return Rate (%)"); _pinput(r_ret, (inputs.get("ret") or 0) / 100, '0.0%')
+    r_gen = row; row = _plabel(row, "Genel Gider (%)"); _pinput(r_gen, (inputs.get("gen") or 0) / 100, '0.0%')
+
+    r_adv = row; row = _plabel(row, "Reklam Maliyeti ($)"); _pformula(r_adv, f"=B{r_acos}*B{r_sale}", '$#,##0.00')
+    r_genc = row; row = _plabel(row, "Genel Gider ($)"); _pformula(r_genc, f"=B{r_gen}*B{r_sale}", '$#,##0.00')
+    r_retc = row; row = _plabel(row, "Return Maliyeti ($)"); _pformula(r_retc, f"=B{r_ret}*(B{r_cogs}+B{r_fba})", '$#,##0.00')
+    r_tot = row; row = _plabel(row, "Toplam Maliyet ($)"); _pformula(r_tot, f"=B{r_cogs}+B{r_fba}+B{r_ref}+B{r_adv}+B{r_genc}+B{r_retc}", '$#,##0.00')
+    r_profit = row; row = _plabel(row, "Birim Kar / Zarar ($)", bold=True); _pformula(r_profit, f"=B{r_sale}-B{r_tot}", '$#,##0.00;[Red]($#,##0.00)', bold=True)
+    r_margin = row; row = _plabel(row, "Kar Marjı (%)", bold=True); _pformula(r_margin, f"=IF(B{r_sale}=0,0,B{r_profit}/B{r_sale})", '0.0%;[Red](0.0%)', bold=True)
+    r_roi = row; row = _plabel(row, "ROI (%) = Kar/COGS", bold=True); _pformula(r_roi, f"=IF(B{r_cogs}=0,0,B{r_profit}/B{r_cogs})", '0.0%;[Red](0.0%)', bold=True)
+
     row += 1
     ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=10)
     ws.cell(row, 1, "Bu rapor PL Pazar Paneli tarafından canlı SellerSprite MCP verisiyle otomatik üretilmiştir.").font = NOTE

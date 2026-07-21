@@ -15,6 +15,7 @@ Test edilmiş gerçek tool davranışları için mcp_client.py'nin docstring'ine
 """
 import os
 import sys
+import time
 
 # Vercel'in Python runtime'ı bu dosyayı importlib ile dosya-yolu üzerinden
 # yüklüyor ve api/ klasörünü otomatik olarak sys.path'e eklemiyor — bu yüzden
@@ -284,8 +285,24 @@ async def analyze(req: AnalyzeRequest):
             "units": it.get("units") or it.get("amzUnit"),
             "revenue": it.get("revenue") or it.get("amzSales"),
             "bsr": it.get("bsr"), "rating": it.get("rating"), "ratings": it.get("ratings"),
-            "fulfillment": it.get("fulfillment"),
+            "fulfillment": it.get("fulfillment"), "availableDate": it.get("availableDate"),
         } for it in (competitor_items or [])]
+
+        # GÜÇLÜ YENİ MARKA (1 yıl) — gerçek veriden hesaplanan proxy:
+        # Otomatik çekilen top 10 rakip (zaten en yüksek satış hacmine göre
+        # sıralı gerçek ürünler) arasında, listeleme tarihi (availableDate,
+        # gerçek Amazon verisi) son 12 ay içinde olan DİSTİNCT marka sayısı.
+        # DÜRÜSTLÜK NOTU: Bu tüm pazarı değil, yalnızca top 10 rakibi tarar —
+        # yani küçük örneklemli bir proxy'dir, pazarın TAMAMINDA kaç yeni
+        # markanın güçlendiğinin kesin sayımı değildir. Yine de tahmin değil,
+        # gerçek ASIN-bazlı listeleme tarihi verisine dayanır.
+        one_year_ms = 365 * 24 * 3600 * 1000
+        now_ms = time.time() * 1000
+        recent_brands = {
+            it.get("brand") for it in (competitor_items or [])
+            if it.get("brand") and it.get("availableDate") and (now_ms - it["availableDate"]) <= one_year_ms
+        }
+        strong_new_brands_count = len(recent_brands)
 
         market_stats = {}
         brand_conc = {}
@@ -361,7 +378,7 @@ async def analyze(req: AnalyzeRequest):
             gross_margin=gross_margin,
             acos=main_acos,
             top_brand_share=top_brand_share,
-            strong_new_brands=None,  # brand_conc + launch history'den türetilecek (ayrı hesap)
+            strong_new_brands=strong_new_brands_count,  # top 10 rakip availableDate proxy'si (bkz. yukarıdaki not)
             net_margin=None,
         )
 

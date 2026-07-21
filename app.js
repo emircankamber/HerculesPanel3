@@ -82,16 +82,39 @@ function renderPanel(data) {
 
   // --- Ön değerlendirme kriter grid ---
   const critGrid = root.querySelector(".crit-grid");
+  const fmtCrit = (v) => v === null || v === undefined ? "n/a" : (typeof v === "number" ? (Math.abs(v) < 3 ? (v * 100).toFixed(1) + "%" : v.toFixed(2)) : v);
   (pa.criteria || []).forEach(c => {
     const div = document.createElement("div");
     div.className = "crit";
+    div.dataset.label = c.label;
+    div.dataset.direction = c.direction;
+    div.dataset.threshold = c.threshold;
     const dirLabel = c.direction === ">=" ? "≥" : "≤";
-    const fmt = (v) => v === null || v === undefined ? "n/a" : (typeof v === "number" ? (Math.abs(v) < 3 ? (v * 100).toFixed(1) + "%" : v.toFixed(2)) : v);
     div.innerHTML = `
-      <span>${c.label}<br><span class="crit-val">${fmt(c.value)} <small>(${dirLabel}${fmt(c.threshold)})</small></span></span>
+      <span>${c.label}<br><span class="crit-val">${fmtCrit(c.value)} <small>(${dirLabel}${fmtCrit(c.threshold)})</small></span></span>
       <span class="crit-flag ${c.flag === "OK" ? "ok" : c.flag === "OLUMSUZ" ? "olumsuz" : "na"}">${c.flag}</span>`;
     critGrid.appendChild(div);
   });
+
+  // --- Ön değerlendirmeyi kar analizindeki net marjla güncelle (canlı) ---
+  function updateNetMarginCriterion(marginValue) {
+    const card = [...critGrid.children].find(el => el.dataset.label === "Net Kar Marjı (kar analizi)");
+    if (!card) return;
+    const threshold = parseFloat(card.dataset.threshold);
+    const flag = marginValue >= threshold ? "OK" : "OLUMSUZ";
+    card.querySelector(".crit-val").innerHTML = `${(marginValue * 100).toFixed(1)}% <small>(≥${(threshold * 100).toFixed(1)}%)</small>`;
+    const flagEl = card.querySelector(".crit-flag");
+    flagEl.textContent = flag;
+    flagEl.className = `crit-flag ${flag === "OK" ? "ok" : "olumsuz"}`;
+
+    // Toplam olumsuz sayısını ve ön öneriyi yeniden hesapla
+    const negCount = [...critGrid.children].filter(el => el.querySelector(".crit-flag").textContent === "OLUMSUZ").length;
+    root.querySelector(".neg-count").textContent = negCount;
+    const newVerdict = negCount === 0 ? "Uygun" : (negCount < 4 ? "Sınırda" : "Elenmiş");
+    const verdictClass = { "Uygun": "uygun", "Sınırda": "sinirda", "Elenmiş": "elenmis" }[newVerdict];
+    badge.textContent = newVerdict;
+    badge.className = `verdict-badge ${verdictClass}`;
+  }
 
   // --- Pazar özeti ---
   const stats = data.market_stats || {};
@@ -152,6 +175,7 @@ function renderPanel(data) {
 
   // --- Kar analizi (canlı) ---
   const profitInputs = ["cogs", "sale", "fba", "ref", "acos", "ret", "gen"].map(k => root.querySelector(`.p-${k}`));
+  let lastProfitResult = null;  // Excel export'ta kullanılacak
   const recalcProfit = async () => {
     const [cogs, sale, fba, ref, acos, ret, gen] = profitInputs.map(i => parseFloat(i.value) || 0);
     try {
@@ -164,6 +188,7 @@ function renderPanel(data) {
         }),
       });
       const p = await res.json();
+      lastProfitResult = { ...p, inputs: { cogs, sale, fba, ref, acos, ret, gen } };
       root.querySelector(".o-adv").textContent = "$" + p.ad_cost.toFixed(2);
       root.querySelector(".o-retc").textContent = "$" + p.return_cost.toFixed(2);
       root.querySelector(".o-tot").textContent = "$" + p.total_cost.toFixed(2);
@@ -172,6 +197,7 @@ function renderPanel(data) {
       root.querySelector(".o-roi").textContent = (p.roi * 100).toFixed(1) + "%";
       const profitEl = root.querySelector(".o-profit");
       profitEl.style.color = p.unit_profit < 0 ? "var(--red)" : "var(--text-primary)";
+      if (sale > 0) updateNetMarginCriterion(p.margin);  // ön değerlendirmeyi canlı güncelle
     } catch { /* backend geçici erişilemezse sessiz geç */ }
   };
   profitInputs.forEach(i => i.addEventListener("input", recalcProfit));
@@ -311,9 +337,10 @@ function renderPanel(data) {
     const originalText = btn.textContent;
     btn.textContent = "hazırlanıyor…";
     try {
+      const exportPayload = { ...data, profit_analysis: lastProfitResult };
       const res = await fetch(`${API_BASE}/api/export/report`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(data),
+        body: JSON.stringify(exportPayload),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       await downloadBlob(res, `${data.keyword}_rapor.xlsx`);
