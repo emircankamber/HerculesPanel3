@@ -70,11 +70,37 @@ async def startup():
 
 
 # ---------------------------------------------------------------------------
+# Yardımcı: SellerSprite yanıtlarından liste çıkar (gerçek veriyle doğrulandı)
+# ---------------------------------------------------------------------------
+def _extract_list(resp: dict) -> list:
+    """
+    KRİTİK BULGU (gerçek MCP çağrılarıyla doğrulandı): market_brand_concentration,
+    market_price_distribution, market_listing_date_distribution, product_node
+    gibi tool'ların "data" alanı DOĞRUDAN BİR LİSTE — {"data": {"items": [...]}}
+    değil. Önceki kod bunu varsaymadığı için brand/price/launch grafikleri hep
+    boş geliyordu. Bu fonksiyon hem "data doğrudan liste" hem "data içinde
+    items/list anahtarlı dict" hem de üst seviye "items" durumlarını kapsar.
+    """
+    d = resp.get("data")
+    if isinstance(d, list):
+        return d
+    if isinstance(d, dict):
+        items = d.get("items")
+        if isinstance(items, list):
+            return items
+        lst = d.get("list")
+        if isinstance(lst, list):
+            return lst
+    top_items = resp.get("items")
+    return top_items if isinstance(top_items, list) else []
+
+
+# ---------------------------------------------------------------------------
 # Yardımcı: kategori node bul (market_* tool'ları için zorunlu)
 # ---------------------------------------------------------------------------
-async def resolve_category_node(seed_keyword: str, marketplace: str) -> tuple[dict | None, dict]:
+async def resolve_category_node(seed_keyword: str, marketplace: str) -> tuple[dict | None, dict, list]:
     """
-    Döndürür: (seçilen node ya da None, HAM tool yanıtı - debug için).
+    Döndürür: (seçilen node ya da None, HAM tool yanıtı - debug için, top-3 aday).
 
     KRİTİK DÜZELTME (gerçek veriyle test edilerek bulundu): SellerSprite'ın
     gerçek alan adı "productCount" DEĞİL, "products". Ayrıca "en çok ürünü
@@ -82,13 +108,21 @@ async def resolve_category_node(seed_keyword: str, marketplace: str) -> tuple[di
     çok ürünlü kategori alakasız "Water Sports" çıkıyor. Bunun yerine
     keyword'deki kelimelerin kategori adıyla örtüşme sayısına göre en
     alakalı node'u seçiyoruz, eşitlikte ürün sayısı yüksek olanı tercih.
+
+    DÜRÜSTLÜK NOTU: Bu sezgisel skorlama, "samsung water filter" gibi belirsiz
+    (kategori-özel kelime içermeyen) keyword'lerde birden fazla makul aday
+    arasında yanlış birini seçebilir — örn. "refrigerator" kelimesi olmadan
+    "Water Filters (Appliances)" ile "Replacement Water Filters (Genel)"
+    aynı skoru alabilir. Bunu sessizce çözmüyoruz: top-3 adayı da payload'a
+    ekliyoruz, panelde hangi kategorinin kullanıldığı gösterilir ve
+    gerekirse `category_override_node_id` ile manuel geçersiz kılınabilir.
     """
     result = await call_tool("product_node", {"keyword": seed_keyword, "marketplace": marketplace})
     nodes = result.get("data") or result.get("nodes") or []
     if isinstance(nodes, dict):
         nodes = nodes.get("list", [])
     if not nodes:
-        return None, result
+        return None, result, []
 
     kw_words = [w.rstrip("s") for w in seed_keyword.lower().split() if len(w) > 2]
 
@@ -96,8 +130,11 @@ async def resolve_category_node(seed_keyword: str, marketplace: str) -> tuple[di
         label = (n.get("nodeLabelPath") or "").lower()
         return sum(1 for w in kw_words if w in label)
 
-    best = max(nodes, key=lambda n: (relevance(n), n.get("products", 0)))
-    return best, result
+    scored = sorted(nodes, key=lambda n: (relevance(n), n.get("products", 0)), reverse=True)
+    best = scored[0]
+    top3 = [{"nodeIdPath": n.get("nodeIdPath"), "nodeLabelPath": n.get("nodeLabelPath"),
+             "products": n.get("products"), "relevance": relevance(n)} for n in scored[:3]]
+    return best, result, top3
 
 
 # ---------------------------------------------------------------------------
@@ -110,6 +147,7 @@ class AnalyzeRequest(BaseModel):
     keyword_list_size: int = 20
     requested_by: str | None = None
     force_refresh: bool = False
+    category_override_node_id: str | None = None  # belirsiz kategori seçimini manuel düzeltmek için
 
 
 @app.post("/api/analyze")
@@ -130,9 +168,16 @@ async def analyze(req: AnalyzeRequest):
             "order": {"field": "searches", "desc": True},
         })
 
-        # 3) Kategori node'u bul
-        node, product_node_raw = await resolve_category_node(req.keyword, req.marketplace)
-        node_id_path = node.get("nodeIdPath") if node else None
+        # 3) Kategori node'u bul (ya da manuel override kullan)
+        category_candidates = []
+        product_node_raw = None
+        if req.category_override_node_id:
+            node_id_path = req.category_override_node_id
+            category_used_label = f"(manuel override: {node_id_path})"
+        else:
+            node, product_node_raw, category_candidates = await resolve_category_node(req.keyword, req.marketplace)
+            node_id_path = node.get("nodeIdPath") if node else None
+            category_used_label = node.get("nodeLabelPath") if node else None
 
         market_stats = {}
         brand_conc = {}
@@ -166,9 +211,10 @@ async def analyze(req: AnalyzeRequest):
         main_row = next((r for r in keyword_rows if r.get("keyword", "").lower() == req.keyword.lower()), None)
         main_acos = main_row["acos"] if main_row else None
 
-        # 6) Top brand share (brand_conc'tan)
-        brand_items = brand_conc.get("data", {}).get("items", []) if isinstance(brand_conc.get("data"), dict) else brand_conc.get("items", [])
-        top_brand_share = max((b.get("share", 0) for b in brand_items), default=None) if brand_items else None
+        # 6) Top brand share (brand_conc'tan) — GERÇEK ALAN ADI: totalRevenueRatio
+        #    (brand_conc "data" doğrudan liste, "share"/"percentage" değil)
+        brand_items = _extract_list(brand_conc)
+        top_brand_share = max((b.get("totalRevenueRatio", 0) for b in brand_items), default=None) if brand_items else None
 
         # 7) Ön değerlendirme (kar analizi girdisi olmadan ilk taslak; kullanıcı kar
         #    analizine değer girince /api/profit ile net_margin güncellenir)
@@ -185,12 +231,14 @@ async def analyze(req: AnalyzeRequest):
         payload = {
             "keyword": req.keyword,
             "marketplace": req.marketplace,
+            "category_used": category_used_label,
+            "category_candidates": category_candidates,
             "keyword_data_raw": kw_data,
             "keyword_rows": keyword_rows,
             "market_stats": stats_data,
             "brand_concentration": brand_items,
-            "price_distribution": price_dist,
-            "launch_distribution": launch_dist,
+            "price_distribution": _extract_list(price_dist),
+            "launch_distribution": _extract_list(launch_dist),
             "demand_trend": demand_trend,
             "top_competitors": [],  # bkz /api/competitors — ayrı çağrı (ASIN listesi gerektirir)
             "pre_assessment": assessment,
@@ -198,6 +246,7 @@ async def analyze(req: AnalyzeRequest):
             # Veri şekli netleşince bu alan kaldırılacak.
             "_debug": {
                 "node_id_path": node_id_path,
+                "category_candidates_top3": category_candidates,
                 "product_node_raw": product_node_raw,
                 "keyword_miner_raw": kw_data,
                 "market_stats_raw": market_stats,

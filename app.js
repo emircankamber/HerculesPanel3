@@ -26,6 +26,7 @@ $("#search-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const keyword = $("#kw-input").value.trim();
   const marketplace = $("#market-input").value;
+  const categoryOverride = $("#category-override-input").value.trim();
   if (!keyword) return;
 
   const btn = $("#search-btn");
@@ -38,7 +39,10 @@ $("#search-form").addEventListener("submit", async (e) => {
     const res = await fetch(`${API_BASE}/api/analyze`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ keyword, marketplace }),
+      body: JSON.stringify({
+        keyword, marketplace,
+        ...(categoryOverride ? { category_override_node_id: categoryOverride } : {}),
+      }),
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
@@ -65,7 +69,7 @@ function renderPanel(data) {
   const root = tpl.querySelector(".panel");
 
   root.querySelector(".kw-title").textContent = data.keyword;
-  root.querySelector(".kw-sub").textContent = `${data.marketplace} · canlı SellerSprite MCP verisi`;
+  root.querySelector(".kw-sub").textContent = `${data.marketplace} · canlı SellerSprite MCP verisi${data.category_used ? " · Kategori: " + data.category_used : ""}`;
 
   // --- Ön öneri rozeti ---
   const pa = data.pre_assessment || {};
@@ -107,7 +111,13 @@ function renderPanel(data) {
     div.className = "stat-card";
     let display = value;
     if (unit === "$") display = "$" + Number(value).toFixed(2);
-    if (unit === "%mul100") display = (Number(value) * 100).toFixed(1) + "%";
+    if (unit === "%mul100") {
+      const v = Number(value);
+      // GÜVENLİK: SellerSprite bazı alanları zaten yüzde (örn. 27.78) bazılarını
+      // oran (0.2778) olarak dönebiliyor. Büyüklüğe göre otomatik algıla —
+      // >1 ise zaten yüzdedir, tekrar 100'le çarpma (daha önce "%2778.0" hatası buradan geliyordu).
+      display = (v > 1 ? v : v * 100).toFixed(1) + "%";
+    }
     div.innerHTML = `<div class="stat-label">${label}</div><div class="stat-value">${display}</div>`;
     statGrid.appendChild(div);
   });
@@ -115,8 +125,8 @@ function renderPanel(data) {
   // --- Grafikler ---
   requestAnimationFrame(() => {
     drawBrandChart(root.querySelector(".chart-brand"), data.brand_concentration || []);
-    drawPriceChart(root.querySelector(".chart-price"), data.price_distribution);
-    drawLaunchChart(root.querySelector(".chart-launch"), data.launch_distribution);
+    drawPriceChart(root.querySelector(".chart-price"), data.price_distribution || []);
+    drawLaunchChart(root.querySelector(".chart-launch"), data.launch_distribution || []);
     drawTrendChart(root.querySelector(".chart-trend"), data.demand_trend);
   });
 
@@ -305,9 +315,13 @@ function baseOptions(extra = {}) {
 }
 
 function drawBrandChart(canvas, items) {
-  if (!items.length) return;
+  if (!items || !items.length) return;
   const labels = items.map(b => b.brand ?? b.name ?? "?");
-  const values = items.map(b => (b.share ?? b.percentage ?? 0) * (b.share > 1 ? 1 : 100));
+  // GERÇEK ALAN ADI: totalRevenueRatio (gerçek MCP çağrısıyla doğrulandı) — share/percentage yok
+  const values = items.map(b => {
+    const raw = b.totalRevenueRatio ?? b.share ?? b.percentage ?? 0;
+    return raw > 1 ? raw : raw * 100;
+  });
   new Chart(canvas, {
     type: "doughnut",
     data: { labels, datasets: [{ data: values, backgroundColor: CHART_COLORS, borderColor: "#1B1F26", borderWidth: 2 }] },
@@ -316,22 +330,21 @@ function drawBrandChart(canvas, items) {
   });
 }
 
-function drawPriceChart(canvas, dist) {
-  const items = dist?.data?.items || dist?.items || [];
-  if (!items.length) return;
+function drawPriceChart(canvas, items) {
+  // Backend artık düz liste gönderiyor (data.data?.items sarmalı YOK — gerçek yanıt "data" doğrudan liste)
+  if (!items || !items.length) return;
   new Chart(canvas, {
     type: "bar",
-    data: { labels: items.map(i => i.range ?? i.label), datasets: [{ data: items.map(i => (i.ratio ?? i.percentage ?? 0) * 100), backgroundColor: "#4C8DFF", borderRadius: 4 }] },
+    data: { labels: items.map(i => i.label ?? i.range), datasets: [{ data: items.map(i => (i.unitsRatio ?? i.ratio ?? i.percentage ?? 0) * 100), backgroundColor: "#4C8DFF", borderRadius: 4 }] },
     options: baseOptions({ scales: { y: { ticks: { callback: v => v + "%", color: "#9AA3B2" }, grid: { color: "#2C323D" } }, x: { grid: { display: false }, ticks: { color: "#9AA3B2" } } } }),
   });
 }
 
-function drawLaunchChart(canvas, dist) {
-  const items = dist?.data?.items || dist?.items || [];
-  if (!items.length) return;
+function drawLaunchChart(canvas, items) {
+  if (!items || !items.length) return;
   new Chart(canvas, {
     type: "bar",
-    data: { labels: items.map(i => i.range ?? i.label), datasets: [{ data: items.map(i => (i.ratio ?? i.percentage ?? 0) * 100), backgroundColor: "#E8A33D", borderRadius: 4 }] },
+    data: { labels: items.map(i => i.label ?? i.range), datasets: [{ data: items.map(i => (i.unitsRatio ?? i.ratio ?? i.percentage ?? 0) * 100), backgroundColor: "#E8A33D", borderRadius: 4 }] },
     options: baseOptions({ scales: { y: { ticks: { callback: v => v + "%", color: "#9AA3B2" }, grid: { color: "#2C323D" } }, x: { grid: { display: false }, ticks: { color: "#9AA3B2" } } } }),
   });
 }
