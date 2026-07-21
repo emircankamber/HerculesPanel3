@@ -98,8 +98,41 @@ def _extract_list(resp: dict) -> list:
 # ---------------------------------------------------------------------------
 # Yardımcı: kategori node bul (market_* tool'ları için zorunlu)
 # ---------------------------------------------------------------------------
+async def resolve_category_from_competitors(seed_keyword: str, marketplace: str) -> tuple[dict | None, dict]:
+    """
+    BİRİNCİL YÖNTEM (gerçek veriyle doğrulandı — tahmin değil, gerçek ürün verisi):
+    keyword'den kategori TAHMİN ETMEK yerine, o keyword için gerçekten satan
+    üst rakip ürünlerin KENDİ kategorisini kullanıyoruz. matchType=3 (tam
+    başlık eşleşme) ile competitor_lookup çağrılır; dönen ürünlerin
+    nodeIdPath'i arasında en sık geçen (mode) alınır.
+
+    Test kanıtı: "samsung water filter" için matchType=3 ile 3 farklı gerçek
+    rakip ürün (Waterspecialist, Waterdrop, ICEPURE) ÜÇÜ DE aynı doğru
+    kategoriyi (Appliances:...:Water Filters) döndürdü — department-bazlı
+    tahmin yönteminin yanlış bulduğu (Tools & Home Improvement) kategori
+    değil. Bu yöntem, keyword_miner'ın "departments" alanının bazen gerçek
+    browse-node üst segmentini (örn. "Appliances") içermemesi sorununu da
+    yapısal olarak çözer — artık o alana hiç ihtiyaç yok.
+    """
+    result = await call_tool("competitor_lookup", {
+        "keyword": seed_keyword, "marketplace": marketplace,
+        "matchType": 3, "size": 5,
+        "order": {"field": "total_units", "desc": True},
+    })
+    items = result.get("data", {}).get("items", []) if isinstance(result.get("data"), dict) else []
+    paths = [it.get("nodeIdPath") for it in items if it.get("nodeIdPath")]
+    if not paths:
+        return None, result
+    from collections import Counter
+    most_common_path, _ = Counter(paths).most_common(1)[0]
+    matching_item = next(it for it in items if it.get("nodeIdPath") == most_common_path)
+    return {"nodeIdPath": most_common_path, "nodeLabelPath": matching_item.get("nodeLabelPath")}, result
+
+
 async def resolve_category_node(seed_keyword: str, marketplace: str, preferred_departments: list[str] = None) -> tuple[dict | None, dict, list]:
     """
+    YEDEK YÖNTEM — yalnızca resolve_category_from_competitors hiçbir gerçek
+    rakip ürün bulamazsa (nadir/çok yeni/niş keyword'ler) devreye girer.
     Döndürür: (seçilen node ya da None, HAM tool yanıtı - debug için, top-3 aday).
 
     KRİTİK DÜZELTME (gerçek veriyle test edilerek bulundu): SellerSprite'ın
@@ -120,9 +153,11 @@ async def resolve_category_node(seed_keyword: str, marketplace: str, preferred_d
     eşleştirmeden çok daha güvenilir çünkü Amazon'un kendi gerçek arama
     sonucu sınıflandırmasına dayanıyor.
 
-    DÜRÜSTLÜK NOTU: preferred_departments boşsa ya da hiçbir aday eşleşmezse
-    tüm adaylara geri dönülür (department filtresi hiçbir şeyi silmez, sadece
-    önceliklendirir). Top-3 aday panelde gösterilir, `category_override_node_id`
+    DÜRÜSTLÜK NOTU: preferred_departments'ın da (samsung water filter örneği
+    ile görüldüğü gibi) her zaman doğru üst segmenti ("Appliances") içermeme
+    riski var — bu yüzden BİRİNCİL yöntem artık gerçek rakip ürün verisi
+    (resolve_category_from_competitors). Bu fonksiyon yalnızca o hiç sonuç
+    bulamazsa çalışır. Top-3 aday panelde gösterilir, `category_override_node_id`
     ile her zaman manuel geçersiz kılınabilir.
     """
     result = await call_tool("product_node", {"keyword": seed_keyword, "marketplace": marketplace})
@@ -195,24 +230,29 @@ async def analyze(req: AnalyzeRequest):
         })
 
         # 3) Kategori node'u bul (ya da manuel override kullan)
-        #    Amazon'un GERÇEK department sınıflandırmasını (exact_kw_data'dan) öncelik
-        #    filtresi olarak kullanıyoruz — metin eşleştirmeden çok daha güvenilir
-        #    (bkz. resolve_category_node docstring — "mini magnetic tiles" örneği).
-        exact_items_for_dept = exact_kw_data.get("data", {}).get("items", []) if isinstance(exact_kw_data.get("data"), dict) else []
-        preferred_departments = []
-        if exact_items_for_dept:
-            preferred_departments = [d.get("label") for d in exact_items_for_dept[0].get("departments", []) if d.get("label")]
-
+        #    BİRİNCİL YÖNTEM: gerçek rakip ürünlerin kendi kategorisi (tahmin değil).
+        #    Yalnızca bu hiç sonuç bulamazsa department-filtreli tahmin yöntemine düşülür.
         category_candidates = []
         product_node_raw = None
+        competitor_category_raw = None
+        preferred_departments = []
         if req.category_override_node_id:
             node_id_path = req.category_override_node_id
             category_used_label = f"(manuel override: {node_id_path})"
         else:
-            node, product_node_raw, category_candidates = await resolve_category_node(
-                req.keyword, req.marketplace, preferred_departments=preferred_departments)
-            node_id_path = node.get("nodeIdPath") if node else None
-            category_used_label = node.get("nodeLabelPath") if node else None
+            node_from_competitors, competitor_category_raw = await resolve_category_from_competitors(req.keyword, req.marketplace)
+            if node_from_competitors:
+                node_id_path = node_from_competitors["nodeIdPath"]
+                category_used_label = f"{node_from_competitors['nodeLabelPath']} (gerçek rakip ürün verisinden)"
+            else:
+                # Yedek: gerçek rakip bulunamadı, department-filtreli tahmine düş
+                exact_items_for_dept = exact_kw_data.get("data", {}).get("items", []) if isinstance(exact_kw_data.get("data"), dict) else []
+                if exact_items_for_dept:
+                    preferred_departments = [d.get("label") for d in exact_items_for_dept[0].get("departments", []) if d.get("label")]
+                node, product_node_raw, category_candidates = await resolve_category_node(
+                    req.keyword, req.marketplace, preferred_departments=preferred_departments)
+                node_id_path = node.get("nodeIdPath") if node else None
+                category_used_label = (node.get("nodeLabelPath") + " (tahmin — yedek yöntem)") if node else None
 
         market_stats = {}
         brand_conc = {}
@@ -312,6 +352,7 @@ async def analyze(req: AnalyzeRequest):
                 "node_id_path": node_id_path,
                 "category_candidates_top3": category_candidates,
                 "preferred_departments_used": preferred_departments,
+                "competitor_category_raw": competitor_category_raw,
                 "product_node_raw": product_node_raw,
                 "keyword_miner_raw": kw_data,
                 "market_stats_raw": market_stats,
