@@ -104,33 +104,48 @@ async def resolve_category_from_competitors(seed_keyword: str, marketplace: str)
     """
     BİRİNCİL YÖNTEM (gerçek veriyle doğrulandı — tahmin değil, gerçek ürün verisi):
     keyword'den kategori TAHMİN ETMEK yerine, o keyword için gerçekten satan
-    üst rakip ürünlerin KENDİ kategorisini kullanıyoruz. matchType=3 (tam
-    başlık eşleşme) ile competitor_lookup çağrılır; dönen ürünlerin
-    nodeIdPath'i arasında en sık geçen (mode) alınır.
+    üst rakip ürünlerin KENDİ kategorisini kullanıyoruz.
 
-    Test kanıtı: "samsung water filter" için matchType=3 ile 3 farklı gerçek
-    rakip ürün (Waterspecialist, Waterdrop, ICEPURE) ÜÇÜ DE aynı doğru
-    kategoriyi (Appliances:...:Water Filters) döndürdü — department-bazlı
-    tahmin yönteminin yanlış bulduğu (Tools & Home Improvement) kategori
-    değil. Bu yöntem, keyword_miner'ın "departments" alanının bazen gerçek
-    browse-node üst segmentini (örn. "Appliances") içermemesi sorununu da
-    yapısal olarak çözer — artık o alana hiç ihtiyaç yok.
+    KRİTİK DÜZELTME (gerçek veriyle bulundu — "samsung water filter for
+    refrigerators" örneği): matchType=3 (tam başlık eşleşme) UZUN/spesifik
+    keyword'lerde SIFIR sonuç dönebiliyor çünkü hiçbir gerçek ürün başlığı o
+    tam kelime dizisini birebir içermiyor (test: bu keyword'de total=0).
+    Bu durumda önceden direkt tahmin yöntemine düşülüyordu — YANLIŞTI, çünkü
+    matchType=1 (kelime grubu eşleşme) ile aynı keyword'de 5 GERÇEK sonuç
+    geldi, hepsi doğru kategoride (Appliances:...:Water Filters). Bu yüzden
+    artık İKİ deneme yapılıyor: önce matchType=3 (en kesin), boş dönerse
+    matchType=1 (hâlâ gerçek ürün verisi, biraz daha esnek). Yalnızca İKİSİ
+    DE boş dönerse (çok nadir/niş keyword) tahmin yöntemine düşülür.
+
+    Test kanıtı (kısa keyword): "samsung water filter" için matchType=3 ile
+    3 farklı gerçek rakip (Waterspecialist, Waterdrop, ICEPURE) ÜÇÜ DE aynı
+    doğru kategoriyi döndürdü.
 
     NOT: size=10 yapıldı çünkü bu ÇAĞRININ dönen item listesi aynı zamanda
     "Top Rakipler" panel bölümü için de kullanılıyor (analyze() içinde) —
-    ayrı bir çağrı yapıp MCP kotasını iki katına çıkarmamak için tek
-    çağrıdan hem kategori hem rakip listesi elde ediliyor.
+    ayrı bir çağrı yapıp MCP kotasını artırmamak için tek çağrıdan hem
+    kategori hem rakip listesi elde ediliyor.
     """
-    result = await call_tool("competitor_lookup", {
-        "keyword": seed_keyword, "marketplace": marketplace,
-        "matchType": 3, "size": 10,
-        "order": {"field": "total_units", "desc": True},
-    })
-    items = result.get("data", {}).get("items", []) if isinstance(result.get("data"), dict) else []
+    from collections import Counter
+
+    async def _try(match_type: int):
+        result = await call_tool("competitor_lookup", {
+            "keyword": seed_keyword, "marketplace": marketplace,
+            "matchType": match_type, "size": 10,
+            "order": {"field": "total_units", "desc": True},
+        })
+        items = result.get("data", {}).get("items", []) if isinstance(result.get("data"), dict) else []
+        return items, result
+
+    # 1) Önce en kesin: tam eşleşme
+    items, result = await _try(3)
+    if not items:
+        # 2) Boşsa: kelime grubu eşleşme (hâlâ gerçek ürün verisi, tahmin değil)
+        items, result = await _try(1)
+
     paths = [it.get("nodeIdPath") for it in items if it.get("nodeIdPath")]
     if not paths:
         return None, result, items
-    from collections import Counter
     most_common_path, _ = Counter(paths).most_common(1)[0]
     matching_item = next(it for it in items if it.get("nodeIdPath") == most_common_path)
     return {"nodeIdPath": most_common_path, "nodeLabelPath": matching_item.get("nodeLabelPath")}, result, items
