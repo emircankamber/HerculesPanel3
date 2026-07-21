@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import asyncio
 from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
+from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -49,6 +50,7 @@ try:
 except ImportError:
     PORTFOLIO_AVAILABLE = False
 import database as db
+import excel_export
 import supplier_scoring as sup
 import launch_control as lc
 
@@ -98,7 +100,7 @@ def _extract_list(resp: dict) -> list:
 # ---------------------------------------------------------------------------
 # Yardımcı: kategori node bul (market_* tool'ları için zorunlu)
 # ---------------------------------------------------------------------------
-async def resolve_category_from_competitors(seed_keyword: str, marketplace: str) -> tuple[dict | None, dict]:
+async def resolve_category_from_competitors(seed_keyword: str, marketplace: str) -> tuple[dict | None, dict, list]:
     """
     BİRİNCİL YÖNTEM (gerçek veriyle doğrulandı — tahmin değil, gerçek ürün verisi):
     keyword'den kategori TAHMİN ETMEK yerine, o keyword için gerçekten satan
@@ -113,20 +115,25 @@ async def resolve_category_from_competitors(seed_keyword: str, marketplace: str)
     değil. Bu yöntem, keyword_miner'ın "departments" alanının bazen gerçek
     browse-node üst segmentini (örn. "Appliances") içermemesi sorununu da
     yapısal olarak çözer — artık o alana hiç ihtiyaç yok.
+
+    NOT: size=10 yapıldı çünkü bu ÇAĞRININ dönen item listesi aynı zamanda
+    "Top Rakipler" panel bölümü için de kullanılıyor (analyze() içinde) —
+    ayrı bir çağrı yapıp MCP kotasını iki katına çıkarmamak için tek
+    çağrıdan hem kategori hem rakip listesi elde ediliyor.
     """
     result = await call_tool("competitor_lookup", {
         "keyword": seed_keyword, "marketplace": marketplace,
-        "matchType": 3, "size": 5,
+        "matchType": 3, "size": 10,
         "order": {"field": "total_units", "desc": True},
     })
     items = result.get("data", {}).get("items", []) if isinstance(result.get("data"), dict) else []
     paths = [it.get("nodeIdPath") for it in items if it.get("nodeIdPath")]
     if not paths:
-        return None, result
+        return None, result, items
     from collections import Counter
     most_common_path, _ = Counter(paths).most_common(1)[0]
     matching_item = next(it for it in items if it.get("nodeIdPath") == most_common_path)
-    return {"nodeIdPath": most_common_path, "nodeLabelPath": matching_item.get("nodeLabelPath")}, result
+    return {"nodeIdPath": most_common_path, "nodeLabelPath": matching_item.get("nodeLabelPath")}, result, items
 
 
 async def resolve_category_node(seed_keyword: str, marketplace: str, preferred_departments: list[str] = None) -> tuple[dict | None, dict, list]:
@@ -232,27 +239,38 @@ async def analyze(req: AnalyzeRequest):
         # 3) Kategori node'u bul (ya da manuel override kullan)
         #    BİRİNCİL YÖNTEM: gerçek rakip ürünlerin kendi kategorisi (tahmin değil).
         #    Yalnızca bu hiç sonuç bulamazsa department-filtreli tahmin yöntemine düşülür.
+        #    Bu ÇAĞRI aynı zamanda "Top Rakipler" panel bölümünü de otomatik doldurur
+        #    (ayrı bir MCP çağrısı yapmadan — kota tasarrufu).
         category_candidates = []
         product_node_raw = None
-        competitor_category_raw = None
         preferred_departments = []
+        node_from_competitors, competitor_category_raw, competitor_items = await resolve_category_from_competitors(req.keyword, req.marketplace)
+
         if req.category_override_node_id:
             node_id_path = req.category_override_node_id
             category_used_label = f"(manuel override: {node_id_path})"
+        elif node_from_competitors:
+            node_id_path = node_from_competitors["nodeIdPath"]
+            category_used_label = f"{node_from_competitors['nodeLabelPath']} (gerçek rakip ürün verisinden)"
         else:
-            node_from_competitors, competitor_category_raw = await resolve_category_from_competitors(req.keyword, req.marketplace)
-            if node_from_competitors:
-                node_id_path = node_from_competitors["nodeIdPath"]
-                category_used_label = f"{node_from_competitors['nodeLabelPath']} (gerçek rakip ürün verisinden)"
-            else:
-                # Yedek: gerçek rakip bulunamadı, department-filtreli tahmine düş
-                exact_items_for_dept = exact_kw_data.get("data", {}).get("items", []) if isinstance(exact_kw_data.get("data"), dict) else []
-                if exact_items_for_dept:
-                    preferred_departments = [d.get("label") for d in exact_items_for_dept[0].get("departments", []) if d.get("label")]
-                node, product_node_raw, category_candidates = await resolve_category_node(
-                    req.keyword, req.marketplace, preferred_departments=preferred_departments)
-                node_id_path = node.get("nodeIdPath") if node else None
-                category_used_label = (node.get("nodeLabelPath") + " (tahmin — yedek yöntem)") if node else None
+            # Yedek: gerçek rakip bulunamadı, department-filtreli tahmine düş
+            exact_items_for_dept = exact_kw_data.get("data", {}).get("items", []) if isinstance(exact_kw_data.get("data"), dict) else []
+            if exact_items_for_dept:
+                preferred_departments = [d.get("label") for d in exact_items_for_dept[0].get("departments", []) if d.get("label")]
+            node, product_node_raw, category_candidates = await resolve_category_node(
+                req.keyword, req.marketplace, preferred_departments=preferred_departments)
+            node_id_path = node.get("nodeIdPath") if node else None
+            category_used_label = (node.get("nodeLabelPath") + " (tahmin — yedek yöntem)") if node else None
+
+        # Top Rakipler tablosu için sadeleştirilmiş alanlar (panelde gösterilecek)
+        top_competitors = [{
+            "asin": it.get("asin"), "brand": it.get("brand"), "title": it.get("title"),
+            "price": it.get("price") or it.get("averagePrice"),
+            "units": it.get("units") or it.get("amzUnit"),
+            "revenue": it.get("revenue") or it.get("amzSales"),
+            "bsr": it.get("bsr"), "rating": it.get("rating"), "ratings": it.get("ratings"),
+            "fulfillment": it.get("fulfillment"),
+        } for it in (competitor_items or [])]
 
         market_stats = {}
         brand_conc = {}
@@ -344,7 +362,7 @@ async def analyze(req: AnalyzeRequest):
             "price_distribution": _extract_list(price_dist),
             "launch_distribution": _extract_list(launch_dist),
             "demand_trend": demand_trend,
-            "top_competitors": [],  # bkz /api/competitors — ayrı çağrı (ASIN listesi gerektirir)
+            "top_competitors": top_competitors,  # otomatik çekildi (competitor_lookup, matchType=3)
             "pre_assessment": assessment,
             # GEÇİCİ DEBUG ALANI — gerçek MCP yanıt şeklini görmek için.
             # Veri şekli netleşince bu alan kaldırılacak.
@@ -430,9 +448,59 @@ async def save_decision(req: DecisionRequest):
     return {"ok": True}
 
 
+@app.get("/api/decisions")
+async def get_decisions():
+    """Tüm kararlandırılmış keyword'leri Uygun/Sınırda/Elenmiş olarak gruplu döner."""
+    return await db.list_decisions_grouped()
+
+
 @app.get("/api/recent")
 async def recent(limit: int = Query(50, le=200)):
     return await db.list_recent(limit)
+
+
+def _safe_filename(keyword: str, suffix: str) -> str:
+    safe = "".join(c if c.isalnum() or c in (" ", "-", "_") else "_" for c in keyword).strip().replace(" ", "_")
+    return f"{safe or 'analiz'}_{suffix}.xlsx"
+
+
+@app.post("/api/export/report")
+async def export_report(payload: dict):
+    """
+    Panelde gösterilen tam analiz verisini (/api/analyze'ın döndürdüğü `data`
+    objesinin aynısı — frontend zaten elinde tutuyor, tekrar MCP çağırmaya
+    gerek yok) tek sayfalık kapsamlı bir Excel raporuna çevirir.
+    """
+    try:
+        xlsx_bytes = excel_export.build_report_xlsx(payload)
+    except Exception as e:
+        raise HTTPException(500, f"Excel oluşturulamadı: {e}")
+    filename = _safe_filename(payload.get("keyword", "analiz"), "rapor")
+    return Response(
+        content=xlsx_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+class ExportKeywordsRequest(BaseModel):
+    keyword: str
+    keyword_rows: list[dict]
+
+
+@app.post("/api/export/keywords")
+async def export_keywords(req: ExportKeywordsRequest):
+    """Sadece Relevant Keywords tablosunu ayrı bir Excel dosyası olarak üretir."""
+    try:
+        xlsx_bytes = excel_export.build_keywords_xlsx(req.keyword_rows, req.keyword)
+    except Exception as e:
+        raise HTTPException(500, f"Excel oluşturulamadı: {e}")
+    filename = _safe_filename(req.keyword, "keywords")
+    return Response(
+        content=xlsx_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.get("/api/thresholds")

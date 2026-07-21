@@ -16,6 +16,7 @@ $$(".nav-btn").forEach(btn => {
     $$(".view").forEach(v => v.classList.remove("active"));
     $(`#view-${btn.dataset.view}`).classList.add("active");
     if (btn.dataset.view === "history") loadHistory();
+    if (btn.dataset.view === "decisions") loadDecisions();
   });
 });
 
@@ -176,8 +177,37 @@ function renderPanel(data) {
   profitInputs.forEach(i => i.addEventListener("input", recalcProfit));
   recalcProfit();
 
-  // --- Top rakipler (ASIN gir, gerçek satış/ciro çek) ---
+  // --- Top rakipler ---
   let competitorRows = [];  // signal hesaplamasında kullanılacak
+
+  function renderCompetitorRows(rows) {
+    const tbody = root.querySelector(".comp-tbody");
+    tbody.innerHTML = "";
+    if (!rows.length) {
+      tbody.innerHTML = "<tr><td colspan='8'>Otomatik rakip bulunamadı — ASIN'leri manuel gir.</td></tr>";
+      return;
+    }
+    rows.forEach(r => {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${r.asin ?? ""}</td><td>${r.brand ?? ""}</td><td>$${(r.price ?? 0).toFixed(2)}</td>
+        <td>${fmtNum(r.units)}</td><td>$${fmtNum(Math.round(r.revenue || 0))}</td>
+        <td>${r.bsr ?? "n/a"}</td><td>${r.rating ?? "n/a"}</td><td>${fmtNum(r.reviews ?? r.ratings)}</td>`;
+      tbody.appendChild(tr);
+    });
+  }
+
+  // Otomatik gelen rakipleri (backend'in competitor_lookup çağrısından) hemen göster
+  if (data.top_competitors && data.top_competitors.length) {
+    competitorRows = data.top_competitors.map(i => ({
+      asin: i.asin, brand: i.brand, price: i.price,
+      units: i.units ?? 0, revenue: i.revenue ?? 0,
+      bsr: i.bsr, rating: i.rating, reviews: i.ratings,
+    }));
+    renderCompetitorRows(competitorRows);
+  } else {
+    root.querySelector(".comp-tbody").innerHTML = "<tr><td colspan='8'>Otomatik rakip bulunamadı — ASIN'leri manuel gir.</td></tr>";
+  }
+
   root.querySelector(".competitor-fetch-btn").addEventListener("click", async () => {
     const asinsRaw = root.querySelector(".competitor-asins").value.trim();
     if (!asinsRaw) return;
@@ -196,15 +226,7 @@ function renderPanel(data) {
         units: i.units ?? i.amzUnit ?? 0, revenue: i.revenue ?? i.amzSales ?? 0,
         bsr: i.bsr, rating: i.rating, reviews: i.ratings,
       }));
-      tbody.innerHTML = "";
-      competitorRows.forEach(r => {
-        const tr = document.createElement("tr");
-        tr.innerHTML = `<td>${r.asin}</td><td>${r.brand ?? ""}</td><td>$${(r.price ?? 0).toFixed(2)}</td>
-          <td>${fmtNum(r.units)}</td><td>$${fmtNum(Math.round(r.revenue))}</td>
-          <td>${r.bsr ?? "n/a"}</td><td>${r.rating ?? "n/a"}</td><td>${fmtNum(r.reviews)}</td>`;
-        tbody.appendChild(tr);
-      });
-      if (!items.length) tbody.innerHTML = "<tr><td colspan='8'>Sonuç bulunamadı — ASIN'leri kontrol et.</td></tr>";
+      renderCompetitorRows(competitorRows);
     } catch (err) {
       tbody.innerHTML = `<tr><td colspan='8'>Hata: ${err.message}</td></tr>`;
     }
@@ -282,6 +304,48 @@ function renderPanel(data) {
     root.querySelector(".decision-saved-msg").textContent = "✓ kaydedildi";
   });
 
+  // --- Excel export: tam rapor ---
+  root.querySelector(".export-report-btn").addEventListener("click", async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    const originalText = btn.textContent;
+    btn.textContent = "hazırlanıyor…";
+    try {
+      const res = await fetch(`${API_BASE}/api/export/report`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      await downloadBlob(res, `${data.keyword}_rapor.xlsx`);
+    } catch (err) {
+      alert(`Excel oluşturulamadı: ${err.message}`);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = originalText;
+    }
+  });
+
+  // --- Excel export: sadece keyword tablosu ---
+  root.querySelector(".export-keywords-btn").addEventListener("click", async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    const originalText = btn.textContent;
+    btn.textContent = "hazırlanıyor…";
+    try {
+      const res = await fetch(`${API_BASE}/api/export/keywords`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ keyword: data.keyword, keyword_rows: data.keyword_rows || [] }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      await downloadBlob(res, `${data.keyword}_keywords.xlsx`);
+    } catch (err) {
+      alert(`Excel oluşturulamadı: ${err.message}`);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = originalText;
+    }
+  });
+
   const container = $("#result-container");
   container.innerHTML = "";
   container.appendChild(tpl);
@@ -291,6 +355,18 @@ function renderPanel(data) {
   if (debugEl) {
     debugEl.textContent = JSON.stringify(data._debug ?? { not_found: "..._debug alanı yok, backend güncel değil" }, null, 2);
   }
+}
+
+async function downloadBlob(response, filename) {
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename.replace(/[^a-zA-Z0-9 _\-\.]/g, "_");
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
 
 function fmtNum(v) {
@@ -496,5 +572,54 @@ function renderSignalResults(root, result) {
     compBanner.textContent = `⚠ Uygunluk vetosu aktif — eksik belge: ${result.compliance.missing_certs.join(", ")}. Danışman onayı gerekli (CEO override yok).`;
   } else {
     compBanner.style.display = "none";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Pazar Kararları (Kanban görünümü)
+// ---------------------------------------------------------------------------
+const DECISION_COLS = { "Uygun": "uygun", "Sınırda": "sinirda", "Elenmiş": "elenmis" };
+
+async function loadDecisions() {
+  const summary = $("#decisions-summary");
+  summary.textContent = "yükleniyor…";
+  try {
+    const res = await fetch(`${API_BASE}/api/decisions`);
+    const grouped = await res.json();
+
+    let total = 0;
+    for (const [decision, slug] of Object.entries(DECISION_COLS)) {
+      const items = grouped[decision] || [];
+      total += items.length;
+      $(`#count-${slug}`).textContent = items.length;
+      const container = $(`#cards-${slug}`);
+      container.innerHTML = "";
+      if (!items.length) {
+        container.innerHTML = `<div class="decision-empty">Henüz karar yok</div>`;
+        continue;
+      }
+      // en yeni önce (backend zaten decided_at DESC döndürüyor)
+      items.forEach(item => {
+        const card = document.createElement("div");
+        card.className = "decision-card";
+        const date = new Date(item.decided_at * 1000).toLocaleDateString("tr-TR");
+        card.innerHTML = `
+          <div class="decision-card-kw">${item.keyword}</div>
+          <div class="decision-card-meta"><span>${item.marketplace}</span><span>${date}</span></div>
+          ${item.note ? `<div class="decision-card-note">"${item.note}"</div>` : ""}
+        `;
+        card.addEventListener("click", () => {
+          // Sorgu sayfasına dön, keyword'ü doldur, otomatik tekrar analiz et
+          $$(".nav-btn")[0].click();
+          $("#kw-input").value = item.keyword;
+          $("#market-input").value = item.marketplace;
+          $("#search-form").requestSubmit();
+        });
+        container.appendChild(card);
+      });
+    }
+    summary.textContent = `toplam ${total} kararlandırılmış keyword`;
+  } catch (err) {
+    summary.textContent = `Hata: ${err.message}`;
   }
 }

@@ -13,6 +13,7 @@
   <div class="brand">PL Pazar Paneli</div>
   <nav class="topnav">
     <button data-view="search" class="nav-btn active">Sorgu</button>
+    <button data-view="decisions" class="nav-btn">Kararlar</button>
     <button data-view="history" class="nav-btn">Geçmiş</button>
   </nav>
 </header>
@@ -37,6 +38,36 @@
     <div id="result-container"></div>
   </section>
 
+  <section id="view-decisions" class="view">
+    <div class="decisions-header">
+      <h2>Pazar Kararları</h2>
+      <div class="decisions-summary" id="decisions-summary"></div>
+    </div>
+    <div class="decisions-board">
+      <div class="decision-column decision-column-uygun">
+        <div class="decision-col-header">
+          <span class="decision-dot dot-uygun"></span> Uygun
+          <span class="decision-count" id="count-uygun">0</span>
+        </div>
+        <div class="decision-cards" id="cards-uygun"></div>
+      </div>
+      <div class="decision-column decision-column-sinirda">
+        <div class="decision-col-header">
+          <span class="decision-dot dot-sinirda"></span> Sınırda
+          <span class="decision-count" id="count-sinirda">0</span>
+        </div>
+        <div class="decision-cards" id="cards-sinirda"></div>
+      </div>
+      <div class="decision-column decision-column-elenmis">
+        <div class="decision-col-header">
+          <span class="decision-dot dot-elenmis"></span> Elenmiş
+          <span class="decision-count" id="count-elenmis">0</span>
+        </div>
+        <div class="decision-cards" id="cards-elenmis"></div>
+      </div>
+    </div>
+  </section>
+
   <section id="view-history" class="view">
     <h2>Son Sorgulanan Keyword'ler</h2>
     <div id="history-list"></div>
@@ -51,9 +82,15 @@
         <div class="kw-title"></div>
         <div class="kw-sub"></div>
       </div>
-      <div class="verdict-block">
-        <div class="verdict-label">ön öneri</div>
-        <span class="verdict-badge"></span>
+      <div class="panel-head-right">
+        <div class="export-buttons">
+          <button class="export-report-btn" title="Tam raporu Excel olarak indir">📊 Rapor İndir</button>
+          <button class="export-keywords-btn" title="Sadece keyword tablosunu Excel olarak indir">📋 Keyword Tablosu İndir</button>
+        </div>
+        <div class="verdict-block">
+          <div class="verdict-label">ön öneri</div>
+          <span class="verdict-badge"></span>
+        </div>
       </div>
     </div>
 
@@ -94,10 +131,10 @@
       </table>
     </div>
 
-    <div class="section-label">top rakipler <small>(ASIN gir, gerçek satış/ciro/rating çekilir)</small></div>
+    <div class="section-label">top rakipler <small>(otomatik çekildi — istersen aşağıya manuel ASIN girip yeniden çekebilirsin)</small></div>
     <div class="competitor-fetch-row">
       <input type="text" class="competitor-asins" placeholder="ASIN'leri virgülle ayır (örn. B071NFVVNG, B09HR7L313)">
-      <button class="competitor-fetch-btn">Rakip Verisi Çek</button>
+      <button class="competitor-fetch-btn">Manuel ASIN ile Yeniden Çek</button>
     </div>
     <div class="table-wrap" style="margin-top:8px;">
       <table class="comp-table">

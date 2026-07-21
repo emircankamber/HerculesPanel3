@@ -150,6 +150,37 @@ async def save_decision(keyword: str, marketplace: str, decision: str, note: str
         await db.commit()
 
 
+async def list_decisions_grouped():
+    """
+    Her (keyword, marketplace) çifti için EN SON kararı alır (bir keyword birden
+    fazla kez kararlandırılmış olabilir — en güncel geçerli sayılır), sonra
+    Uygun/Sınırda/Elenmiş olarak gruplar. Panelin "Pazar Kararları" görünümü
+    için kullanılır.
+
+    NOT: decided_at saniye çözünürlüğünde olduğu için art arda hızlı kayıtlarda
+    zaman damgası çakışabilir — id'yi de tiebreaker olarak kullanıyoruz ki bir
+    keyword asla iki grupta birden görünmesin (test edilerek bulunan gerçek hata).
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("""
+            SELECT md.keyword, md.marketplace, md.decision, md.note, md.decided_by, md.decided_at
+            FROM market_decision md
+            WHERE md.id = (
+                SELECT id FROM market_decision md2
+                WHERE md2.keyword = md.keyword AND md2.marketplace = md.marketplace
+                ORDER BY md2.decided_at DESC, md2.id DESC LIMIT 1
+            )
+            ORDER BY md.decided_at DESC
+        """)
+        rows = [dict(r) for r in await cur.fetchall()]
+
+    grouped = {"Uygun": [], "Sınırda": [], "Elenmiş": []}
+    for r in rows:
+        grouped.setdefault(r["decision"], []).append(r)
+    return grouped
+
+
 async def list_recent(limit: int = 50):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
