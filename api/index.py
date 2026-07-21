@@ -159,7 +159,17 @@ async def analyze(req: AnalyzeRequest):
             return {**cached, "source": "cache"}
 
     try:
-        # 2) Ana keyword verisi
+        # 2) Ana keyword verisi — İKİ AYRI ÇAĞRI:
+        #    (a) keywordList: TAM EŞLEŞME — sadece verdiğin keyword'ün kendi verisi
+        #        (SellerSprite şema notu: "精准匹配,只会返回传入的关键词数据" = exact match,
+        #        yalnızca verilen keyword'ün verisini döner, ilişkili kelime YOK).
+        #        Ön değerlendirme/PPC bloğu için "phrase/broad değil, exact istiyoruz" gereksinimi bu.
+        #    (b) keyword: GENİŞ EŞLEŞME — "Relevant Keywords" genişletme tablosu için
+        #        (bilerek geniş: ilişkili/benzer kelimeleri de görmek istiyoruz).
+        exact_kw_data = await call_tool("keyword_miner", {
+            "keywordList": [req.keyword],
+            "marketplace": req.marketplace,
+        })
         kw_data = await call_tool("keyword_miner", {
             "keyword": req.keyword,
             "marketplace": req.marketplace,
@@ -193,7 +203,7 @@ async def analyze(req: AnalyzeRequest):
                 call_tool("market_product_demand_trend", {"marketplace": req.marketplace, "nodeIdPath": node_id_path, "topN": 10}),
             )
 
-        # 4) Keyword listesindeki her satır için hesaplanan reklam metrikleri
+        # 4) Keyword listesindeki her satır için hesaplanan reklam metrikleri (GENİŞ liste — tablo için)
         raw_items = kw_data.get("data", {}).get("items", []) if isinstance(kw_data.get("data"), dict) else kw_data.get("items", [])
         keyword_rows = []
         for item in raw_items:
@@ -207,9 +217,28 @@ async def analyze(req: AnalyzeRequest):
             )
             keyword_rows.append({**item, **metrics})
 
-        # 5) Ana hedef keyword'ün metrikleri (ön değerlendirme için)
-        main_row = next((r for r in keyword_rows if r.get("keyword", "").lower() == req.keyword.lower()), None)
+        # 5) Ana hedef keyword'ün metrikleri — ARTIK exact_kw_data'DAN (tam eşleşme, phrase/broad değil)
+        exact_items = exact_kw_data.get("data", {}).get("items", []) if isinstance(exact_kw_data.get("data"), dict) else []
+        main_row = exact_items[0] if exact_items else None
+        if main_row:
+            main_row = {**main_row, **calc_keyword_ad_metrics(
+                clicks=main_row.get("clicks", 0), purchases=main_row.get("purchases", 0),
+                bid=main_row.get("bid"), avg_price=main_row.get("avgPrice"),
+                impressions=main_row.get("impressions"), searches=main_row.get("searches"),
+            )}
         main_acos = main_row["acos"] if main_row else None
+
+        # Tabloda ana keyword'ün satırını da EXACT veriyle değiştir (broad değil) —
+        # kullanıcı tabloda ve ön değerlendirmede tutarlı, tam eşleşmiş veri görsün.
+        if main_row:
+            replaced = False
+            for i, r in enumerate(keyword_rows):
+                if r.get("keyword", "").lower() == req.keyword.lower():
+                    keyword_rows[i] = main_row
+                    replaced = True
+                    break
+            if not replaced:
+                keyword_rows.insert(0, main_row)
 
         # 6) Top brand share (brand_conc'tan) — GERÇEK ALAN ADI: totalRevenueRatio
         #    (brand_conc "data" doğrudan liste, "share"/"percentage" değil)
