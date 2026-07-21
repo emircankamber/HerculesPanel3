@@ -98,7 +98,7 @@ def _extract_list(resp: dict) -> list:
 # ---------------------------------------------------------------------------
 # Yardımcı: kategori node bul (market_* tool'ları için zorunlu)
 # ---------------------------------------------------------------------------
-async def resolve_category_node(seed_keyword: str, marketplace: str) -> tuple[dict | None, dict, list]:
+async def resolve_category_node(seed_keyword: str, marketplace: str, preferred_departments: list[str] = None) -> tuple[dict | None, dict, list]:
     """
     Döndürür: (seçilen node ya da None, HAM tool yanıtı - debug için, top-3 aday).
 
@@ -109,13 +109,21 @@ async def resolve_category_node(seed_keyword: str, marketplace: str) -> tuple[di
     keyword'deki kelimelerin kategori adıyla örtüşme sayısına göre en
     alakalı node'u seçiyoruz, eşitlikte ürün sayısı yüksek olanı tercih.
 
-    DÜRÜSTLÜK NOTU: Bu sezgisel skorlama, "samsung water filter" gibi belirsiz
-    (kategori-özel kelime içermeyen) keyword'lerde birden fazla makul aday
-    arasında yanlış birini seçebilir — örn. "refrigerator" kelimesi olmadan
-    "Water Filters (Appliances)" ile "Replacement Water Filters (Genel)"
-    aynı skoru alabilir. Bunu sessizce çözmüyoruz: top-3 adayı da payload'a
-    ekliyoruz, panelde hangi kategorinin kullanıldığı gösterilir ve
-    gerekirse `category_override_node_id` ile manuel geçersiz kılınabilir.
+    İKİNCİ DÜZELTME (gerçek veriyle bulundu — "mini magnetic tiles" örneği):
+    Salt metin eşleştirme yetersiz kalabiliyor çünkü Amazon'un kategori adı
+    her zaman aranan kelimeyi içermeyebilir (örn. "magnetic tiles" oyuncakları
+    Amazon'da "Magnetic Building" diye geçiyor, "tile" kelimesi hiç yok).
+    Bu yüzden artık ÖNCE `preferred_departments` (keyword_miner'ın exact-match
+    çağrısından gelen GERÇEK Amazon department sınıflandırması, örn.
+    "Toys & Games") ile eşleşen adaylara filtreliyoruz, SONRA o alt kümede
+    kelime-örtüşme + ürün sayısıyla en iyisini seçiyoruz. Bu, metin
+    eşleştirmeden çok daha güvenilir çünkü Amazon'un kendi gerçek arama
+    sonucu sınıflandırmasına dayanıyor.
+
+    DÜRÜSTLÜK NOTU: preferred_departments boşsa ya da hiçbir aday eşleşmezse
+    tüm adaylara geri dönülür (department filtresi hiçbir şeyi silmez, sadece
+    önceliklendirir). Top-3 aday panelde gösterilir, `category_override_node_id`
+    ile her zaman manuel geçersiz kılınabilir.
     """
     result = await call_tool("product_node", {"keyword": seed_keyword, "marketplace": marketplace})
     nodes = result.get("data") or result.get("nodes") or []
@@ -130,7 +138,15 @@ async def resolve_category_node(seed_keyword: str, marketplace: str) -> tuple[di
         label = (n.get("nodeLabelPath") or "").lower()
         return sum(1 for w in kw_words if w in label)
 
-    scored = sorted(nodes, key=lambda n: (relevance(n), n.get("products", 0)), reverse=True)
+    # Department filtresi: Amazon'un GERÇEK sınıflandırmasına göre öncelik ver
+    candidate_pool = nodes
+    if preferred_departments:
+        wanted = {d.strip().lower() for d in preferred_departments if d}
+        dept_matched = [n for n in nodes if (n.get("nodeLabelPath") or "").split(":")[0].strip().lower() in wanted]
+        if dept_matched:
+            candidate_pool = dept_matched
+
+    scored = sorted(candidate_pool, key=lambda n: (relevance(n), n.get("products", 0)), reverse=True)
     best = scored[0]
     top3 = [{"nodeIdPath": n.get("nodeIdPath"), "nodeLabelPath": n.get("nodeLabelPath"),
              "products": n.get("products"), "relevance": relevance(n)} for n in scored[:3]]
@@ -179,13 +195,22 @@ async def analyze(req: AnalyzeRequest):
         })
 
         # 3) Kategori node'u bul (ya da manuel override kullan)
+        #    Amazon'un GERÇEK department sınıflandırmasını (exact_kw_data'dan) öncelik
+        #    filtresi olarak kullanıyoruz — metin eşleştirmeden çok daha güvenilir
+        #    (bkz. resolve_category_node docstring — "mini magnetic tiles" örneği).
+        exact_items_for_dept = exact_kw_data.get("data", {}).get("items", []) if isinstance(exact_kw_data.get("data"), dict) else []
+        preferred_departments = []
+        if exact_items_for_dept:
+            preferred_departments = [d.get("label") for d in exact_items_for_dept[0].get("departments", []) if d.get("label")]
+
         category_candidates = []
         product_node_raw = None
         if req.category_override_node_id:
             node_id_path = req.category_override_node_id
             category_used_label = f"(manuel override: {node_id_path})"
         else:
-            node, product_node_raw, category_candidates = await resolve_category_node(req.keyword, req.marketplace)
+            node, product_node_raw, category_candidates = await resolve_category_node(
+                req.keyword, req.marketplace, preferred_departments=preferred_departments)
             node_id_path = node.get("nodeIdPath") if node else None
             category_used_label = node.get("nodeLabelPath") if node else None
 
@@ -248,9 +273,19 @@ async def analyze(req: AnalyzeRequest):
         # 7) Ön değerlendirme (kar analizi girdisi olmadan ilk taslak; kullanıcı kar
         #    analizine değer girince /api/profit ile net_margin güncellenir)
         stats_data = market_stats.get("data", market_stats)
+
+        # GROSS MARGIN — gerçek MCP çağrısıyla doğrulandı: market_research_statistics'in
+        # "avgProfit" alanı, o KATEGORİDEKİ ürünlerin ortalama gross margin'i (örn. 68.19
+        # şeklinde — zaten yüzde olarak, 0-1 oranı DEĞİL). Bu, senin spesifik ürününün marjı
+        # değil, PAZAR ORTALAMASI — ön değerlendirmenin "bu pazar tipik olarak %65+ marj
+        # destekliyor mu" sorusu için doğru kaynak zaten bu. Ürüne özgü gerçek marj için
+        # kar analizi (COGS'a dayalı) kullanılmaya devam eder — o ayrı bir şey.
+        raw_gross_margin = stats_data.get("avgProfit")
+        gross_margin = (raw_gross_margin / 100 if raw_gross_margin > 1 else raw_gross_margin) if raw_gross_margin is not None else None
+
         assessment = pre_assessment(
             avg_price=stats_data.get("avgPrice"),
-            gross_margin=None,  # gerçek gross margin alanı doğrulanmadı; kar analizinden gelir
+            gross_margin=gross_margin,
             acos=main_acos,
             top_brand_share=top_brand_share,
             strong_new_brands=None,  # brand_conc + launch history'den türetilecek (ayrı hesap)
@@ -276,6 +311,7 @@ async def analyze(req: AnalyzeRequest):
             "_debug": {
                 "node_id_path": node_id_path,
                 "category_candidates_top3": category_candidates,
+                "preferred_departments_used": preferred_departments,
                 "product_node_raw": product_node_raw,
                 "keyword_miner_raw": kw_data,
                 "market_stats_raw": market_stats,
