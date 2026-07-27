@@ -17,7 +17,43 @@ Postgres için "$1, $2, ..." formatına çevrilir.
 import os
 import re
 
-DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+def _discover_database_url() -> str:
+    """
+    Neon/Supabase/Vercel entegrasyonları bağlantı adresini FARKLI isimlerle
+    ekleyebiliyor. Hepsini sırayla dener — kullanıcının elle isim düzeltmesine
+    gerek kalmaz.
+    """
+    for key in ("DATABASE_URL", "POSTGRES_URL", "POSTGRES_URL_NON_POOLING",
+                "POSTGRES_PRISMA_URL", "NEON_DATABASE_URL", "STORAGE_URL"):
+        val = os.environ.get(key, "").strip()
+        if val:
+            return val
+
+    # SON ÇARE: Vercel/Neon entegrasyonunda "Custom Prefix" alanı serbest metin
+    # olduğu için değişken adı herhangi bir şey olabilir (STORAGE_URL, DB_URL...).
+    # Bu yüzden TÜM ortam değişkenlerini tarayıp Postgres bağlantı adresi
+    # biçiminde olan ilk değeri kullanırız — isim ne olursa olsun çalışır.
+    for key, val in os.environ.items():
+        v = (val or "").strip()
+        if v.startswith("postgres://") or v.startswith("postgresql://"):
+            return v
+    return ""
+
+
+def _clean_pg_url(url: str) -> str:
+    """
+    asyncpg bazı query parametrelerini (channel_binding, pgbouncer, connect_timeout
+    vb.) anlamaz ve hata verir. Neon/Supabase adresleri bunları içerebiliyor.
+    Yalnızca asyncpg'nin desteklediği 'sslmode' korunur, diğerleri atılır.
+    """
+    if "?" not in url:
+        return url
+    base, _, query = url.partition("?")
+    kept = [p for p in query.split("&") if p.lower().startswith("sslmode=")]
+    return base + ("?" + "&".join(kept) if kept else "")
+
+
+DATABASE_URL = _clean_pg_url(_discover_database_url())
 USE_POSTGRES = bool(DATABASE_URL)
 
 if not USE_POSTGRES:
@@ -109,7 +145,7 @@ def storage_info() -> dict:
         "backend": "postgres" if USE_POSTGRES else "sqlite",
         "shared_and_persistent": USE_POSTGRES,
         "warning": None if USE_POSTGRES else (
-            "DATABASE_URL tanımlı değil — veriler geçici SQLite'ta tutuluyor. "
+            "Postgres bağlantısı bulunamadı (DATABASE_URL / POSTGRES_URL) — veriler geçici SQLite'ta tutuluyor. "
             "Vercel'de bu KALICI DEĞİLDİR ve ekip üyeleri farklı veri görebilir. "
             "Paylaşımlı kullanım için bir Postgres bağlantısı (DATABASE_URL) ekleyin."
         ),
