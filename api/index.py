@@ -25,7 +25,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import asyncio
-from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Query, BackgroundTasks, Depends, Header
 from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -70,6 +70,21 @@ async def startup():
     await db.init_db()
     await db.init_db_v3()
     await db.seed_cert_requirements_if_empty()
+
+
+async def require_auth(authorization: str | None = Header(default=None)) -> dict:
+    """
+    Korumalı endpoint'ler için oturum kontrolü.
+    Hiç kullanıcı kayıtlı değilse kimlik doğrulama DEVRE DIŞI (ilk kurulum kolaylığı) —
+    ilk kullanıcı kaydolduğu anda tüm korumalı uçlar otomatik kilitlenir.
+    """
+    if await db.user_count() == 0:
+        return {"email": "(auth kapalı — henüz kullanıcı yok)", "auth_disabled": True}
+    token = (authorization or "").replace("Bearer ", "").strip()
+    session = await db.get_session(token)
+    if not session:
+        raise HTTPException(401, "Oturum geçersiz veya süresi dolmuş — lütfen giriş yapın")
+    return {"email": session["email"], "user_id": session["user_id"]}
 
 
 # ---------------------------------------------------------------------------
@@ -225,7 +240,7 @@ class AnalyzeRequest(BaseModel):
 
 
 @app.post("/api/analyze")
-async def analyze(req: AnalyzeRequest):
+async def analyze(req: AnalyzeRequest, user: dict = Depends(require_auth)):
     # 1) Önbellek kontrolü — ekip aynı keyword'ü tekrar sorgularsa MCP'ye gitme
     if not req.force_refresh:
         cached = await db.get_cached(req.keyword, req.marketplace)
@@ -996,3 +1011,88 @@ async def discovery_run(req: DiscoveryRunRequest):
 @app.get("/api/discovery/candidates")
 async def discovery_candidates(run_id: int | None = None, status: str | None = None):
     return await db.list_discovery_candidates(run_id, status)
+
+
+# ---------------------------------------------------------------------------
+# KİMLİK DOĞRULAMA (basit e-posta + şifre)
+# ---------------------------------------------------------------------------
+
+
+class AuthRequest(BaseModel):
+    email: str
+    password: str
+
+
+@app.post("/api/auth/register")
+async def auth_register(req: AuthRequest):
+    if len(req.password) < 6:
+        raise HTTPException(400, "Şifre en az 6 karakter olmalı")
+    try:
+        user = await db.create_user(req.email, req.password)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    token = await db.create_session(user)
+    return {"token": token, "email": user["email"]}
+
+
+@app.post("/api/auth/login")
+async def auth_login(req: AuthRequest):
+    user = await db.verify_user(req.email, req.password)
+    if not user:
+        raise HTTPException(401, "E-posta veya şifre hatalı")
+    token = await db.create_session(user)
+    return {"token": token, "email": user["email"]}
+
+
+@app.post("/api/auth/logout")
+async def auth_logout(authorization: str | None = Header(default=None)):
+    token = (authorization or "").replace("Bearer ", "").strip()
+    await db.delete_session(token)
+    return {"ok": True}
+
+
+@app.get("/api/auth/status")
+async def auth_status(authorization: str | None = Header(default=None)):
+    """Frontend açılışta çağırır: giriş gerekli mi, kullanıcı kim, veri paylaşımlı mı."""
+    count = await db.user_count()
+    token = (authorization or "").replace("Bearer ", "").strip()
+    session = await db.get_session(token) if token else None
+    return {
+        "auth_required": count > 0,
+        "has_users": count > 0,
+        "logged_in": bool(session),
+        "email": session["email"] if session else None,
+        "storage": db.storage_info(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# SİLME İŞLEMLERİ
+# ---------------------------------------------------------------------------
+class DeleteKeywordRequest(BaseModel):
+    keyword: str
+    marketplace: str = "US"
+
+
+@app.post("/api/decisions/delete")
+async def delete_decision_ep(req: DeleteKeywordRequest, user: dict = Depends(require_auth)):
+    await db.delete_decision(req.keyword, req.marketplace)
+    return {"ok": True, "deleted_by": user["email"]}
+
+
+@app.post("/api/history/delete")
+async def delete_history_ep(req: DeleteKeywordRequest, user: dict = Depends(require_auth)):
+    await db.delete_analysis(req.keyword, req.marketplace)
+    return {"ok": True, "deleted_by": user["email"]}
+
+
+@app.post("/api/decisions/clear")
+async def clear_decisions_ep(user: dict = Depends(require_auth)):
+    await db.clear_all_decisions()
+    return {"ok": True}
+
+
+@app.post("/api/history/clear")
+async def clear_history_ep(user: dict = Depends(require_auth)):
+    await db.clear_all_analyses()
+    return {"ok": True}

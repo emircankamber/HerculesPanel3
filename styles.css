@@ -313,3 +313,48 @@ input:focus,select:focus,textarea:focus{outline:2px solid var(--blue);outline-of
 
 /* --- Kar analizi kaynak notu --- */
 .profit-source-note{font-size:11px;color:var(--teal);margin-bottom:10px;font-style:italic;}
+
+/* --- Giriş ekranı --- */
+.login-overlay{
+  position:fixed;inset:0;background:var(--bg);z-index:100;
+  display:flex;align-items:center;justify-content:center;padding:20px;
+}
+.login-card{
+  background:var(--surface);border:1px solid var(--border);border-radius:16px;
+  padding:32px 28px;width:100%;max-width:380px;display:flex;flex-direction:column;gap:12px;
+}
+.login-brand{font-size:17px;font-weight:700;color:var(--text-primary);}
+.login-brand::first-letter{color:var(--teal);}
+.login-sub{font-size:13px;color:var(--text-secondary);margin-bottom:8px;}
+.login-card input{
+  background:var(--surface-2);border:1px solid var(--border);color:var(--text-primary);
+  padding:11px 14px;border-radius:9px;font-size:14px;
+}
+.login-card button{
+  background:var(--blue);color:#fff;border:none;padding:11px;border-radius:9px;
+  font-weight:600;font-size:14px;cursor:pointer;transition:opacity .15s;
+}
+.login-card button:hover{opacity:.88;}
+.login-card button.secondary{background:var(--surface-2);color:var(--text-primary);border:1px solid var(--border);}
+.login-error{font-size:12.5px;color:var(--red);min-height:16px;}
+.login-note{font-size:11px;color:var(--text-muted);text-align:center;margin-top:4px;line-height:1.5;}
+
+/* --- Depolama uyarı bandı --- */
+.storage-warning{
+  background:var(--amber-bg);color:var(--amber);padding:9px 20px;font-size:12px;
+  text-align:center;border-bottom:1px solid var(--border);line-height:1.5;
+}
+
+/* --- Kullanıcı çipi & tehlikeli butonlar --- */
+.user-chip{font-size:11.5px;color:var(--text-muted);font-family:var(--font-mono);margin-left:8px;}
+.danger-btn{
+  background:transparent;border:1px solid var(--border);color:var(--text-secondary);
+  padding:5px 12px;border-radius:7px;font-size:11.5px;cursor:pointer;transition:all .15s;
+}
+.danger-btn:hover{border-color:var(--red);color:var(--red);}
+.card-delete-btn{
+  background:transparent;border:none;color:var(--text-muted);cursor:pointer;
+  font-size:15px;line-height:1;padding:2px 6px;border-radius:5px;transition:all .15s;
+}
+.card-delete-btn:hover{color:var(--red);background:var(--bg);}
+.decision-card-top{display:flex;justify-content:space-between;align-items:flex-start;gap:6px;}

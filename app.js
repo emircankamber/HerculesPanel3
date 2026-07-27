@@ -3,6 +3,119 @@
 // tam URL yaz (örn. "https://pl-panel-api.up.railway.app").
 const API_BASE = "";
 
+// ---------------------------------------------------------------------------
+// Kimlik doğrulama & token yönetimi
+// ---------------------------------------------------------------------------
+const TOKEN_KEY = "pl_panel_token";
+function getToken() { return localStorage.getItem(TOKEN_KEY) || ""; }
+function setToken(t) { t ? localStorage.setItem(TOKEN_KEY, t) : localStorage.removeItem(TOKEN_KEY); }
+
+/** Her isteğe otomatik Authorization ekler; 401 alırsa giriş ekranını açar. */
+async function apiFetch(url, options = {}) {
+  const opts = { ...options, headers: { ...(options.headers || {}) } };
+  const token = getToken();
+  if (token) opts.headers["Authorization"] = `Bearer ${token}`;
+  const res = await fetch(url, opts);
+  if (res.status === 401) {
+    setToken("");
+    showLogin("Oturumunuz sona erdi — lütfen tekrar giriş yapın.");
+  }
+  return res;
+}
+
+function showLogin(errorMsg = "") {
+  const overlay = document.getElementById("login-overlay");
+  if (overlay) overlay.style.display = "flex";
+  const err = document.getElementById("login-error");
+  if (err) err.textContent = errorMsg;
+}
+function hideLogin() {
+  const overlay = document.getElementById("login-overlay");
+  if (overlay) overlay.style.display = "none";
+}
+
+async function checkAuthStatus() {
+  try {
+    const res = await apiFetch(`${API_BASE}/api/auth/status`);
+    const s = await res.json();
+
+    // Paylaşımlı depolama uyarısı
+    const warnEl = document.getElementById("storage-warning");
+    if (warnEl && s.storage && s.storage.warning) {
+      warnEl.textContent = "⚠ " + s.storage.warning;
+      warnEl.style.display = "block";
+    } else if (warnEl) {
+      warnEl.style.display = "none";
+    }
+
+    const chip = document.getElementById("user-chip");
+    const logoutBtn = document.getElementById("logout-btn");
+    if (s.auth_required && !s.logged_in) {
+      showLogin();
+    } else {
+      hideLogin();
+      if (chip) chip.textContent = s.email || (s.auth_required ? "" : "auth kapalı");
+      if (logoutBtn) logoutBtn.style.display = s.logged_in ? "inline-block" : "none";
+    }
+  } catch {
+    // Backend erişilemezse giriş ekranını zorla açma — kullanıcı en azından hatayı görsün
+  }
+}
+
+async function doAuth(endpoint) {
+  const email = document.getElementById("login-email").value.trim();
+  const password = document.getElementById("login-password").value;
+  const err = document.getElementById("login-error");
+  if (!email || !password) { err.textContent = "E-posta ve şifre gerekli."; return; }
+  try {
+    const res = await fetch(`${API_BASE}/api/auth/${endpoint}`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
+    const body = await res.json();
+    if (!res.ok) { err.textContent = body.detail || `Hata (${res.status})`; return; }
+    setToken(body.token);
+    hideLogin();
+    await checkAuthStatus();
+  } catch (e) {
+    err.textContent = `Bağlantı hatası: ${e.message}`;
+  }
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  const loginBtn = document.getElementById("login-btn");
+  const regBtn = document.getElementById("register-btn");
+  const logoutBtn = document.getElementById("logout-btn");
+  if (loginBtn) loginBtn.addEventListener("click", () => doAuth("login"));
+  if (regBtn) regBtn.addEventListener("click", () => doAuth("register"));
+  if (logoutBtn) logoutBtn.addEventListener("click", async () => {
+    await apiFetch(`${API_BASE}/api/auth/logout`, { method: "POST" });
+    setToken("");
+    location.reload();
+  });
+  ["login-email", "login-password"].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener("keydown", e => { if (e.key === "Enter") doAuth("login"); });
+  });
+
+  // Toplu temizleme butonları
+  const clearDec = document.getElementById("clear-decisions-btn");
+  if (clearDec) clearDec.addEventListener("click", async () => {
+    if (!confirm("TÜM pazar kararları kalıcı olarak silinecek. Emin misiniz?")) return;
+    await apiFetch(`${API_BASE}/api/decisions/clear`, { method: "POST" });
+    loadDecisions();
+  });
+  const clearHist = document.getElementById("clear-history-btn");
+  if (clearHist) clearHist.addEventListener("click", async () => {
+    if (!confirm("TÜM sorgu geçmişi kalıcı olarak silinecek. Emin misiniz?")) return;
+    await apiFetch(`${API_BASE}/api/history/clear`, { method: "POST" });
+    loadHistory();
+  });
+
+  checkAuthStatus();
+});
+
+
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 
@@ -37,7 +150,7 @@ $("#search-form").addEventListener("submit", async (e) => {
   status.className = "status-line";
 
   try {
-    const res = await fetch(`${API_BASE}/api/analyze`, {
+    const res = await apiFetch(`${API_BASE}/api/analyze`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -199,7 +312,7 @@ function renderPanel(data) {
   const recalcProfit = async () => {
     const [cogs, sale, fba, ref, acos, ret, gen] = profitInputs.map(i => parseFloat(i.value) || 0);
     try {
-      const res = await fetch(`${API_BASE}/api/profit`, {
+      const res = await apiFetch(`${API_BASE}/api/profit`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -261,7 +374,7 @@ function renderPanel(data) {
     const tbody = root.querySelector(".comp-tbody");
     tbody.innerHTML = "<tr><td colspan='8'>yükleniyor…</td></tr>";
     try {
-      const res = await fetch(`${API_BASE}/api/competitors`, {
+      const res = await apiFetch(`${API_BASE}/api/competitors`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ asins, marketplace: data.marketplace }),
       });
@@ -284,7 +397,7 @@ function renderPanel(data) {
     status.textContent = "hesaplanıyor…";
     try {
       const payload = buildSignalsPayload(data, competitorRows, root);
-      const res = await fetch(`${API_BASE}/api/signals`, {
+      const res = await apiFetch(`${API_BASE}/api/signals`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
@@ -301,7 +414,7 @@ function renderPanel(data) {
 
   // --- Proof Assets ---
   const refreshProofAssets = async () => {
-    const res = await fetch(`${API_BASE}/api/proof-assets/${encodeURIComponent(data.keyword)}`);
+    const res = await apiFetch(`${API_BASE}/api/proof-assets/${encodeURIComponent(data.keyword)}`);
     const result = await res.json();
     const list = root.querySelector(".proof-list");
     list.innerHTML = "";
@@ -315,7 +428,7 @@ function renderPanel(data) {
         </span>`;
       const btn = div.querySelector("button");
       if (btn) btn.addEventListener("click", async () => {
-        await fetch(`${API_BASE}/api/proof-assets/approve`, {
+        await apiFetch(`${API_BASE}/api/proof-assets/approve`, {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ asset_id: a.id, approved_by: "ekip" }),
         });
@@ -328,7 +441,7 @@ function renderPanel(data) {
   root.querySelector(".proof-add-btn").addEventListener("click", async () => {
     const type = root.querySelector(".proof-type-select").value;
     const note = root.querySelector(".proof-note").value;
-    await fetch(`${API_BASE}/api/proof-assets`, {
+    await apiFetch(`${API_BASE}/api/proof-assets`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ keyword: data.keyword, type, note }),
     });
@@ -342,7 +455,7 @@ function renderPanel(data) {
     const decision = root.querySelector(".decision-select").value;
     const note = root.querySelector(".decision-note").value;
     if (!decision) return;
-    await fetch(`${API_BASE}/api/decision`, {
+    await apiFetch(`${API_BASE}/api/decision`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ keyword: data.keyword, marketplace: data.marketplace, decision, note }),
@@ -358,7 +471,7 @@ function renderPanel(data) {
     btn.textContent = "hazırlanıyor…";
     try {
       const exportPayload = { ...data, profit_analysis: lastProfitResult };
-      const res = await fetch(`${API_BASE}/api/export/report`, {
+      const res = await apiFetch(`${API_BASE}/api/export/report`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify(exportPayload),
       });
@@ -379,7 +492,7 @@ function renderPanel(data) {
     const originalText = btn.textContent;
     btn.textContent = "hazırlanıyor…";
     try {
-      const res = await fetch(`${API_BASE}/api/export/keywords`, {
+      const res = await apiFetch(`${API_BASE}/api/export/keywords`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ keyword: data.keyword, keyword_rows: data.keyword_rows || [] }),
       });
@@ -489,7 +602,7 @@ async function loadHistory() {
   const list = $("#history-list");
   list.innerHTML = "yükleniyor…";
   try {
-    const res = await fetch(`${API_BASE}/api/recent`);
+    const res = await apiFetch(`${API_BASE}/api/recent`);
     const rows = await res.json();
     list.innerHTML = "";
     if (!rows.length) { list.innerHTML = "<p>Henüz hiç keyword analiz edilmemiş.</p>"; return; }
@@ -498,7 +611,19 @@ async function loadHistory() {
       div.className = "hist-row";
       const date = new Date(r.fetched_at * 1000).toLocaleString("tr-TR");
       div.innerHTML = `<span class="hist-kw">${r.keyword} <span class="hist-meta">(${r.marketplace})</span></span>
-        <span class="hist-meta">${r.verdict ?? "—"} · ${date}</span>`;
+        <span style="display:flex;align-items:center;gap:10px;">
+          <span class="hist-meta">${r.verdict ?? "—"} · ${date}</span>
+          <button class="card-delete-btn" title="Bu kaydı sil">&times;</button>
+        </span>`;
+      div.querySelector(".card-delete-btn").addEventListener("click", async (ev) => {
+        ev.stopPropagation();
+        if (!confirm(`"${r.keyword}" geçmiş kaydı silinsin mi?`)) return;
+        await apiFetch(`${API_BASE}/api/history/delete`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ keyword: r.keyword, marketplace: r.marketplace }),
+        });
+        loadHistory();
+      });
       div.addEventListener("click", () => {
         $("#kw-input").value = r.keyword;
         $("#market-input").value = r.marketplace;
@@ -631,7 +756,7 @@ async function loadDecisions() {
   const summary = $("#decisions-summary");
   summary.textContent = "yükleniyor…";
   try {
-    const res = await fetch(`${API_BASE}/api/decisions`);
+    const res = await apiFetch(`${API_BASE}/api/decisions`);
     const grouped = await res.json();
 
     let total = 0;
@@ -651,10 +776,22 @@ async function loadDecisions() {
         card.className = "decision-card";
         const date = new Date(item.decided_at * 1000).toLocaleDateString("tr-TR");
         card.innerHTML = `
-          <div class="decision-card-kw">${item.keyword}</div>
+          <div class="decision-card-top">
+            <div class="decision-card-kw">${item.keyword}</div>
+            <button class="card-delete-btn" title="Bu kararı sil">&times;</button>
+          </div>
           <div class="decision-card-meta"><span>${item.marketplace}</span><span>${date}</span></div>
           ${item.note ? `<div class="decision-card-note">"${item.note}"</div>` : ""}
         `;
+        card.querySelector(".card-delete-btn").addEventListener("click", async (ev) => {
+          ev.stopPropagation();  // karta tıklama (analiz açma) tetiklenmesin
+          if (!confirm(`"${item.keyword}" kararı silinsin mi?`)) return;
+          await apiFetch(`${API_BASE}/api/decisions/delete`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ keyword: item.keyword, marketplace: item.marketplace }),
+          });
+          loadDecisions();
+        });
         card.addEventListener("click", () => {
           // Sorgu sayfasına dön, keyword'ü doldur, otomatik tekrar analiz et
           $$(".nav-btn")[0].click();

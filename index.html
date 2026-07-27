@@ -9,12 +9,29 @@
 </head>
 <body>
 
+<div id="login-overlay" class="login-overlay" style="display:none;">
+  <div class="login-card">
+    <div class="login-brand">◆ PL Pazar Paneli</div>
+    <div class="login-sub">Devam etmek için giriş yapın</div>
+    <input type="email" id="login-email" placeholder="e-posta" autocomplete="username">
+    <input type="password" id="login-password" placeholder="şifre" autocomplete="current-password">
+    <div class="login-error" id="login-error"></div>
+    <button id="login-btn">Giriş Yap</button>
+    <button id="register-btn" class="secondary">Yeni Hesap Oluştur</button>
+    <div class="login-note">Ekip üyeleri aynı verileri görür. İlk kullanıcı kaydolduğunda panel kilitlenir.</div>
+  </div>
+</div>
+
+<div id="storage-warning" class="storage-warning" style="display:none;"></div>
+
 <header class="topbar">
   <div class="brand">PL Pazar Paneli</div>
   <nav class="topnav">
     <button data-view="search" class="nav-btn active">Sorgu</button>
     <button data-view="decisions" class="nav-btn">Kararlar</button>
     <button data-view="history" class="nav-btn">Geçmiş</button>
+    <span class="user-chip" id="user-chip"></span>
+    <button id="logout-btn" class="nav-btn" style="display:none;">Çıkış</button>
   </nav>
 </header>
 
@@ -41,7 +58,7 @@
   <section id="view-decisions" class="view">
     <div class="decisions-header">
       <h2>Pazar Kararları</h2>
-      <div class="decisions-summary" id="decisions-summary"></div>
+      <div style="display:flex;align-items:center;gap:12px;"><div class="decisions-summary" id="decisions-summary"></div><button id="clear-decisions-btn" class="danger-btn">Tümünü Temizle</button></div>
     </div>
     <div class="decisions-board">
       <div class="decision-column decision-column-uygun">
@@ -69,7 +86,10 @@
   </section>
 
   <section id="view-history" class="view">
-    <h2>Son Sorgulanan Keyword'ler</h2>
+    <div class="decisions-header">
+      <h2>Son Sorgulanan Keyword'ler</h2>
+      <button id="clear-history-btn" class="danger-btn">Tümünü Temizle</button>
+    </div>
     <div id="history-list"></div>
   </section>
 

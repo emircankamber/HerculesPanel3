@@ -58,3 +58,46 @@ değildir; bu noktaya gelince birlikte değerlendiririz.
 *Backend modülleri (Hercules Signal Engine v2.1, Bayesian öğrenme, QIPO) ve
 bunların test durumu için orijinal README'ye bakılabilir — bu dosya yalnızca
 Vercel'e özgü deploy talimatlarını içerir.*
+
+---
+
+## PAYLAŞIMLI KULLANIM — Postgres kurulumu (ZORUNLU)
+
+**Kritik:** `DATABASE_URL` tanımlamazsanız veriler Vercel'in geçici `/tmp`
+klasöründeki SQLite'ta tutulur. Bu durumda:
+- Kayıtlar rastgele silinir (her soğuk başlangıçta)
+- Ekip üyeleri **farklı veri görür** (her sunucusuz örneğin kendi dosyası var)
+
+Panel bu durumda üstte sarı bir uyarı bandı gösterir. Paylaşımlı ve kalıcı
+kullanım için Postgres şart:
+
+### Adımlar
+1. Vercel projenizde **Storage → Create Database → Postgres** (ücretsiz katman)
+   — ya da [neon.tech](https://neon.tech) / [supabase.com](https://supabase.com)
+   üzerinden ücretsiz bir Postgres açın.
+2. Bağlantı adresini (`postgres://...` ile başlayan) kopyalayın.
+3. Vercel → **Settings → Environment Variables** → `DATABASE_URL` olarak ekleyin.
+4. **Redeploy** edin (env değişkeni eklemek otomatik redeploy tetiklemez).
+
+Tablolar ilk açılışta otomatik oluşur. Sarı uyarı bandı kaybolduğunda
+paylaşımlı depolama aktif demektir.
+
+## GİRİŞ SİSTEMİ
+
+- **İlk kurulumda kimlik doğrulama kapalıdır** (kolay başlangıç için).
+- İlk kullanıcı "Yeni Hesap Oluştur" ile kaydolduğu anda panel **otomatik
+  kilitlenir** — sonraki tüm erişimler giriş ister.
+- Ekip üyeleri kendi e-posta/şifreleriyle kaydolur ama **hepsi aynı ortak
+  veriyi görür** (kararlar ve geçmiş paylaşımlıdır, kişiye özel değildir).
+- Şifreler PBKDF2-SHA256 (120.000 iterasyon) + rastgele salt ile saklanır,
+  düz metin tutulmaz.
+- Oturum token'ı tarayıcının localStorage'ında tutulur.
+
+**Neden gerekli:** Vercel URL'iniz herkese açıktır. Giriş olmadan yabancılar
+paneli kullanıp SellerSprite kotanızı harcayabilir.
+
+## SİLME İŞLEMLERİ
+
+- **Tekil silme:** Kararlar ve Geçmiş listelerinde her kaydın yanındaki `×`
+- **Toplu silme:** Her iki sayfanın başlığındaki "Tümünü Temizle"
+- Tüm silme işlemleri giriş yapmayı gerektirir (yetkisiz silme engellenir)
