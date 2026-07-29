@@ -1096,3 +1096,158 @@ async def clear_decisions_ep(user: dict = Depends(require_auth)):
 async def clear_history_ep(user: dict = Depends(require_auth)):
     await db.clear_all_analyses()
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# ASIN ANALİZİ (Reverse ASIN) — keyword yerine ASIN ile aynı raporu üretir
+# ---------------------------------------------------------------------------
+class AnalyzeAsinRequest(BaseModel):
+    asin: str
+    marketplace: str = "US"
+    keyword_list_size: int = 20
+    force_refresh: bool = False
+
+
+@app.post("/api/analyze-asin")
+async def analyze_asin(req: AnalyzeAsinRequest, user: dict = Depends(require_auth)):
+    """
+    ASIN girildiğinde:
+      1. competitor_lookup(asins=[ASIN]) -> ürün detayı + GERÇEK kategori (nodeIdPath)
+         (kategori TAHMİN EDİLMEZ — ürünün kendi browse-node'u kullanılır)
+      2. traffic_keyword (reverse ASIN)  -> bu ASIN'in trafik aldığı keyword listesi
+      3. market_* çağrıları              -> ürünün kendi kategorisiyle pazar analizi
+    Çıktı, /api/analyze ile AYNI şekildedir; frontend aynı paneli yeniden kullanır.
+    """
+    asin = req.asin.strip().upper()
+    cache_key = f"ASIN:{asin}"
+
+    if not req.force_refresh:
+        cached = await db.get_cached(cache_key, req.marketplace)
+        if cached:
+            return {**cached, "source": "cache"}
+
+    try:
+        # 1) Ürün detayı + gerçek kategori
+        detail_raw = await call_tool("competitor_lookup", {
+            "asins": [asin], "marketplace": req.marketplace, "variation": "N",
+        })
+        detail_items = detail_raw.get("data", {}).get("items", []) if isinstance(detail_raw.get("data"), dict) else []
+        if not detail_items:
+            raise HTTPException(404, f"{asin} için ürün verisi bulunamadı — ASIN'i ve pazarı kontrol edin.")
+        product = detail_items[0]
+        node_id_path = product.get("nodeIdPath")
+        category_used_label = (product.get("nodeLabelPath") or "") + " (ASIN'in kendi kategorisi)"
+        asin_price = product.get("price") or product.get("averagePrice")
+
+        # 2) Reverse ASIN — trafik keyword'leri
+        rev_raw = await call_tool("traffic_keyword", {
+            "asin": asin, "marketplace": req.marketplace, "size": req.keyword_list_size,
+            "order": {"field": "searches", "desc": True},
+        })
+        rev_items = rev_raw.get("data", {}).get("items", []) if isinstance(rev_raw.get("data"), dict) else []
+
+        keyword_rows = []
+        for item in rev_items:
+            # ACOS için ürünün KENDİ fiyatını kullanıyoruz — reverse ASIN'de bu
+            # keyword ortalamasından daha doğru, çünkü bu spesifik ürünü analiz ediyoruz.
+            metrics = calc_keyword_ad_metrics(
+                clicks=item.get("clicks", 0), purchases=item.get("purchases", 0),
+                bid=item.get("bid"), avg_price=asin_price,
+                impressions=item.get("impressions"), searches=item.get("searches"),
+            )
+            badges = item.get("badges") or []
+            rank_pos = (item.get("rankPosition") or {}).get("position")
+            keyword_rows.append({
+                **item, **metrics,
+                "avgPrice": asin_price,
+                "relevancy": round((item.get("trafficPercentage") or 0) * 100, 1),  # trafik payı %
+                "organic_rank": rank_pos,
+                "ad_rank": (item.get("adPosition") or {}).get("position"),
+                "is_organic": "naturalSearching" in badges,
+                "is_ad": "ads" in badges,
+                "is_amazon_choice": "amazonChoice" in badges,
+            })
+
+        # Ana satır = en yüksek trafik payına sahip keyword
+        main_row = max(keyword_rows, key=lambda r: r.get("trafficPercentage") or 0, default=None)
+        main_acos = main_row.get("acos") if main_row else None
+
+        # 3) Pazar analizi (ürünün kendi kategorisiyle)
+        market_stats = brand_conc = price_dist = launch_dist = demand_trend = {}
+        if node_id_path:
+            market_stats, brand_conc, price_dist, launch_dist, demand_trend = await asyncio.gather(
+                call_tool("market_research_statistics", {"marketplace": req.marketplace, "nodeIdPath": node_id_path, "topN": 10}),
+                call_tool("market_brand_concentration", {"marketplace": req.marketplace, "nodeIdPath": node_id_path, "topN": 10}),
+                call_tool("market_price_distribution", {"marketplace": req.marketplace, "nodeIdPath": node_id_path, "topN": 10}),
+                call_tool("market_listing_date_distribution", {"marketplace": req.marketplace, "nodeIdPath": node_id_path, "topN": 10}),
+                call_tool("market_product_demand_trend", {"marketplace": req.marketplace, "nodeIdPath": node_id_path, "topN": 10}),
+            )
+
+        # 4) Aynı kategorideki top rakipler (bu ASIN hariç)
+        comp_raw = await call_tool("competitor_lookup", {
+            "marketplace": req.marketplace, "nodeIdPath": node_id_path, "size": 10,
+            "order": {"field": "total_units", "desc": True}, "variation": "N",
+        }) if node_id_path else {}
+        comp_items = comp_raw.get("data", {}).get("items", []) if isinstance(comp_raw.get("data"), dict) else []
+        top_competitors = [{
+            "asin": it.get("asin"), "brand": it.get("brand"), "title": it.get("title"),
+            "price": it.get("price") or it.get("averagePrice"),
+            "units": it.get("units") or it.get("amzUnit"),
+            "revenue": it.get("revenue") or it.get("amzSales"),
+            "bsr": it.get("bsr"), "rating": it.get("rating"), "ratings": it.get("ratings"),
+            "fulfillment": it.get("fulfillment"), "availableDate": it.get("availableDate"),
+        } for it in comp_items]
+
+        one_year_ms = 365 * 24 * 3600 * 1000
+        now_ms = time.time() * 1000
+        strong_new_brands_count = len({
+            it.get("brand") for it in comp_items
+            if it.get("brand") and it.get("availableDate") and (now_ms - it["availableDate"]) <= one_year_ms
+        })
+
+        brand_items = _extract_list(brand_conc)
+        top_brand_share = max((b.get("totalRevenueRatio", 0) for b in brand_items), default=None) if brand_items else None
+        stats_data = market_stats.get("data", market_stats)
+        raw_gm = stats_data.get("avgProfit")
+        gross_margin = (raw_gm / 100 if raw_gm and raw_gm > 1 else raw_gm) if raw_gm is not None else None
+
+        assessment = pre_assessment(
+            avg_price=stats_data.get("avgPrice"), gross_margin=gross_margin, acos=main_acos,
+            top_brand_share=top_brand_share, strong_new_brands=strong_new_brands_count, net_margin=None)
+
+        payload = {
+            "keyword": f"{asin} — {(product.get('title') or '')[:60]}",
+            "asin": asin,
+            "marketplace": req.marketplace,
+            "analysis_mode": "asin",
+            "asin_info": {
+                "asin": asin, "title": product.get("title"), "brand": product.get("brand"),
+                "price": asin_price, "units": product.get("units"), "revenue": product.get("revenue"),
+                "bsr": product.get("bsr"), "rating": product.get("rating"),
+                "ratings": product.get("ratings"), "fulfillment": product.get("fulfillment"),
+                "availableDate": product.get("availableDate"),
+                "total_traffic_keywords": rev_raw.get("data", {}).get("total") if isinstance(rev_raw.get("data"), dict) else None,
+            },
+            "category_used": category_used_label,
+            "category_candidates": [],
+            "keyword_rows": keyword_rows,
+            "market_stats": stats_data,
+            "brand_concentration": brand_items,
+            "price_distribution": _extract_list(price_dist),
+            "launch_distribution": _extract_list(launch_dist),
+            "demand_trend": demand_trend,
+            "market_return_rate": (
+                (demand_trend.get("data", {}) or {}).get("returnRatio") / 100
+                if isinstance(demand_trend.get("data"), dict) and demand_trend.get("data", {}).get("returnRatio") is not None
+                else None),
+            "top_competitors": top_competitors,
+            "pre_assessment": assessment,
+        }
+
+        await db.save_analysis(cache_key, req.marketplace, payload, user.get("email"))
+        return {**payload, "source": "live"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"SellerSprite MCP hatası: {e}")

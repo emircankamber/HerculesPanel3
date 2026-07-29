@@ -150,14 +150,24 @@ $("#search-form").addEventListener("submit", async (e) => {
   status.className = "status-line";
 
   try {
-    const res = await apiFetch(`${API_BASE}/api/analyze`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        keyword, marketplace,
-        ...(categoryOverride ? { category_override_node_id: categoryOverride } : {}),
-      }),
-    });
+    // ASIN mi keyword mü? (B0 + 8 alfanümerik = Amazon ASIN formatı)
+    const isAsin = /^B0[A-Z0-9]{8}$/i.test(keyword);
+    status.textContent = isAsin
+      ? "Reverse ASIN yapılıyor — ürün, keyword'leri ve pazarı çekiliyor…"
+      : "SellerSprite MCP'den veri çekiliyor… (birkaç saniye sürebilir)";
+
+    const res = isAsin
+      ? await apiFetch(`${API_BASE}/api/analyze-asin`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ asin: keyword, marketplace }),
+        })
+      : await apiFetch(`${API_BASE}/api/analyze`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            keyword, marketplace,
+            ...(categoryOverride ? { category_override_node_id: categoryOverride } : {}),
+          }),
+        });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.detail || `HTTP ${res.status}`);
@@ -229,6 +239,29 @@ function renderPanel(data) {
     badge.className = `verdict-badge ${verdictClass}`;
   }
 
+  // --- ASIN bilgi bloğu (yalnızca reverse ASIN modunda) ---
+  if (data.analysis_mode === "asin" && data.asin_info) {
+    const block = root.querySelector(".asin-info-block");
+    const grid = root.querySelector(".asin-info-grid");
+    if (block && grid) {
+      block.style.display = "block";
+      const a = data.asin_info;
+      const cells = [
+        ["ASIN", a.asin], ["Marka", a.brand], ["Fiyat", a.price != null ? "$" + Number(a.price).toFixed(2) : null],
+        ["Aylık Satış", a.units != null ? fmtNum(a.units) : null],
+        ["Aylık Ciro", a.revenue != null ? "$" + fmtNum(Math.round(a.revenue)) : null],
+        ["BSR", a.bsr], ["Rating", a.rating], ["Review", a.ratings != null ? fmtNum(a.ratings) : null],
+        ["Fulfillment", a.fulfillment], ["Trafik KW Sayısı", a.total_traffic_keywords],
+      ].filter(([, v]) => v !== null && v !== undefined);
+      grid.innerHTML = cells.map(([l, v]) =>
+        `<div class="stat-card"><div class="stat-label">${l}</div><div class="stat-value">${v}</div></div>`).join("");
+      if (a.title) {
+        grid.insertAdjacentHTML("beforebegin",
+          `<div class="asin-title">${a.title}</div>`);
+      }
+    }
+  }
+
   // --- Pazar özeti ---
   const stats = data.market_stats || {};
   const statGrid = root.querySelector(".stat-grid");
@@ -282,7 +315,7 @@ function renderPanel(data) {
       <td>${row.bid != null ? "$" + row.bid.toFixed(2) : "n/a"}</td>
       <td class="${acosClass}">${acos != null ? (acos * 100).toFixed(1) + "%" : "n/a"}</td>
       <td>${row.cpa != null ? "$" + row.cpa.toFixed(2) : "n/a"}</td>
-      <td>${row.relevancy ?? "n/a"}</td>`;
+      <td>${row.relevancy != null ? row.relevancy + (data.analysis_mode === "asin" ? "%" : "") : "n/a"}</td>`;
     tbody.appendChild(tr);
   });
 

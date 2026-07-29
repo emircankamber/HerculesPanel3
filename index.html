@@ -39,7 +39,7 @@
 
   <section id="view-search" class="view active">
     <form id="search-form" class="search-bar">
-      <input type="text" id="kw-input" placeholder="keyword gir (örn. samsung water filter for refrigerators)" required>
+      <input type="text" id="kw-input" placeholder="keyword ya da ASIN gir (örn. samsung water filter  /  B071NFVVNG)" required>
       <select id="market-input">
         <option value="US">US</option>
         <option value="UK">UK</option>
@@ -129,6 +129,11 @@
 
     <div class="section-label">ön değerlendirme <small>(<span class="neg-count"></span>/6 olumsuz · 4+ = Elenmiş)</small></div>
     <div class="crit-grid"></div>
+
+    <div class="asin-info-block" style="display:none;">
+      <div class="section-label">ürün bilgisi <small>(reverse ASIN)</small></div>
+      <div class="asin-info-grid"></div>
+    </div>
 
     <div class="section-label">pazar özeti</div>
     <div class="stat-grid"></div>

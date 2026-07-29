@@ -101,3 +101,20 @@ paneli kullanıp SellerSprite kotanızı harcayabilir.
 - **Tekil silme:** Kararlar ve Geçmiş listelerinde her kaydın yanındaki `×`
 - **Toplu silme:** Her iki sayfanın başlığındaki "Tümünü Temizle"
 - Tüm silme işlemleri giriş yapmayı gerektirir (yetkisiz silme engellenir)
+
+## ASIN İLE ANALİZ (Reverse ASIN)
+
+Arama kutusuna keyword yerine bir **ASIN** (örn. `B071NFVVNG`) yazarsanız panel
+otomatik olarak reverse ASIN moduna geçer (`B0` + 8 karakter formatı algılanır):
+
+1. `competitor_lookup(asins=[ASIN])` → ürün detayı + **gerçek kategori**
+2. `traffic_keyword` → ASIN'in trafik aldığı keyword'ler (organik sıra, reklam
+   sırası, trafik payı, AC rozeti, bid, CVR)
+3. `market_*` → ürünün **kendi** kategorisiyle pazar analizi
+
+**Avantajı:** Kategori tahmin edilmez — ürünün kendi browse-node'u kullanılır.
+Keyword modundaki kategori belirsizliği bu modda tamamen ortadan kalkar.
+
+**Fark:** ACOS hesabında keyword ortalama fiyatı yerine **ürünün kendi fiyatı**
+kullanılır (bu spesifik ürün analiz edildiği için daha doğru). "Relevancy"
+sütunu bu modda **trafik payı yüzdesi**ni gösterir.

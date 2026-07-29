@@ -358,3 +358,8 @@ input:focus,select:focus,textarea:focus{outline:2px solid var(--blue);outline-of
 }
 .card-delete-btn:hover{color:var(--red);background:var(--bg);}
 .decision-card-top{display:flex;justify-content:space-between;align-items:flex-start;gap:6px;}
+
+/* --- ASIN bilgi bloğu --- */
+.asin-info-block{margin-bottom:4px;}
+.asin-title{font-size:13px;color:var(--text-secondary);margin-bottom:10px;line-height:1.5;}
+.asin-info-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(115px,1fr));gap:8px;}
