@@ -76,9 +76,35 @@ _SCHEMAS = [
 ]
 
 
+async def _add_column_if_missing(table: str, column: str, coltype: str):
+    """
+    KRİTİK: CREATE TABLE IF NOT EXISTS zaten var olan tabloyu DEĞİŞTİRMEZ.
+    Bu proje geliştirilirken şema birkaç kez değişti (örn. market_decision'a
+    sonradan user_id eklendi) — daha önce paylaşımlı şemayla kurulmuş canlı bir
+    Postgres/SQLite varsa, yeni kod eksik sütunu sorgulayınca çöker. Bu
+    fonksiyon eksik sütunu güvenle (var olsa bile hata vermeden) ekler.
+    """
+    if USE_POSTGRES:
+        try:
+            await execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {coltype}")
+        except Exception:
+            pass  # sütun zaten varsa ya da yetki sorunu olsa bile akışı bozma
+    else:
+        try:
+            await execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
+        except Exception:
+            pass  # SQLite'ta "duplicate column" hatası -> sütun zaten var, sorun değil
+
+
+async def _migrate_schema():
+    """Eski dağıtımlardan kalan eksik sütunları tamamlar (bkz. _add_column_if_missing)."""
+    await _add_column_if_missing("market_decision", "user_id", "INTEGER")
+
+
 async def init_db():
     for schema in _SCHEMAS:
         await execute(schema)
+    await _migrate_schema()
 
 
 async def init_db_v3():

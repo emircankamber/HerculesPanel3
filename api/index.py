@@ -16,6 +16,7 @@ Test edilmiş gerçek tool davranışları için mcp_client.py'nin docstring'ine
 import os
 import sys
 import time
+import json
 
 # Vercel'in Python runtime'ı bu dosyayı importlib ile dosya-yolu üzerinden
 # yüklüyor ve api/ klasörünü otomatik olarak sys.path'e eklemiyor — bu yüzden
@@ -63,6 +64,22 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(Exception)
+async def _all_exceptions_as_json(request, exc: Exception):
+    """
+    KRİTİK: Vercel'in kendi runtime'ı, yakalanmamış bir hatada FastAPI'yi
+    atlayıp DÜZ METİN ("Internal Server Error") döndürüyor — frontend bunu
+    JSON sanıp parse etmeye çalışınca anlaşılmaz bir hata çıkıyor
+    ("Unexpected token 'I'..."). Bu handler HER hatayı JSON'a çevirir, böylece
+    hata her zaman okunabilir kalır.
+    """
+    return Response(
+        content=json.dumps({"detail": f"Sunucu hatası: {exc}"}),
+        status_code=500,
+        media_type="application/json",
+    )
 
 
 @app.on_event("startup")
