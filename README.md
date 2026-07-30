@@ -118,3 +118,28 @@ Keyword modundaki kategori belirsizliği bu modda tamamen ortadan kalkar.
 **Fark:** ACOS hesabında keyword ortalama fiyatı yerine **ürünün kendi fiyatı**
 kullanılır (bu spesifik ürün analiz edildiği için daha doğru). "Relevancy"
 sütunu bu modda **trafik payı yüzdesi**ni gösterir.
+
+## KİŞİYE ÖZEL HESAPLAR (v2 — mimari değişiklik)
+
+**Önemli değişiklik:** Kararlar ve Geçmiş artık **paylaşımlı değil, tamamen
+kullanıcıya özel**. Her ekip üyesi kendi hesabıyla giriş yapar ve yalnızca
+kendi aradığı keyword'leri ve verdiği kararları görür — başkasının kararını
+göremez, silemez.
+
+**Ama tekrarlı arama serbest:** Aynı keyword'ü/ASIN'i birden fazla kullanıcı
+bağımsız olarak arayabilir. Ham SellerSprite verisi (`keyword_analysis`
+tablosu) hâlâ **paylaşımlı önbellek** olarak kalır — yani biri bir keyword'ü
+sorguladıysa, bir başkası aynısını sorguladığında SellerSprite'a tekrar
+gidilmez (kota tasarrufu), ama bu arama **o kullanıcının kendi Geçmiş'ine**
+ayrı bir kayıt olarak düşer. Yani veri kaynağı paylaşımlı, "kim ne baktı ve
+ne karar verdi" bilgisi kişiye özel.
+
+**Giriş:** E-posta formatı zorunlu değil — basit bir kullanıcı adı da olur.
+Bir kez kaydolduktan sonra hep aynı kullanıcı adı/e-posta + şifre ile giriş
+yapılır. Şifreler PBKDF2-SHA256 ile saklanır.
+
+**Veritabanı tabloları (bu mimari için):**
+- `keyword_analysis` — paylaşımlı SellerSprite veri önbelleği (24 saat TTL)
+- `user_query_log` — kullanıcıya özel "Geçmiş" kaydı
+- `market_decision` — kullanıcıya özel "Kararlar" (user_id NOT NULL)
+- `users` / `sessions` — kimlik doğrulama

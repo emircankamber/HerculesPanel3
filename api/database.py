@@ -16,8 +16,12 @@ _SCHEMAS = [
         fetched_at INTEGER NOT NULL, fetched_by TEXT, payload_json TEXT NOT NULL, verdict TEXT,
         UNIQUE(keyword, marketplace))""",
     """CREATE TABLE IF NOT EXISTS market_decision (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, keyword TEXT NOT NULL, marketplace TEXT NOT NULL,
-        decision TEXT NOT NULL, note TEXT, decided_by TEXT, decided_at INTEGER NOT NULL)""",
+        id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, keyword TEXT NOT NULL,
+        marketplace TEXT NOT NULL, decision TEXT NOT NULL, note TEXT, decided_by TEXT,
+        decided_at INTEGER NOT NULL)""",
+    """CREATE TABLE IF NOT EXISTS user_query_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, keyword TEXT NOT NULL,
+        marketplace TEXT NOT NULL, queried_at INTEGER NOT NULL, verdict TEXT)""",
     """CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL UNIQUE,
         password_hash TEXT NOT NULL, salt TEXT NOT NULL, created_at INTEGER NOT NULL)""",
@@ -166,54 +170,71 @@ async def save_analysis(keyword: str, marketplace: str, payload: dict, fetched_b
     await execute(sql, (keyword, marketplace, now, fetched_by, payload_json, verdict))
 
 
-async def list_recent(limit: int = 50):
-    return await fetch_all(
-        "SELECT id, keyword, marketplace, fetched_at, fetched_by, verdict FROM keyword_analysis "
-        "ORDER BY fetched_at DESC LIMIT ?", (limit,))
-
-
-async def delete_analysis(keyword: str, marketplace: str):
-    await execute("DELETE FROM keyword_analysis WHERE keyword = ? AND marketplace = ?", (keyword, marketplace))
-
-
-async def clear_all_analyses():
-    await execute("DELETE FROM keyword_analysis", ())
-
-
-# ---------------------------------------------------------------------------
-# PAZAR KARARLARI
-# ---------------------------------------------------------------------------
-async def save_decision(keyword: str, marketplace: str, decision: str, note: str, decided_by: str):
+async def log_user_query(user_id: int, keyword: str, marketplace: str, verdict: str = None):
+    """
+    Kişiye özel 'Geçmiş' kaydı. Ham MCP verisi (keyword_analysis) PAYLAŞIMLIDIR
+    (kota tasarrufu için — aynı keyword'ü iki kullanıcı sorgularsa tekrar
+    SellerSprite'a gidilmez), ama "kim ne baktı" kaydı tamamen kişiye özeldir.
+    """
     await execute(
-        "INSERT INTO market_decision (keyword, marketplace, decision, note, decided_by, decided_at) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (keyword, marketplace, decision, note, decided_by, int(time.time())))
+        "INSERT INTO user_query_log (user_id, keyword, marketplace, queried_at, verdict) VALUES (?,?,?,?,?)",
+        (user_id, keyword, marketplace, int(time.time()), verdict))
 
 
-async def list_decisions_grouped():
-    """Her (keyword, marketplace) için EN SON kararı alıp gruplar."""
+async def list_recent(user_id: int, limit: int = 50):
+    """Yalnızca BU kullanıcının sorguladığı keyword'leri döner — herkese özel."""
+    return await fetch_all(
+        "SELECT id, keyword, marketplace, queried_at AS fetched_at, verdict FROM user_query_log "
+        "WHERE user_id = ? ORDER BY queried_at DESC LIMIT ?", (user_id, limit))
+
+
+async def delete_analysis(user_id: int, keyword: str, marketplace: str):
+    """Yalnızca kullanıcının KENDİ geçmiş kaydını siler (paylaşımlı ham veriye dokunmaz)."""
+    await execute(
+        "DELETE FROM user_query_log WHERE user_id = ? AND keyword = ? AND marketplace = ?",
+        (user_id, keyword, marketplace))
+
+
+async def clear_all_analyses(user_id: int):
+    await execute("DELETE FROM user_query_log WHERE user_id = ?", (user_id,))
+
+
+# ---------------------------------------------------------------------------
+# PAZAR KARARLARI — tamamen kullanıcıya özel
+# ---------------------------------------------------------------------------
+async def save_decision(user_id: int, keyword: str, marketplace: str, decision: str, note: str, decided_by: str):
+    await execute(
+        "INSERT INTO market_decision (user_id, keyword, marketplace, decision, note, decided_by, decided_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (user_id, keyword, marketplace, decision, note, decided_by, int(time.time())))
+
+
+async def list_decisions_grouped(user_id: int):
+    """Yalnızca BU kullanıcının kararlarını, her (keyword, marketplace) için EN SONU alıp gruplar."""
     rows = await fetch_all("""
         SELECT md.id, md.keyword, md.marketplace, md.decision, md.note, md.decided_by, md.decided_at
         FROM market_decision md
-        WHERE md.id = (
+        WHERE md.user_id = ? AND md.id = (
             SELECT md2.id FROM market_decision md2
-            WHERE md2.keyword = md.keyword AND md2.marketplace = md.marketplace
+            WHERE md2.user_id = ? AND md2.keyword = md.keyword AND md2.marketplace = md.marketplace
             ORDER BY md2.decided_at DESC, md2.id DESC LIMIT 1)
         ORDER BY md.decided_at DESC
-    """)
+    """, (user_id, user_id))
     grouped = {"Uygun": [], "Sınırda": [], "Elenmiş": []}
     for r in rows:
         grouped.setdefault(r["decision"], []).append(r)
     return grouped
 
 
-async def delete_decision(keyword: str, marketplace: str):
-    """Bir keyword'ün TÜM karar geçmişini siler."""
-    await execute("DELETE FROM market_decision WHERE keyword = ? AND marketplace = ?", (keyword, marketplace))
+async def delete_decision(user_id: int, keyword: str, marketplace: str):
+    """Yalnızca kullanıcının KENDİ kararını siler — başkasının kararına dokunamaz."""
+    await execute(
+        "DELETE FROM market_decision WHERE user_id = ? AND keyword = ? AND marketplace = ?",
+        (user_id, keyword, marketplace))
 
 
-async def clear_all_decisions():
-    await execute("DELETE FROM market_decision", ())
+async def clear_all_decisions(user_id: int):
+    await execute("DELETE FROM market_decision WHERE user_id = ?", (user_id,))
 
 
 # ---------------------------------------------------------------------------

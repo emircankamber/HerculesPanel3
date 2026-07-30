@@ -241,10 +241,15 @@ class AnalyzeRequest(BaseModel):
 
 @app.post("/api/analyze")
 async def analyze(req: AnalyzeRequest, user: dict = Depends(require_auth)):
-    # 1) Önbellek kontrolü — ekip aynı keyword'ü tekrar sorgularsa MCP'ye gitme
+    uid = user.get("user_id", 0)
+    # 1) Önbellek kontrolü — PAYLAŞIMLI ham veri (kota tasarrufu, tekrarlı arama
+    #    engellenmez). Ama önbellekten dönse bile BU kullanıcının "baktığı" kaydı
+    #    kişiye özel geçmişe (user_query_log) düşer.
     if not req.force_refresh:
         cached = await db.get_cached(req.keyword, req.marketplace)
         if cached:
+            await db.log_user_query(uid, req.keyword, req.marketplace,
+                                     cached.get("pre_assessment", {}).get("verdict"))
             return {**cached, "source": "cache"}
 
     try:
@@ -438,6 +443,7 @@ async def analyze(req: AnalyzeRequest, user: dict = Depends(require_auth)):
         }
 
         await db.save_analysis(req.keyword, req.marketplace, payload, req.requested_by)
+        await db.log_user_query(uid, req.keyword, req.marketplace, assessment.get("verdict"))
         return {**payload, "source": "live"}
 
     except KeyError as e:
@@ -499,20 +505,23 @@ class DecisionRequest(BaseModel):
 
 
 @app.post("/api/decision")
-async def save_decision(req: DecisionRequest):
-    await db.save_decision(req.keyword, req.marketplace, req.decision, req.note, req.decided_by)
+async def save_decision(req: DecisionRequest, user: dict = Depends(require_auth)):
+    uid = user.get("user_id", 0)
+    await db.save_decision(uid, req.keyword, req.marketplace, req.decision, req.note, user.get("email", req.decided_by))
     return {"ok": True}
 
 
 @app.get("/api/decisions")
-async def get_decisions():
-    """Tüm kararlandırılmış keyword'leri Uygun/Sınırda/Elenmiş olarak gruplu döner."""
-    return await db.list_decisions_grouped()
+async def get_decisions(user: dict = Depends(require_auth)):
+    """Yalnızca BU KULLANICININ kararlarını Uygun/Sınırda/Elenmiş olarak gruplu döner."""
+    return await db.list_decisions_grouped(user.get("user_id", 0))
 
 
 @app.get("/api/recent")
-async def recent(limit: int = Query(50, le=200)):
-    return await db.list_recent(limit)
+async def recent(limit: int = Query(50, le=200), user: dict = Depends(require_auth)):
+    """Yalnızca BU KULLANICININ sorguladığı keyword'lerin geçmişi — herkese özel."""
+    return await db.list_recent(user.get("user_id", 0), limit)
+
 
 
 def _safe_filename(keyword: str, suffix: str) -> str:
@@ -1076,26 +1085,27 @@ class DeleteKeywordRequest(BaseModel):
 
 @app.post("/api/decisions/delete")
 async def delete_decision_ep(req: DeleteKeywordRequest, user: dict = Depends(require_auth)):
-    await db.delete_decision(req.keyword, req.marketplace)
+    await db.delete_decision(user.get("user_id", 0), req.keyword, req.marketplace)
     return {"ok": True, "deleted_by": user["email"]}
 
 
 @app.post("/api/history/delete")
 async def delete_history_ep(req: DeleteKeywordRequest, user: dict = Depends(require_auth)):
-    await db.delete_analysis(req.keyword, req.marketplace)
+    await db.delete_analysis(user.get("user_id", 0), req.keyword, req.marketplace)
     return {"ok": True, "deleted_by": user["email"]}
 
 
 @app.post("/api/decisions/clear")
 async def clear_decisions_ep(user: dict = Depends(require_auth)):
-    await db.clear_all_decisions()
+    await db.clear_all_decisions(user.get("user_id", 0))
     return {"ok": True}
 
 
 @app.post("/api/history/clear")
 async def clear_history_ep(user: dict = Depends(require_auth)):
-    await db.clear_all_analyses()
+    await db.clear_all_analyses(user.get("user_id", 0))
     return {"ok": True}
+
 
 
 # ---------------------------------------------------------------------------
@@ -1120,10 +1130,13 @@ async def analyze_asin(req: AnalyzeAsinRequest, user: dict = Depends(require_aut
     """
     asin = req.asin.strip().upper()
     cache_key = f"ASIN:{asin}"
+    uid = user.get("user_id", 0)
 
     if not req.force_refresh:
         cached = await db.get_cached(cache_key, req.marketplace)
         if cached:
+            await db.log_user_query(uid, cache_key, req.marketplace,
+                                     cached.get("pre_assessment", {}).get("verdict"))
             return {**cached, "source": "cache"}
 
     try:
@@ -1245,6 +1258,7 @@ async def analyze_asin(req: AnalyzeAsinRequest, user: dict = Depends(require_aut
         }
 
         await db.save_analysis(cache_key, req.marketplace, payload, user.get("email"))
+        await db.log_user_query(uid, cache_key, req.marketplace, assessment.get("verdict"))
         return {**payload, "source": "live"}
 
     except HTTPException:

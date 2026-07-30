@@ -609,11 +609,21 @@ function drawPriceChart(canvas, items) {
   });
 }
 
+const LAUNCH_LABEL_TR = {
+  "1个月": "≤1 ay", "半年": "~6 ay", "1年半": "~1.5 yıl",
+  "2年半": "~2.5 yıl", "3年以上": "3+ yıl",
+  "1个月以内": "≤1 ay", "3个月": "~3 ay", "6个月": "~6 ay",
+  "1年": "~1 yıl", "2年": "~2 yıl", "3年": "~3 yıl",
+};
+function translateLaunchLabel(label) {
+  return LAUNCH_LABEL_TR[label] || label;
+}
+
 function drawLaunchChart(canvas, items) {
   if (!items || !items.length) return;
   new Chart(canvas, {
     type: "bar",
-    data: { labels: items.map(i => i.label ?? i.range), datasets: [{ data: items.map(i => (i.unitsRatio ?? i.ratio ?? i.percentage ?? 0) * 100), backgroundColor: "#E8A33D", borderRadius: 4 }] },
+    data: { labels: items.map(i => translateLaunchLabel(i.label ?? i.range)), datasets: [{ data: items.map(i => (i.unitsRatio ?? i.ratio ?? i.percentage ?? 0) * 100), backgroundColor: "#E8A33D", borderRadius: 4 }] },
     options: baseOptions({ scales: { y: { ticks: { callback: v => v + "%", color: "#9AA3B2" }, grid: { color: "#2C323D" } }, x: { grid: { display: false }, ticks: { color: "#9AA3B2" } } } }),
   });
 }
