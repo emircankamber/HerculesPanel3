@@ -23,11 +23,15 @@ async function apiFetch(url, options = {}) {
   return res;
 }
 
-function showLogin(errorMsg = "") {
+let authRequiredGlobal = false;
+
+function showLogin(errorMsg = "", dismissible = false) {
   const overlay = document.getElementById("login-overlay");
   if (overlay) overlay.style.display = "flex";
   const err = document.getElementById("login-error");
   if (err) err.textContent = errorMsg;
+  const dismissBtn = document.getElementById("dismiss-login-btn");
+  if (dismissBtn) dismissBtn.style.display = dismissible ? "block" : "none";
 }
 function hideLogin() {
   const overlay = document.getElementById("login-overlay");
@@ -38,6 +42,7 @@ async function checkAuthStatus() {
   try {
     const res = await apiFetch(`${API_BASE}/api/auth/status`);
     const s = await res.json();
+    authRequiredGlobal = !!s.auth_required;
 
     // Paylaşımlı depolama uyarısı
     const warnEl = document.getElementById("storage-warning");
@@ -50,13 +55,16 @@ async function checkAuthStatus() {
 
     const chip = document.getElementById("user-chip");
     const logoutBtn = document.getElementById("logout-btn");
+    const openLoginBtn = document.getElementById("open-login-btn");
     if (s.auth_required && !s.logged_in) {
       showLogin();
     } else {
       hideLogin();
-      if (chip) chip.textContent = s.email || (s.auth_required ? "" : "auth kapalı");
+      if (chip) chip.textContent = s.email || (s.auth_required ? "" : "auth kapalı — henüz kullanıcı yok");
       if (logoutBtn) logoutBtn.style.display = s.logged_in ? "inline-block" : "none";
     }
+    // Giriş yapılmamışsa (auth zorunlu olsun olmasın) manuel giriş/kayıt butonu görünsün
+    if (openLoginBtn) openLoginBtn.style.display = s.logged_in ? "none" : "inline-block";
   } catch {
     // Backend erişilemezse giriş ekranını zorla açma — kullanıcı en azından hatayı görsün
   }
@@ -86,8 +94,12 @@ document.addEventListener("DOMContentLoaded", () => {
   const loginBtn = document.getElementById("login-btn");
   const regBtn = document.getElementById("register-btn");
   const logoutBtn = document.getElementById("logout-btn");
+  const openLoginBtn = document.getElementById("open-login-btn");
+  const dismissLoginBtn = document.getElementById("dismiss-login-btn");
   if (loginBtn) loginBtn.addEventListener("click", () => doAuth("login"));
   if (regBtn) regBtn.addEventListener("click", () => doAuth("register"));
+  if (openLoginBtn) openLoginBtn.addEventListener("click", () => showLogin("", !authRequiredGlobal));
+  if (dismissLoginBtn) dismissLoginBtn.addEventListener("click", () => hideLogin());
   if (logoutBtn) logoutBtn.addEventListener("click", async () => {
     await apiFetch(`${API_BASE}/api/auth/logout`, { method: "POST" });
     setToken("");
