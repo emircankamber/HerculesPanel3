@@ -12,9 +12,12 @@ CACHE_TTL_SECONDS = 24 * 3600
 
 # Payload biçimi her değiştiğinde bu sürüm artırılır. Eski sürümle kaydedilmiş
 # önbellek kayıtları otomatik geçersiz sayılır ve veri yeniden çekilir.
-# (v2: pre_assessment kriterlerine "unit" alanı eklendi — eski kayıtlarda bu alan
-#  olmadığı için panel "Ort. Satış Fiyatı 35.48" değerini "%3548" gösteriyordu.)
-PAYLOAD_VERSION = 2
+# (v2: pre_assessment kriterlerine "unit" alanı eklendi
+#  v3: search_volume_trend eklendi (keyword'ün kendi arama hacmi grafiği) —
+#  bu artış YAPILMADAN önce "Search Volume Trend" grafiği boş kalıyordu çünkü
+#  v2'de damgalanmış eski kayıtlarda bu alan hiç yoktu, panel önbellekten
+#  dönüyordu ve gerçek MCP çağrısı hiç yapılmıyordu.)
+PAYLOAD_VERSION = 3
 
 _SCHEMAS = [
     """CREATE TABLE IF NOT EXISTS keyword_analysis (
