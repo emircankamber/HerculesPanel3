@@ -17,6 +17,7 @@ import os
 import sys
 import time
 import json
+import re
 
 # Vercel'in Python runtime'ı bu dosyayı importlib ile dosya-yolu üzerinden
 # yüklüyor ve api/ klasörünü otomatik olarak sys.path'e eklemiyor — bu yüzden
@@ -107,6 +108,27 @@ async def require_auth(authorization: str | None = Header(default=None)) -> dict
 # ---------------------------------------------------------------------------
 # Yardımcı: SellerSprite yanıtlarından liste çıkar (gerçek veriyle doğrulandı)
 # ---------------------------------------------------------------------------
+def _parse_keyword_trend(resp: dict, last_n: int = 12) -> list:
+    """
+    keyword_research_trends'in gerçek yanıt şekli: "data" DOĞRUDAN bir liste,
+    her ay için {"time": "2026年07月", "search": 19813, "purchase": 1921, ...}.
+    "time" alanı Çince format — "2026-07" gibi okunabilir hale çeviriyoruz.
+    Grafik kalabalık olmasın diye son `last_n` ay döndürülür (veri zaten
+    kronolojik sıralı geliyor).
+    """
+    items = resp.get("data") if isinstance(resp.get("data"), list) else []
+    parsed = []
+    for it in items:
+        m = re.match(r"(\d{4})年(\d{1,2})月", it.get("time", ""))
+        month_label = f"{m.group(1)}-{int(m.group(2)):02d}" if m else it.get("time")
+        parsed.append({
+            "month": month_label,
+            "search_volume": it.get("search"),
+            "purchases": it.get("purchase"),
+        })
+    return parsed[-last_n:] if parsed else []
+
+
 def _extract_list(resp: dict) -> list:
     """
     KRİTİK BULGU (gerçek MCP çağrılarıyla doğrulandı): market_brand_concentration,
@@ -373,6 +395,19 @@ async def analyze(req: AnalyzeRequest, user: dict = Depends(require_auth)):
                 call_tool("market_product_demand_trend", {"marketplace": req.marketplace, "nodeIdPath": node_id_path, "topN": 10}),
             )
 
+        # KEYWORD'ÜN KENDİ ARAMA HACMİ TRENDİ — KRİTİK DÜZELTME:
+        # Panel eskiden "Trafik Trendi" grafiğinde market_product_demand_trend'in
+        # glanceViews (KATEGORİ genelindeki milyonlarca sayfa görüntülenmesi)
+        # alanını gösteriyordu — bu keyword'ün arama hacmiyle karışabiliyordu ve
+        # sayılar (4-5 milyon) yanıltıcıydı. Gerçek MCP çağrısıyla doğrulandı:
+        # keyword_research_trends bu KEYWORD'ün kendi aylık arama hacmini
+        # (search alanı) veriyor — asıl istenen bu. Ayrı, doğru bir alan olarak
+        # ekleniyor; demand_trend (return_rate için) DEĞİŞMEDİ, ayrıca duruyor.
+        kw_trend_raw = await call_tool("keyword_research_trends", {
+            "keyword": req.keyword, "marketplace": req.marketplace,
+        })
+        search_volume_trend = _parse_keyword_trend(kw_trend_raw)
+
         # 4) Keyword listesindeki her satır için hesaplanan reklam metrikleri (GENİŞ liste — tablo için)
         raw_items = kw_data.get("data", {}).get("items", []) if isinstance(kw_data.get("data"), dict) else kw_data.get("items", [])
         keyword_rows = []
@@ -449,6 +484,7 @@ async def analyze(req: AnalyzeRequest, user: dict = Depends(require_auth)):
             "price_distribution": _extract_list(price_dist),
             "launch_distribution": _extract_list(launch_dist),
             "demand_trend": demand_trend,
+            "search_volume_trend": search_volume_trend,  # keyword'ün KENDİ arama hacmi (bkz. _parse_keyword_trend)
             # GERÇEK PAZAR İADE ORANI — market_product_demand_trend'in "returnRatio"
             # alanından (gerçek MCP çağrısıyla doğrulandı: örn. 3.1668 = %3.1668,
             # yani ham değer zaten yüzde sayısı, /100 ile orana çevriliyor).
@@ -1216,6 +1252,16 @@ async def analyze_asin(req: AnalyzeAsinRequest, user: dict = Depends(require_aut
                 call_tool("market_product_demand_trend", {"marketplace": req.marketplace, "nodeIdPath": node_id_path, "topN": 10}),
             )
 
+        # ASIN'in EN ÇOK trafik aldığı kelimenin arama hacmi trendi (bkz. keyword
+        # akışındaki aynı isimli notta anlatılan gerekçe — kategori geneli değil,
+        # bu ürünün asıl aranma kanalının kendi arama hacmi).
+        search_volume_trend = []
+        if main_row and main_row.get("keyword"):
+            kw_trend_raw = await call_tool("keyword_research_trends", {
+                "keyword": main_row["keyword"], "marketplace": req.marketplace,
+            })
+            search_volume_trend = _parse_keyword_trend(kw_trend_raw)
+
         # 4) Aynı kategorideki top rakipler (bu ASIN hariç)
         comp_raw = await call_tool("competitor_lookup", {
             "marketplace": req.marketplace, "nodeIdPath": node_id_path, "size": 20,
@@ -1269,6 +1315,7 @@ async def analyze_asin(req: AnalyzeAsinRequest, user: dict = Depends(require_aut
             "price_distribution": _extract_list(price_dist),
             "launch_distribution": _extract_list(launch_dist),
             "demand_trend": demand_trend,
+            "search_volume_trend": search_volume_trend,
             "market_return_rate": (
                 (demand_trend.get("data", {}) or {}).get("returnRatio") / 100
                 if isinstance(demand_trend.get("data"), dict) and demand_trend.get("data", {}).get("returnRatio") is not None

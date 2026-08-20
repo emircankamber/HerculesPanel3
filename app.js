@@ -366,7 +366,7 @@ function renderPanel(data) {
     drawBrandChart(root.querySelector(".chart-brand"), data.brand_concentration || []);
     drawPriceChart(root.querySelector(".chart-price"), data.price_distribution || []);
     drawLaunchChart(root.querySelector(".chart-launch"), data.launch_distribution || []);
-    drawTrendChart(root.querySelector(".chart-trend"), data.demand_trend);
+    drawTrendChart(root.querySelector(".chart-trend"), data.search_volume_trend || []);
   });
 
   // --- Relevant keywords tablosu ---
@@ -713,12 +713,17 @@ function drawLaunchChart(canvas, items) {
   });
 }
 
-function drawTrendChart(canvas, trend) {
-  const items = trend?.data?.items || trend?.items || [];
-  if (!items.length) return;
+// KRİTİK DÜZELTME: eskiden demand_trend'in glanceViews'ı (KATEGORİ genelinde
+// milyonlarca sayfa görüntülenmesi) gösteriliyordu — kullanıcı gerçek ekran
+// görüntüsüyle "milyonluk trafik yok, bu keyword'ün search volume'u olmalı"
+// diye işaret etti, haklıydı. Artık backend'in ayrıca gönderdiği
+// search_volume_trend (keyword_research_trends'ten, keyword'ün KENDİ aylık
+// arama hacmi) kullanılıyor — gerçek MCP çağrısıyla doğrulandı.
+function drawTrendChart(canvas, items) {
+  if (!items || !items.length) return;
   new Chart(canvas, {
     type: "line",
-    data: { labels: items.map(i => i.date?.slice(0, 7) ?? ""), datasets: [{ data: items.map(i => i.glanceViews ?? i.value ?? 0), borderColor: "#2FBF9F", backgroundColor: "rgba(47,191,159,0.1)", fill: true, tension: 0.3, pointRadius: 2 }] },
+    data: { labels: items.map(i => i.month ?? ""), datasets: [{ data: items.map(i => i.search_volume ?? 0), borderColor: "#2FBF9F", backgroundColor: "rgba(47,191,159,0.1)", fill: true, tension: 0.3, pointRadius: 2 }] },
     options: baseOptions(),
   });
 }
