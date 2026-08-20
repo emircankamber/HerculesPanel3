@@ -294,7 +294,7 @@ function renderPanel(data) {
   // ASIN modunda "İlgililik" sütunu aslında TRAFİK PAYI'nı gösteriyor — başlığı düzelt
   const relHeader = root.querySelector(".th-relevancy");
   if (relHeader && data.analysis_mode === "asin") {
-    relHeader.textContent = "Trafik Payı";
+    relHeader.textContent = "Traffic Share";
     relHeader.title = "Bu ürünün toplam trafiğinin yüzde kaçı bu kelimeden geliyor";
   }
 
@@ -309,7 +309,7 @@ function renderPanel(data) {
         ["ASIN", a.asin], ["Marka", a.brand], ["Fiyat", a.price != null ? "$" + Number(a.price).toFixed(2) : null],
         ["Aylık Satış", a.units != null ? fmtCompact(a.units) : null],
         ["Aylık Ciro", a.revenue != null ? "$" + fmtCompact(Math.round(a.revenue)) : null],
-        ["BSR", a.bsr], ["Rating", a.rating], ["Yorum", a.ratings != null ? fmtCompact(a.ratings) : null],
+        ["BSR", a.bsr], ["Rating", a.rating], ["Review", a.ratings != null ? fmtCompact(a.ratings) : null],
         ["Fulfillment", a.fulfillment], ["Trafik KW Sayısı", a.total_traffic_keywords],
       ].filter(([, v]) => v !== null && v !== undefined);
       grid.innerHTML = cells.map(([l, v]) =>
@@ -326,10 +326,10 @@ function renderPanel(data) {
   const statGrid = root.querySelector(".stat-grid");
   const statEntries = [
     ["Ort. Fiyat", stats.avgPrice, "$", "Pazardaki ürünlerin ortalama satış fiyatı"],
-    ["Ort. Puan", stats.avgRating, "", "Pazardaki ürünlerin ortalama yıldız puanı (5 üzerinden)"],
-    ["Ort. Yorum", stats.avgRatings, "compact", "Ürün başına ortalama yorum sayısı. Yüksekse pazara girmek zor."],
-    ["Marka Sayısı", stats.brands, "", "Pazarda satış yapan toplam marka sayısı"],
-    ["Ürün Başı Satıcı", stats.avgSellers, "", "Bir listing'de ortalama kaç satıcı var. Yüksekse Buy Box rekabeti sert."],
+    ["Ort. Rating", stats.avgRating, "", "Pazardaki ürünlerin ortalama yıldız puanı (5 üzerinden)"],
+    ["Ort. Review", stats.avgRatings, "compact", "Ürün başına ortalama yorum sayısı. Yüksekse pazara girmek zor."],
+    ["Toplam Marka", stats.brands, "", "Pazarda satış yapan toplam marka sayısı"],
+    ["Ort. Satıcı", stats.avgSellers, "", "Bir listing'de ortalama kaç satıcı var. Yüksekse Buy Box rekabeti sert."],
     ["Yeni Ürün (12 ay)", stats.newProducts, "", "Son 12 ayda pazara giren ürün sayısı"],
     ["Yeni Ürün Oranı", stats.newProductProportion, "%mul100", "Yeni ürünlerin toplam içindeki payı. Yüksekse pazar hareketli."],
     ["İlk Listing", stats.firstShelfDate, "", "Bu pazardaki en eski ürünün listelenme tarihi. Eskiyse pazar oturmuş."],
