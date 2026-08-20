@@ -249,6 +249,14 @@ function renderPanel(data) {
   // ediyordu — "Güçlü Yeni Marka" gibi düz SAYI kriterlerinde (örn. 2 marka)
   // bunu yanlışlıkla "200.0%" gösteriyordu (gerçek kullanıcı raporuyla bulundu).
   // Artık backend'in gönderdiği c.unit alanına göre kesin biçimlendiriyor.
+  // Eski önbellek kayıtlarında (unit alanı eklenmeden önce kaydedilmiş) c.unit
+  // boş gelir; bu durumda etiketten çıkarım yapıyoruz. Aksi halde "Ort. Satış
+  // Fiyatı 35.48" -> "%3548" gibi absürt değerler çıkıyordu.
+  const UNIT_BY_LABEL = {
+    "Ort. Satış Fiyatı": "usd",
+    "Güçlü Yeni Marka (1 yıl)": "count",
+  };
+  const resolveUnit = (c) => c.unit || UNIT_BY_LABEL[c.label] || "percent";
   const fmtCrit = (v, unit) => {
     if (v === null || v === undefined) return "n/a";
     if (typeof v !== "number") return v;
@@ -262,11 +270,11 @@ function renderPanel(data) {
     div.dataset.label = c.label;
     div.dataset.direction = c.direction;
     div.dataset.threshold = c.threshold;
-    div.dataset.unit = c.unit || "percent";
+    div.dataset.unit = resolveUnit(c);
     if (CRIT_HELP[c.label]) div.title = CRIT_HELP[c.label];
     const dirLabel = c.direction === ">=" ? "≥" : "≤";
     div.innerHTML = `
-      <span>${c.label}<br><span class="crit-val">${fmtCrit(c.value, c.unit)} <small>(${dirLabel}${fmtCrit(c.threshold, c.unit)})</small></span></span>
+      <span>${c.label}<br><span class="crit-val">${fmtCrit(c.value, resolveUnit(c))} <small>(${dirLabel}${fmtCrit(c.threshold, resolveUnit(c))})</small></span></span>
       <span class="crit-flag ${c.flag === "OK" ? "ok" : c.flag === "OLUMSUZ" ? "olumsuz" : "na"}">${c.flag}</span>`;
     critGrid.appendChild(div);
   });
@@ -606,11 +614,6 @@ function renderPanel(data) {
   container.innerHTML = "";
   container.appendChild(tpl);
 
-  // --- Debug (geçici) ---
-  const debugEl = document.querySelector(".debug-json");
-  if (debugEl) {
-    debugEl.textContent = JSON.stringify(data._debug ?? { not_found: "..._debug alanı yok, backend güncel değil" }, null, 2);
-  }
 }
 
 async function downloadBlob(response, filename) {

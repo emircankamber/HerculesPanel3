@@ -10,6 +10,12 @@ from db_adapter import execute, execute_returning_id, fetch_all, fetch_one, stor
 
 CACHE_TTL_SECONDS = 24 * 3600
 
+# Payload biçimi her değiştiğinde bu sürüm artırılır. Eski sürümle kaydedilmiş
+# önbellek kayıtları otomatik geçersiz sayılır ve veri yeniden çekilir.
+# (v2: pre_assessment kriterlerine "unit" alanı eklendi — eski kayıtlarda bu alan
+#  olmadığı için panel "Ort. Satış Fiyatı 35.48" değerini "%3548" gösteriyordu.)
+PAYLOAD_VERSION = 2
+
 _SCHEMAS = [
     """CREATE TABLE IF NOT EXISTS keyword_analysis (
         id INTEGER PRIMARY KEY AUTOINCREMENT, keyword TEXT NOT NULL, marketplace TEXT NOT NULL,
@@ -174,10 +180,15 @@ async def get_cached(keyword: str, marketplace: str):
         return None
     if time.time() - row["fetched_at"] > CACHE_TTL_SECONDS:
         return None
-    return json.loads(row["payload_json"])
+    payload = json.loads(row["payload_json"])
+    # Eski biçimde kaydedilmiş kayıtları kullanma — yeniden çekilsin
+    if payload.get("_v") != PAYLOAD_VERSION:
+        return None
+    return payload
 
 
 async def save_analysis(keyword: str, marketplace: str, payload: dict, fetched_by: str = None):
+    payload = {**payload, "_v": PAYLOAD_VERSION}
     verdict = payload.get("pre_assessment", {}).get("verdict")
     payload_json = json.dumps(payload)
     now = int(time.time())

@@ -315,7 +315,25 @@ async def analyze(req: AnalyzeRequest, user: dict = Depends(require_auth)):
             node_id_path = node.get("nodeIdPath") if node else None
             category_used_label = (node.get("nodeLabelPath") + " (tahmin — yedek yöntem)") if node else None
 
-        # Top Rakipler tablosu için sadeleştirilmiş alanlar (panelde gösterilecek)
+        # TOP RAKİPLER — KRİTİK DÜZELTME:
+        # Eskiden kategori tespiti için yapılan matchType=3 (birebir başlık eşleşme)
+        # çağrısının sonucu rakip listesi olarak da kullanılıyordu. Sorun: bu, ürün
+        # BAŞLIĞINDA aranan kelimeyi birebir arıyor — Samsung'un kendi ürününün
+        # başlığı "SAMSUNG Genuine Filter for Refrigerator HAF-QIN/EXP" olduğu için
+        # "samsung water filter" aramasında ORİJİNAL ÜRÜN listeye HİÇ GİRMİYORDU;
+        # sadece başlığında o kelime dizisi geçen compatible markalar geliyordu.
+        # Çözüm: kategori belli olduktan sonra o kategorinin GERÇEK EN ÇOK SATANLARINI
+        # ayrı bir çağrıyla çekiyoruz (nodeIdPath + satış adedine göre sıralı, 20 ürün).
+        top_competitor_items = competitor_items or []
+        if node_id_path:
+            best_sellers_raw = await call_tool("competitor_lookup", {
+                "marketplace": req.marketplace, "nodeIdPath": node_id_path, "size": 20,
+                "order": {"field": "total_units", "desc": True}, "variation": "N",
+            })
+            bs_items = best_sellers_raw.get("data", {}).get("items", []) if isinstance(best_sellers_raw.get("data"), dict) else []
+            if bs_items:
+                top_competitor_items = bs_items
+
         top_competitors = [{
             "asin": it.get("asin"), "brand": it.get("brand"), "title": it.get("title"),
             "price": it.get("price") or it.get("averagePrice"),
@@ -323,20 +341,20 @@ async def analyze(req: AnalyzeRequest, user: dict = Depends(require_auth)):
             "revenue": it.get("revenue") or it.get("amzSales"),
             "bsr": it.get("bsr"), "rating": it.get("rating"), "ratings": it.get("ratings"),
             "fulfillment": it.get("fulfillment"), "availableDate": it.get("availableDate"),
-        } for it in (competitor_items or [])]
+        } for it in top_competitor_items]
 
         # GÜÇLÜ YENİ MARKA (1 yıl) — gerçek veriden hesaplanan proxy:
-        # Otomatik çekilen top 10 rakip (zaten en yüksek satış hacmine göre
-        # sıralı gerçek ürünler) arasında, listeleme tarihi (availableDate,
-        # gerçek Amazon verisi) son 12 ay içinde olan DİSTİNCT marka sayısı.
-        # DÜRÜSTLÜK NOTU: Bu tüm pazarı değil, yalnızca top 10 rakibi tarar —
-        # yani küçük örneklemli bir proxy'dir, pazarın TAMAMINDA kaç yeni
+        # Kategorinin en çok satan ürünleri arasında, listeleme tarihi
+        # (availableDate, gerçek Amazon verisi) son 12 ay içinde olan DİSTİNCT
+        # marka sayısı.
+        # DÜRÜSTLÜK NOTU: Bu tüm pazarı değil, yalnızca en çok satan ~20 ürünü
+        # tarar — küçük örneklemli bir göstergedir, pazarın TAMAMINDA kaç yeni
         # markanın güçlendiğinin kesin sayımı değildir. Yine de tahmin değil,
         # gerçek ASIN-bazlı listeleme tarihi verisine dayanır.
         one_year_ms = 365 * 24 * 3600 * 1000
         now_ms = time.time() * 1000
         recent_brands = {
-            it.get("brand") for it in (competitor_items or [])
+            it.get("brand") for it in top_competitor_items
             if it.get("brand") and it.get("availableDate") and (now_ms - it["availableDate"]) <= one_year_ms
         }
         strong_new_brands_count = len(recent_brands)
@@ -442,21 +460,6 @@ async def analyze(req: AnalyzeRequest, user: dict = Depends(require_auth)):
             ),
             "top_competitors": top_competitors,  # otomatik çekildi (competitor_lookup, matchType=3)
             "pre_assessment": assessment,
-            # GEÇİCİ DEBUG ALANI — gerçek MCP yanıt şeklini görmek için.
-            # Veri şekli netleşince bu alan kaldırılacak.
-            "_debug": {
-                "node_id_path": node_id_path,
-                "category_candidates_top3": category_candidates,
-                "preferred_departments_used": preferred_departments,
-                "competitor_category_raw": competitor_category_raw,
-                "product_node_raw": product_node_raw,
-                "keyword_miner_raw": kw_data,
-                "market_stats_raw": market_stats,
-                "brand_concentration_raw": brand_conc,
-                "price_distribution_raw": price_dist,
-                "launch_distribution_raw": launch_dist,
-                "demand_trend_raw": demand_trend,
-            },
         }
 
         await db.save_analysis(req.keyword, req.marketplace, payload, req.requested_by)
@@ -1215,7 +1218,7 @@ async def analyze_asin(req: AnalyzeAsinRequest, user: dict = Depends(require_aut
 
         # 4) Aynı kategorideki top rakipler (bu ASIN hariç)
         comp_raw = await call_tool("competitor_lookup", {
-            "marketplace": req.marketplace, "nodeIdPath": node_id_path, "size": 10,
+            "marketplace": req.marketplace, "nodeIdPath": node_id_path, "size": 20,
             "order": {"field": "total_units", "desc": True}, "variation": "N",
         }) if node_id_path else {}
         comp_items = comp_raw.get("data", {}).get("items", []) if isinstance(comp_raw.get("data"), dict) else []
