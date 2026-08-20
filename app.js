@@ -215,18 +215,58 @@ function renderPanel(data) {
   badge.classList.add(verdictClass);
   root.querySelector(".neg-count").textContent = pa.negative_count ?? "—";
 
+  // --- Sade dille özet: neden bu karar? ---
+  function buildPlainSummary(assessment) {
+    const negatives = (assessment.criteria || []).filter(c => c.flag === "OLUMSUZ");
+    const naCount = (assessment.criteria || []).filter(c => c.flag === "n/a").length;
+    const REASON = {
+      "Ort. Satış Fiyatı": "ortalama fiyat düşük (kar marjı sıkışır)",
+      "Gross Margin": "pazarın brüt kar marjı hedefin altında",
+      "ACOS": "reklam maliyeti yüksek",
+      "En Büyük Marka Payı": "tek bir marka pazara hakim",
+      "Güçlü Yeni Marka (1 yıl)": "son 1 yılda pazara girip tutunabilen marka çok az",
+      "Net Kar Marjı (kar analizi)": "girdiğiniz maliyetlerle net kar marjı yetersiz",
+    };
+    let txt;
+    if (!negatives.length) {
+      txt = "Tüm kriterler olumlu. Bu pazar ilk bakışta girilebilir görünüyor.";
+    } else {
+      const reasons = negatives.map(c => REASON[c.label] || c.label).join("; ");
+      txt = negatives.length >= 4
+        ? `${negatives.length} kriter olumsuz — bu pazar zorlu görünüyor: ${reasons}.`
+        : `${negatives.length} kriter olumsuz (tek başına eleme sebebi değil): ${reasons}.`;
+    }
+    if (naCount) txt += ` ${naCount} kriter için veri yok.`;
+    txt += " Son karar sizindir — aşağıdaki verileri inceleyip Pazar Kararı'nı işaretleyin.";
+    return txt;
+  }
+  const summaryEl = root.querySelector(".verdict-summary");
+  if (summaryEl) summaryEl.textContent = buildPlainSummary(pa);
+
   // --- Ön değerlendirme kriter grid ---
   const critGrid = root.querySelector(".crit-grid");
-  const fmtCrit = (v) => v === null || v === undefined ? "n/a" : (typeof v === "number" ? (Math.abs(v) < 3 ? (v * 100).toFixed(1) + "%" : v.toFixed(2)) : v);
+  // KRİTİK DÜZELTME: eskiden büyüklüğe bakarak ("< 3 ise yüzdedir") tahmin
+  // ediyordu — "Güçlü Yeni Marka" gibi düz SAYI kriterlerinde (örn. 2 marka)
+  // bunu yanlışlıkla "200.0%" gösteriyordu (gerçek kullanıcı raporuyla bulundu).
+  // Artık backend'in gönderdiği c.unit alanına göre kesin biçimlendiriyor.
+  const fmtCrit = (v, unit) => {
+    if (v === null || v === undefined) return "n/a";
+    if (typeof v !== "number") return v;
+    if (unit === "count") return String(v);
+    if (unit === "usd") return "$" + v.toFixed(2);
+    return (v * 100).toFixed(1) + "%";  // "percent" (varsayılan)
+  };
   (pa.criteria || []).forEach(c => {
     const div = document.createElement("div");
     div.className = "crit";
     div.dataset.label = c.label;
     div.dataset.direction = c.direction;
     div.dataset.threshold = c.threshold;
+    div.dataset.unit = c.unit || "percent";
+    if (CRIT_HELP[c.label]) div.title = CRIT_HELP[c.label];
     const dirLabel = c.direction === ">=" ? "≥" : "≤";
     div.innerHTML = `
-      <span>${c.label}<br><span class="crit-val">${fmtCrit(c.value)} <small>(${dirLabel}${fmtCrit(c.threshold)})</small></span></span>
+      <span>${c.label}<br><span class="crit-val">${fmtCrit(c.value, c.unit)} <small>(${dirLabel}${fmtCrit(c.threshold, c.unit)})</small></span></span>
       <span class="crit-flag ${c.flag === "OK" ? "ok" : c.flag === "OLUMSUZ" ? "olumsuz" : "na"}">${c.flag}</span>`;
     critGrid.appendChild(div);
   });
@@ -251,6 +291,13 @@ function renderPanel(data) {
     badge.className = `verdict-badge ${verdictClass}`;
   }
 
+  // ASIN modunda "İlgililik" sütunu aslında TRAFİK PAYI'nı gösteriyor — başlığı düzelt
+  const relHeader = root.querySelector(".th-relevancy");
+  if (relHeader && data.analysis_mode === "asin") {
+    relHeader.textContent = "Trafik Payı";
+    relHeader.title = "Bu ürünün toplam trafiğinin yüzde kaçı bu kelimeden geliyor";
+  }
+
   // --- ASIN bilgi bloğu (yalnızca reverse ASIN modunda) ---
   if (data.analysis_mode === "asin" && data.asin_info) {
     const block = root.querySelector(".asin-info-block");
@@ -260,9 +307,9 @@ function renderPanel(data) {
       const a = data.asin_info;
       const cells = [
         ["ASIN", a.asin], ["Marka", a.brand], ["Fiyat", a.price != null ? "$" + Number(a.price).toFixed(2) : null],
-        ["Aylık Satış", a.units != null ? fmtNum(a.units) : null],
-        ["Aylık Ciro", a.revenue != null ? "$" + fmtNum(Math.round(a.revenue)) : null],
-        ["BSR", a.bsr], ["Rating", a.rating], ["Review", a.ratings != null ? fmtNum(a.ratings) : null],
+        ["Aylık Satış", a.units != null ? fmtCompact(a.units) : null],
+        ["Aylık Ciro", a.revenue != null ? "$" + fmtCompact(Math.round(a.revenue)) : null],
+        ["BSR", a.bsr], ["Rating", a.rating], ["Yorum", a.ratings != null ? fmtCompact(a.ratings) : null],
         ["Fulfillment", a.fulfillment], ["Trafik KW Sayısı", a.total_traffic_keywords],
       ].filter(([, v]) => v !== null && v !== undefined);
       grid.innerHTML = cells.map(([l, v]) =>
@@ -278,21 +325,23 @@ function renderPanel(data) {
   const stats = data.market_stats || {};
   const statGrid = root.querySelector(".stat-grid");
   const statEntries = [
-    ["Ort. Fiyat", stats.avgPrice, "$"],
-    ["Ort. Rating", stats.avgRating, ""],
-    ["Ort. Review", stats.avgRatings, ""],
-    ["Toplam Marka", stats.brands, ""],
-    ["Ort. Satıcı", stats.avgSellers, ""],
-    ["Yeni Ürün (12ay)", stats.newProducts, ""],
-    ["Yeni Ürün %", stats.newProductProportion, "%mul100"],
-    ["İlk Listing", stats.firstShelfDate, ""],
+    ["Ort. Fiyat", stats.avgPrice, "$", "Pazardaki ürünlerin ortalama satış fiyatı"],
+    ["Ort. Puan", stats.avgRating, "", "Pazardaki ürünlerin ortalama yıldız puanı (5 üzerinden)"],
+    ["Ort. Yorum", stats.avgRatings, "compact", "Ürün başına ortalama yorum sayısı. Yüksekse pazara girmek zor."],
+    ["Marka Sayısı", stats.brands, "", "Pazarda satış yapan toplam marka sayısı"],
+    ["Ürün Başı Satıcı", stats.avgSellers, "", "Bir listing'de ortalama kaç satıcı var. Yüksekse Buy Box rekabeti sert."],
+    ["Yeni Ürün (12 ay)", stats.newProducts, "", "Son 12 ayda pazara giren ürün sayısı"],
+    ["Yeni Ürün Oranı", stats.newProductProportion, "%mul100", "Yeni ürünlerin toplam içindeki payı. Yüksekse pazar hareketli."],
+    ["İlk Listing", stats.firstShelfDate, "", "Bu pazardaki en eski ürünün listelenme tarihi. Eskiyse pazar oturmuş."],
   ];
-  statEntries.forEach(([label, value, unit]) => {
+  statEntries.forEach(([label, value, unit, help]) => {
     if (value === undefined || value === null) return;
     const div = document.createElement("div");
     div.className = "stat-card";
+    if (help) div.title = help;
     let display = value;
     if (unit === "$") display = "$" + Number(value).toFixed(2);
+    if (unit === "compact") display = fmtCompact(value);
     if (unit === "%mul100") {
       const v = Number(value);
       // GÜVENLİK: SellerSprite bazı alanları zaten yüzde (örn. 27.78) bazılarını
@@ -320,9 +369,9 @@ function renderPanel(data) {
     const acosClass = acos == null ? "" : acos < 0.2 ? "acos-good" : acos < 0.5 ? "acos-mid" : "acos-bad";
     tr.innerHTML = `
       <td style="font-family:var(--font-ui)">${row.keyword ?? ""}</td>
-      <td>${fmtNum(row.searches)}</td>
-      <td>${fmtNum(row.clicks)}</td>
-      <td>${fmtNum(row.purchases)}</td>
+      <td title="${fmtNum(row.searches)}">${fmtCompact(row.searches)}</td>
+      <td title="${fmtNum(row.clicks)}">${fmtCompact(row.clicks)}</td>
+      <td title="${fmtNum(row.purchases)}">${fmtCompact(row.purchases)}</td>
       <td>${row.click_cvr != null ? (row.click_cvr * 100).toFixed(1) + "%" : "n/a"}</td>
       <td>${row.bid != null ? "$" + row.bid.toFixed(2) : "n/a"}</td>
       <td class="${acosClass}">${acos != null ? (acos * 100).toFixed(1) + "%" : "n/a"}</td>
@@ -394,8 +443,10 @@ function renderPanel(data) {
     rows.forEach(r => {
       const tr = document.createElement("tr");
       tr.innerHTML = `<td>${r.asin ?? ""}</td><td>${r.brand ?? ""}</td><td>$${(r.price ?? 0).toFixed(2)}</td>
-        <td>${fmtNum(r.units)}</td><td>$${fmtNum(Math.round(r.revenue || 0))}</td>
-        <td>${r.bsr ?? "n/a"}</td><td>${r.rating ?? "n/a"}</td><td>${fmtNum(r.reviews ?? r.ratings)}</td>`;
+        <td title="${fmtNum(r.units)} adet">${fmtCompact(r.units)}</td>
+        <td title="$${fmtNum(Math.round(r.revenue || 0))}">$${fmtCompact(Math.round(r.revenue || 0))}</td>
+        <td>${r.bsr ?? "n/a"}</td><td>${r.rating ?? "n/a"}</td>
+        <td title="${fmtNum(r.reviews ?? r.ratings)} yorum">${fmtCompact(r.reviews ?? r.ratings)}</td>`;
       tbody.appendChild(tr);
     });
   }
@@ -573,6 +624,25 @@ async function downloadBlob(response, filename) {
   a.remove();
   URL.revokeObjectURL(url);
 }
+
+/** Büyük sayıları okunabilir kısaltır: 2385059 -> "2,4M", 13392 -> "13,4B" */
+function fmtCompact(v) {
+  if (v === null || v === undefined || isNaN(v)) return "n/a";
+  const n = Number(v);
+  if (Math.abs(n) >= 1e6) return (n / 1e6).toFixed(1).replace(".", ",") + "M";
+  if (Math.abs(n) >= 1e4) return (n / 1e3).toFixed(1).replace(".", ",") + "B";
+  return n.toLocaleString("tr-TR");
+}
+
+/** Kriterlerin ne anlama geldiğini sade dille açıklar (tooltip için) */
+const CRIT_HELP = {
+  "Ort. Satış Fiyatı": "Pazardaki ürünlerin ortalama satış fiyatı. Düşük fiyatlı pazarlarda kar marjı sıkışır.",
+  "Gross Margin": "Pazardaki ürünlerin ortalama brüt kar marjı. Yüksek olması, fiyatlandırma alanı olduğunu gösterir.",
+  "ACOS": "Ana kelimede reklam maliyetinin satış gelirine oranı. Yüksekse reklamla satmak pahalı demek.",
+  "En Büyük Marka Payı": "Pazarın en büyük markasının ciro payı. Tek marka baskınsa girmek zordur.",
+  "Güçlü Yeni Marka (1 yıl)": "Son 1 yılda pazara girip üst sıralara çıkabilmiş marka sayısı. Az ise pazar yeni girenlere kapalı demek.",
+  "Net Kar Marjı (kar analizi)": "Aşağıdaki kar analizi hesaplayıcısına girdiğiniz maliyetlere göre hesaplanan net kar marjınız.",
+};
 
 function fmtNum(v) {
   if (v == null) return "n/a";

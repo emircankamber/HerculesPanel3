@@ -363,3 +363,11 @@ input:focus,select:focus,textarea:focus{outline:2px solid var(--blue);outline-of
 .asin-info-block{margin-bottom:4px;}
 .asin-title{font-size:13px;color:var(--text-secondary);margin-bottom:10px;line-height:1.5;}
 .asin-info-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(115px,1fr));gap:8px;}
+
+/* --- Sade dille karar özeti --- */
+.verdict-summary{
+  background:var(--surface-2);border-left:3px solid var(--blue);border-radius:8px;
+  padding:11px 15px;margin:14px 0 4px;font-size:12.5px;line-height:1.6;color:var(--text-secondary);
+}
+/* Açıklama balonu olan öğelerde imleç ipucu */
+.stat-card[title],.crit[title],th[title]{cursor:help;}

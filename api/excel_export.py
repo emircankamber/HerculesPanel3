@@ -97,7 +97,20 @@ def build_report_xlsx(data: dict) -> bytes:
         ws.cell(row, 1, crit["label"]).font = LBL
         ws.cell(row, 1).border = BORDER
         val = crit.get("value")
-        val_display = f"{val*100:.1f}%" if isinstance(val, (int, float)) and abs(val) < 3 else (val if val is not None else "n/a")
+        # Panelle AYNI hata Excel'de de vardı: büyüklüğe bakıp tahmin ediyordu,
+        # "Güçlü Yeni Marka: 2" -> "%200,0" çıkıyordu. Artık backend'in
+        # gönderdiği unit alanı kullanılıyor (percent / usd / count).
+        unit = crit.get("unit", "percent")
+        if val is None:
+            val_display = "n/a"
+        elif not isinstance(val, (int, float)):
+            val_display = val
+        elif unit == "count":
+            val_display = str(val)
+        elif unit == "usd":
+            val_display = f"${val:,.2f}"
+        else:
+            val_display = f"{val*100:.1f}%"
         ws.cell(row, 2, val_display).font = LBLB
         ws.cell(row, 2).border = BORDER
         flag_cell = ws.cell(row, 3, crit.get("flag", ""))

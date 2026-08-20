@@ -478,7 +478,7 @@ class CompetitorsRequest(BaseModel):
 
 
 @app.post("/api/competitors")
-async def competitors(req: CompetitorsRequest):
+async def competitors(req: CompetitorsRequest, user: dict = Depends(require_auth)):
     """
     NOT: competitor_lookup verdiğin ASIN listesini birebir DÖNDÜRMEYEBİLİR —
     kategori/başlık eşleşmesiyle en güçlü rakipleri getirir. Birebir ASIN
@@ -502,7 +502,7 @@ class ProfitRequest(BaseModel):
 
 
 @app.post("/api/profit")
-async def profit(req: ProfitRequest):
+async def profit(req: ProfitRequest, user: dict = Depends(require_auth)):
     return calc_profit(
         cogs=req.cogs, sale_price=req.sale_price, fba_fee=req.fba_fee,
         referral_fee=req.referral_fee, acos=req.acos,
@@ -547,7 +547,7 @@ def _safe_filename(keyword: str, suffix: str) -> str:
 
 
 @app.post("/api/export/report")
-async def export_report(payload: dict):
+async def export_report(payload: dict, user: dict = Depends(require_auth)):
     """
     Panelde gösterilen tam analiz verisini (/api/analyze'ın döndürdüğü `data`
     objesinin aynısı — frontend zaten elinde tutuyor, tekrar MCP çağırmaya
@@ -571,7 +571,7 @@ class ExportKeywordsRequest(BaseModel):
 
 
 @app.post("/api/export/keywords")
-async def export_keywords(req: ExportKeywordsRequest):
+async def export_keywords(req: ExportKeywordsRequest, user: dict = Depends(require_auth)):
     """Sadece Relevant Keywords tablosunu ayrı bir Excel dosyası olarak üretir."""
     try:
         xlsx_bytes = excel_export.build_keywords_xlsx(req.keyword_rows, req.keyword)
@@ -639,7 +639,7 @@ class SignalsRequest(BaseModel):
 
 
 @app.post("/api/signals")
-async def compute_signals(req: SignalsRequest):
+async def compute_signals(req: SignalsRequest, user: dict = Depends(require_auth)):
     market = se.market_signal(req.brand_shares, req.asin_revenue_shares,
                                req.top10_ratings_weighted, req.top10_review_counts,
                                req.new_product_revenue_share)
@@ -700,7 +700,7 @@ class ProofAssetRequest(BaseModel):
 
 
 @app.post("/api/proof-assets")
-async def add_proof_asset(req: ProofAssetRequest):
+async def add_proof_asset(req: ProofAssetRequest, user: dict = Depends(require_auth)):
     if req.type not in se.PROOF_POINTS:
         raise HTTPException(400, f"Geçersiz proof type. Geçerli: {list(se.PROOF_POINTS)}")
     points = 0 if (req.type == "coa_lab_cert" and req.category_is_regulated) else se.PROOF_POINTS[req.type]
@@ -711,7 +711,7 @@ async def add_proof_asset(req: ProofAssetRequest):
 
 
 @app.get("/api/proof-assets/{keyword}")
-async def get_proof_assets(keyword: str):
+async def get_proof_assets(keyword: str, user: dict = Depends(require_auth)):
     assets = await db.list_proof_assets(keyword)
     approved_types = [a["type"] for a in assets if a["status"] == "approved"]
     score = se.proof_signal(approved_types)
@@ -724,7 +724,7 @@ class ProofApproveRequest(BaseModel):
 
 
 @app.post("/api/proof-assets/approve")
-async def approve_proof(req: ProofApproveRequest):
+async def approve_proof(req: ProofApproveRequest, user: dict = Depends(require_auth)):
     await db.approve_proof_asset(req.asset_id, req.approved_by)
     return {"ok": True}
 
@@ -739,7 +739,7 @@ class ComplianceCheckRequest(BaseModel):
 
 
 @app.post("/api/compliance-check")
-async def compliance_check(req: ComplianceCheckRequest):
+async def compliance_check(req: ComplianceCheckRequest, user: dict = Depends(require_auth)):
     certs = await db.get_cert_requirements(req.category_key)
     required = [c["cert_type"] for c in certs]
     return se.compliance_veto(req.category_key, {req.category_key} if certs else set(),
@@ -775,7 +775,7 @@ class PortfolioSolveRequest(BaseModel):
 
 
 @app.post("/api/portfolio/solve")
-async def portfolio_solve(req: PortfolioSolveRequest, background_tasks: BackgroundTasks):
+async def portfolio_solve(req: PortfolioSolveRequest, background_tasks: BackgroundTasks, user: dict = Depends(require_auth)):
     if not PORTFOLIO_AVAILABLE:
         raise HTTPException(501, "Portfolio özelliği bu deploy'da kapalı (ortools kurulu değil). "
                                   "requirements.txt'e ortools ekleyip yeniden deploy et.")
@@ -829,7 +829,7 @@ async def generate_portfolio_explanation(run_id: int, selected_keywords: list[st
 
 
 @app.get("/api/portfolio/{run_id}")
-async def get_portfolio_run(run_id: int):
+async def get_portfolio_run(run_id: int, user: dict = Depends(require_auth)):
     run = await db.get_portfolio_run(run_id)
     if not run:
         raise HTTPException(404, "Portfolio run bulunamadı")
@@ -848,7 +848,7 @@ class LearningEventRequest(BaseModel):
 
 
 @app.post("/api/learning-event")
-async def learning_event(req: LearningEventRequest):
+async def learning_event(req: LearningEventRequest, user: dict = Depends(require_auth)):
     if not BAYESIAN_AVAILABLE:
         raise HTTPException(501, "Learning özelliği bu deploy'da kapalı (scipy kurulu değil). "
                                   "requirements.txt'e scipy ekleyip yeniden deploy et.")
@@ -872,7 +872,7 @@ async def learning_event(req: LearningEventRequest):
 
 
 @app.get("/api/learning/{keyword}")
-async def get_learning_state(keyword: str):
+async def get_learning_state(keyword: str, user: dict = Depends(require_auth)):
     if not BAYESIAN_AVAILABLE:
         raise HTTPException(501, "Learning özelliği bu deploy'da kapalı (scipy kurulu değil).")
     state = await db.get_latest_learning_state(keyword)
@@ -902,7 +902,7 @@ class SupplierScoreRequest(BaseModel):
 
 
 @app.post("/api/supplier-score")
-async def supplier_score(req: SupplierScoreRequest):
+async def supplier_score(req: SupplierScoreRequest, user: dict = Depends(require_auth)):
     result = sup.score_supplier(req.dict(exclude={"supplier_name", "keyword", "scored_by"}))
     supplier_id = await db.upsert_supplier(req.supplier_name)
     score_id = await db.save_supplier_score(
@@ -931,7 +931,7 @@ class CreativeUpdateRequest(BaseModel):
 
 
 @app.post("/api/creative-deliverables")
-async def update_creative(req: CreativeUpdateRequest):
+async def update_creative(req: CreativeUpdateRequest, user: dict = Depends(require_auth)):
     if req.deliverable_no not in CREATIVE_DELIVERABLES:
         raise HTTPException(400, f"Geçersiz deliverable_no. 1-9 arası olmalı: {CREATIVE_DELIVERABLES}")
     await db.upsert_creative_deliverable(req.keyword, req.deliverable_no, req.status, req.owner, req.due_date)
@@ -939,7 +939,7 @@ async def update_creative(req: CreativeUpdateRequest):
 
 
 @app.get("/api/creative-deliverables/{keyword}")
-async def get_creative(keyword: str):
+async def get_creative(keyword: str, user: dict = Depends(require_auth)):
     existing = await db.list_creative_deliverables(keyword)
     existing_nos = {d["deliverable_no"] for d in existing}
     # Henüz hiç dokunulmamış teslimatları da "pending" olarak göster
@@ -979,7 +979,7 @@ class LaunchCheckpointRequest(BaseModel):
 
 
 @app.post("/api/launch-checkpoint")
-async def launch_checkpoint(req: LaunchCheckpointRequest):
+async def launch_checkpoint(req: LaunchCheckpointRequest, user: dict = Depends(require_auth)):
     metrics = req.dict()
     result = lc.evaluate_checkpoint(req.checkpoint_day, metrics)
     owner = lc.suggested_action_owner(result["verdict"], req.checkpoint_day)
@@ -989,12 +989,12 @@ async def launch_checkpoint(req: LaunchCheckpointRequest):
 
 
 @app.get("/api/launch-checkpoints/{keyword}")
-async def get_launch_checkpoints(keyword: str):
+async def get_launch_checkpoints(keyword: str, user: dict = Depends(require_auth)):
     return await db.list_launch_checkpoints(keyword)
 
 
 @app.get("/api/hit-rate")
-async def hit_rate():
+async def hit_rate(user: dict = Depends(require_auth)):
     """Ekibin gördüğü tek Bayesian-türevi metrik: geçmiş verdict dağılımı."""
     return await db.get_hit_rate()
 
@@ -1014,7 +1014,7 @@ class DiscoveryRunRequest(BaseModel):
 
 
 @app.post("/api/discovery/run")
-async def discovery_run(req: DiscoveryRunRequest):
+async def discovery_run(req: DiscoveryRunRequest, user: dict = Depends(require_auth)):
     run_id = await db.create_discovery_run(req.lane, {"seed_keywords": req.seed_keywords, "marketplace": req.marketplace})
     candidates = []
     for seed in req.seed_keywords:
@@ -1035,7 +1035,7 @@ async def discovery_run(req: DiscoveryRunRequest):
 
 
 @app.get("/api/discovery/candidates")
-async def discovery_candidates(run_id: int | None = None, status: str | None = None):
+async def discovery_candidates(run_id: int | None = None, status: str | None = None, user: dict = Depends(require_auth)):
     return await db.list_discovery_candidates(run_id, status)
 
 

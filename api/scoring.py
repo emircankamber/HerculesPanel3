@@ -72,6 +72,7 @@ class PreAssessmentCriterion:
     threshold: float
     direction: str   # ">=" veya "<="
     flag: str        # "OK" | "OLUMSUZ" | "n/a"
+    unit: str = "percent"   # "percent" (0-1 oran, %'ye çevrilir) | "count" (düz sayı, örn. marka adedi)
 
 
 def pre_assessment(avg_price: float | None, gross_margin: float | None, acos: float | None,
@@ -91,17 +92,20 @@ def pre_assessment(avg_price: float | None, gross_margin: float | None, acos: fl
 
     criteria = [
         PreAssessmentCriterion("Ort. Satış Fiyatı", avg_price, th["min_avg_price"], ">=",
-                                flag(avg_price, th["min_avg_price"], ">=")),
+                                flag(avg_price, th["min_avg_price"], ">="), unit="usd"),
         PreAssessmentCriterion("Gross Margin", gross_margin, th["min_gross_margin"], ">=",
-                                flag(gross_margin, th["min_gross_margin"], ">=")),
+                                flag(gross_margin, th["min_gross_margin"], ">="), unit="percent"),
         PreAssessmentCriterion("ACOS", acos, th["max_acos"], "<=",
-                                flag(acos, th["max_acos"], "<=")),
+                                flag(acos, th["max_acos"], "<="), unit="percent"),
         PreAssessmentCriterion("En Büyük Marka Payı", top_brand_share, th["max_brand_share"], "<=",
-                                flag(top_brand_share, th["max_brand_share"], "<=")),
+                                flag(top_brand_share, th["max_brand_share"], "<="), unit="percent"),
+        # KRİTİK: bu bir ORAN değil, DÜZ SAYI (kaç marka) — frontend'de yanlışlıkla
+        # yüzdeye çevrilip "200.0%" gibi absürt bir değer gösteriliyordu (gerçek
+        # kullanıcı ekran görüntüsüyle bulundu). unit="count" ile artık kesin ayrım var.
         PreAssessmentCriterion("Güçlü Yeni Marka (1 yıl)", strong_new_brands, th["min_strong_new_brands"], ">=",
-                                flag(strong_new_brands, th["min_strong_new_brands"], ">=")),
+                                flag(strong_new_brands, th["min_strong_new_brands"], ">="), unit="count"),
         PreAssessmentCriterion("Net Kar Marjı (kar analizi)", net_margin, th["min_net_margin"], ">=",
-                                flag(net_margin, th["min_net_margin"], ">=")),
+                                flag(net_margin, th["min_net_margin"], ">="), unit="percent"),
     ]
 
     negative_count = sum(1 for c in criteria if c.flag == "OLUMSUZ")
