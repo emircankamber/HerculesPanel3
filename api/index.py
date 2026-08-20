@@ -281,15 +281,13 @@ class AnalyzeRequest(BaseModel):
 @app.post("/api/analyze")
 async def analyze(req: AnalyzeRequest, user: dict = Depends(require_auth)):
     uid = user.get("user_id", 0)
-    # 1) Önbellek kontrolü — PAYLAŞIMLI ham veri (kota tasarrufu, tekrarlı arama
-    #    engellenmez). Ama önbellekten dönse bile BU kullanıcının "baktığı" kaydı
-    #    kişiye özel geçmişe (user_query_log) düşer.
-    if not req.force_refresh:
-        cached = await db.get_cached(req.keyword, req.marketplace)
-        if cached:
-            await db.log_user_query(uid, req.keyword, req.marketplace,
-                                     cached.get("pre_assessment", {}).get("verdict"))
-            return {**cached, "source": "cache"}
+    # ÖNBELLEK OKUMASI KALDIRILDI (kullanıcı isteği): her arama artık HER ZAMAN
+    # canlı MCP verisi çekiyor, son 24 saatte aynı keyword sorgulanmış olsa bile.
+    # Eskiden 24 saatlik paylaşımlı önbellek kota tasarrufu sağlıyordu ama bu,
+    # verinin bazen saatler önceki durumu yansıtması riskini taşıyordu — kullanıcı
+    # bunun yerine her zaman en güncel veriyi görmeyi tercih etti.
+    # (save_analysis çağrısı hâlâ duruyor — artık önbellek değil, sadece kayıt/log
+    # amaçlı; okunmuyor.)
 
     try:
         # 2) Ana keyword verisi — İKİ AYRI ÇAĞRI:
@@ -405,7 +403,7 @@ async def analyze(req: AnalyzeRequest, user: dict = Depends(require_auth)):
         # ekleniyor; demand_trend (return_rate için) DEĞİŞMEDİ, ayrıca duruyor.
         kw_trend_raw = await call_tool("keyword_research_trends", {
             "keyword": req.keyword, "marketplace": req.marketplace,
-        })
+        }, wrap_in_request=False)
         search_volume_trend = _parse_keyword_trend(kw_trend_raw)
 
         # 4) Keyword listesindeki her satır için hesaplanan reklam metrikleri (GENİŞ liste — tablo için)
@@ -1187,13 +1185,8 @@ async def analyze_asin(req: AnalyzeAsinRequest, user: dict = Depends(require_aut
     asin = req.asin.strip().upper()
     cache_key = f"ASIN:{asin}"
     uid = user.get("user_id", 0)
-
-    if not req.force_refresh:
-        cached = await db.get_cached(cache_key, req.marketplace)
-        if cached:
-            await db.log_user_query(uid, cache_key, req.marketplace,
-                                     cached.get("pre_assessment", {}).get("verdict"))
-            return {**cached, "source": "cache"}
+    # ÖNBELLEK OKUMASI KALDIRILDI (bkz. /api/analyze'daki aynı not) — her ASIN
+    # sorgusu artık her zaman canlı MCP verisi çekiyor.
 
     try:
         # 1) Ürün detayı + gerçek kategori
@@ -1259,7 +1252,7 @@ async def analyze_asin(req: AnalyzeAsinRequest, user: dict = Depends(require_aut
         if main_row and main_row.get("keyword"):
             kw_trend_raw = await call_tool("keyword_research_trends", {
                 "keyword": main_row["keyword"], "marketplace": req.marketplace,
-            })
+            }, wrap_in_request=False)
             search_volume_trend = _parse_keyword_trend(kw_trend_raw)
 
         # 4) Aynı kategorideki top rakipler (bu ASIN hariç)

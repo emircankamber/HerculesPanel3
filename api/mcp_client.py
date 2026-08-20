@@ -57,22 +57,26 @@ async def mcp_session():
             yield session
 
 
-async def call_tool(tool_name: str, arguments: dict) -> dict:
+async def call_tool(tool_name: str, arguments: dict, wrap_in_request: bool = True) -> dict:
     """
     Tek bir SellerSprite MCP tool'unu çağırır, JSON içeriğini döndürür.
     returnFields ASLA gönderilmez (bkz. modül docstring'i).
 
-    KRİTİK: SellerSprite'ın TÜM tool'ları parametreleri düz değil, "request"
-    adlı bir obje içine sarılı bekliyor — yani gerçek MCP çağrısı
-    {"request": {...}} şeklinde olmalı. Bu tespit, Claude'un tool_search'ü
-    üzerinden gerçek tool şemaları incelenerek doğrulandı (product_node,
-    keyword_miner, market_research_statistics, market_brand_concentration,
-    market_price_distribution, market_listing_date_distribution,
-    market_product_demand_trend, competitor_lookup — hepsi aynı örüntü).
+    KRİTİK: SellerSprite'ın ÇOĞU tool'u parametreleri "request" adlı bir obje
+    içine sarılı bekliyor — {"request": {...}} (product_node, keyword_miner,
+    market_*, competitor_lookup için gerçek çağrılarla doğrulandı).
+
+    AMA HEPSİ DEĞİL: keyword_research_trends'in gerçek şeması DÜZ parametre
+    bekliyor (request sarmalı YOK) — bu, Claude'un tool_search'ünde görülen
+    şemadan ve gerçek bir çağrıdan doğrulandı. Bu tool'u eskiden hep-sarma
+    varsayımıyla çağırmak isteği bozup boş sonuç döndürüyordu (panelde
+    "Search Volume Trend" grafiği hep boş kalıyordu — kök sebep buydu).
+    Bu yüzden çağıran taraf wrap_in_request=False geçebiliyor.
     """
     arguments = {k: v for k, v in arguments.items() if k != "returnFields"}
     async with mcp_session() as session:
-        result = await session.call_tool(tool_name, {"request": arguments})
+        payload = {"request": arguments} if wrap_in_request else arguments
+        result = await session.call_tool(tool_name, payload)
         for block in result.content:
             if hasattr(block, "text"):
                 try:
