@@ -205,7 +205,8 @@ function renderPanel(data) {
   const root = tpl.querySelector(".panel");
 
   root.querySelector(".kw-title").textContent = data.keyword;
-  root.querySelector(".kw-sub").textContent = `${data.marketplace} · canlı SellerSprite MCP verisi${data.category_used ? " · Kategori: " + data.category_used : ""}`;
+  const fetchedTime = data.fetched_at_iso ? new Date(data.fetched_at_iso).toLocaleTimeString("tr-TR") : null;
+  root.querySelector(".kw-sub").textContent = `${data.marketplace} · canlı SellerSprite MCP verisi${fetchedTime ? " · çekilme saati: " + fetchedTime : ""}${data.category_used ? " · Kategori: " + data.category_used : ""}`;
 
   // --- Ön öneri rozeti ---
   const pa = data.pre_assessment || {};
@@ -366,7 +367,35 @@ function renderPanel(data) {
     drawBrandChart(root.querySelector(".chart-brand"), data.brand_concentration || []);
     drawPriceChart(root.querySelector(".chart-price"), data.price_distribution || []);
     drawLaunchChart(root.querySelector(".chart-launch"), data.launch_distribution || []);
-    drawTrendChart(root.querySelector(".chart-trend"), data.search_volume_trend || []);
+
+    // Search Volume Trend: ÖNCELİK grafik. Grafik çizilemezse (veri yok ya da
+    // Chart.js hatası) en azından son 3 ayı YAZI olarak göster — kullanıcı
+    // hiçbir durumda elini boş dönmesin.
+    const trendCanvas = root.querySelector(".chart-trend");
+    const trendFallback = root.querySelector(".chart-fallback-text");
+    const svt = data.search_volume_trend || [];
+    let chartOk = false;
+    if (svt.length) {
+      try {
+        drawTrendChart(trendCanvas, svt);
+        chartOk = true;
+      } catch (e) {
+        console.error("Search volume grafiği çizilemedi:", e);
+      }
+    }
+    if (!chartOk) {
+      trendCanvas.style.display = "none";
+      if (trendFallback) {
+        trendFallback.style.display = "block";
+        if (svt.length) {
+          const last3 = svt.slice(-3);
+          trendFallback.innerHTML = "Son " + last3.length + " ay arama hacmi:<br>" +
+            last3.map(m => `<b>${m.month}:</b> ${(m.search_volume ?? 0).toLocaleString("tr-TR")}`).join(" &nbsp;·&nbsp; ");
+        } else {
+          trendFallback.textContent = "Search volume verisi bu keyword için şu an mevcut değil.";
+        }
+      }
+    }
   });
 
   // --- Relevant keywords tablosu ---

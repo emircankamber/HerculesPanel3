@@ -18,6 +18,7 @@ import sys
 import time
 import json
 import re
+from datetime import datetime, timezone
 
 # Vercel'in Python runtime'ı bu dosyayı importlib ile dosya-yolu üzerinden
 # yüklüyor ve api/ klasörünü otomatik olarak sys.path'e eklemiyor — bu yüzden
@@ -474,6 +475,7 @@ async def analyze(req: AnalyzeRequest, user: dict = Depends(require_auth)):
             "keyword": req.keyword,
             "marketplace": req.marketplace,
             "category_used": category_used_label,
+            "fetched_at_iso": datetime.now(timezone.utc).isoformat(),  # her arama gerçekten canlı mı doğrulamak için
             "category_candidates": category_candidates,
             "keyword_data_raw": kw_data,
             "keyword_rows": keyword_rows,
@@ -1301,6 +1303,7 @@ async def analyze_asin(req: AnalyzeAsinRequest, user: dict = Depends(require_aut
                 "total_traffic_keywords": rev_raw.get("data", {}).get("total") if isinstance(rev_raw.get("data"), dict) else None,
             },
             "category_used": category_used_label,
+            "fetched_at_iso": datetime.now(timezone.utc).isoformat(),  # her arama gerçekten canlı mı doğrulamak için
             "category_candidates": [],
             "keyword_rows": keyword_rows,
             "market_stats": stats_data,
