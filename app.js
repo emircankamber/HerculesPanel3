@@ -140,6 +140,12 @@ function showView(view) {
   $(`#view-${view}`).classList.add("active");
   if (view === "history") loadHistory();
   if (view === "decisions") loadDecisions();
+  if (view === "reports") loadReports();
+  // Chart.js gizli (display:none) kapsayıcıda 0 boyutla çizer — veri
+  // görünümleri yalnızca görünür olduklarında (yeniden) render edilir.
+  if (view === "keywords") renderKeywordView();
+  if (view === "competitors") renderCompetitorView();
+  window.scrollTo({ top: 0 });
 }
 $$(".nav-btn").forEach(btn => btn.addEventListener("click", () => showView(btn.dataset.view)));
 $$("[data-goto]").forEach(btn => btn.addEventListener("click", () => showView(btn.dataset.goto)));
@@ -155,26 +161,47 @@ function setDataState(kind, text) {
 // ---------------------------------------------------------------------------
 // Arama formu
 // ---------------------------------------------------------------------------
-$("#search-form").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const keyword = $("#kw-input").value.trim();
-  const marketplace = $("#market-input").value;
-  const categoryOverride = $("#category-override-input").value.trim();
-  if (!keyword) return;
+// Son başarılı analiz yanıtı — Keyword Araştırma ve Rakip Analizi görünümleri
+// bu payload'u OLDUĞU GİBİ okur (ek MCP çağrısı ya da yeniden hesaplama yok).
+let lastAnalysis = null;
+let analysisBusy = false;
 
-  const btn = $("#search-btn");
-  const status = $("#status-line");
-  btn.disabled = true;
-  status.textContent = "SellerSprite MCP'den veri çekiliyor… (9-10 çağrı, birkaç saniye sürebilir)";
-  status.className = "status-line loading";
+/** Tüm görünümlerdeki durum satırlarını aynı anda günceller */
+function setAnalysisStatus(text, cls = "") {
+  $$("#status-line, .analysis-status").forEach(el => {
+    el.textContent = text;
+    el.className = `${el.id === "status-line" ? "" : "analysis-status "}status-line mt-3 ${cls}`.trim();
+  });
+}
+
+/**
+ * Tek analiz giriş noktası: Ürün Analizi formu, üst arama çubuğu, Keyword
+ * Araştırma formu ve "yeniden analiz" butonları hepsi bunu çağırır — backend
+ * sözleşmesi (/api/analyze, /api/analyze-asin) öncekiyle birebir aynı.
+ */
+async function runAnalysis(keyword, marketplace, categoryOverride = "") {
+  keyword = (keyword || "").trim();
+  if (!keyword || analysisBusy) return;
+  // Reverse ASIN kayıtları geçmişte "B0XXXXXXXX — başlık" olarak tutuluyor; yeniden
+  // analizde yalnızca ASIN'i gönder (aksi halde başlık keyword olarak aranırdı).
+  const asinPrefix = keyword.match(/^(B0[A-Z0-9]{8})\s+—\s/i);
+  if (asinPrefix) keyword = asinPrefix[1];
+
+  $("#kw-input").value = keyword;
+  $("#market-input").value = marketplace;
+  const kwvInput = $("#kwv-input");
+  if (kwvInput) { kwvInput.value = keyword; $("#kwv-market").value = marketplace; }
+
+  analysisBusy = true;
+  $$("#search-btn, .analyze-submit").forEach(b => { b.disabled = true; });
   setDataState("warn", "Veri çekiliyor…");
 
   try {
     // ASIN mi keyword mü? (B0 + 8 alfanümerik = Amazon ASIN formatı)
     const isAsin = /^B0[A-Z0-9]{8}$/i.test(keyword);
-    status.textContent = isAsin
+    setAnalysisStatus(isAsin
       ? "Reverse ASIN yapılıyor — ürün, keyword'leri ve pazarı çekiliyor…"
-      : "SellerSprite MCP'den veri çekiliyor… (birkaç saniye sürebilir)";
+      : "SellerSprite MCP'den veri çekiliyor… (9-10 çağrı, birkaç saniye sürebilir)", "loading");
 
     const res = isAsin
       ? await apiFetch(`${API_BASE}/api/analyze-asin`, {
@@ -193,20 +220,37 @@ $("#search-form").addEventListener("submit", async (e) => {
       throw new Error(err.detail || `HTTP ${res.status}`);
     }
     const data = await res.json();
-    status.textContent = data.source === "cache"
+    setAnalysisStatus(data.source === "cache"
       ? "önbellekten yüklendi (24 saat içinde daha önce çekilmiş)"
-      : "canlı SellerSprite verisi yüklendi";
-    status.className = "status-line";
+      : "canlı SellerSprite verisi yüklendi");
+    lastAnalysis = data;
     renderPanel(data);
+    renderDataViews();
     const t = data.fetched_at_iso ? new Date(data.fetched_at_iso) : new Date();
     setDataState("ok", `Veri Hazır · Son çekim: ${t.toLocaleTimeString("tr-TR")}`);
   } catch (err) {
-    status.textContent = `Hata: ${err.message}`;
-    status.className = "status-line error";
+    setAnalysisStatus(`Hata: ${err.message}`, "error");
     setDataState("bad", "Veri çekilemedi");
   } finally {
-    btn.disabled = false;
+    analysisBusy = false;
+    $$("#search-btn, .analyze-submit").forEach(b => { b.disabled = false; });
   }
+}
+
+$("#search-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  runAnalysis($("#kw-input").value, $("#market-input").value, $("#category-override-input").value.trim());
+});
+$("#global-search-form")?.addEventListener("submit", (e) => {
+  e.preventDefault();
+  const input = $("#global-search-input");
+  const kw = input.value.trim();
+  if (!kw) return;
+  input.value = "";
+  // Veri görünümlerinden birindeysen orada kal; değilse Ürün Analizi'ne geç
+  const active = $(".view.active")?.id?.replace("view-", "");
+  if (!["search", "keywords", "competitors"].includes(active)) showView("search");
+  runAnalysis(kw, $("#market-input").value);
 });
 
 // ---------------------------------------------------------------------------
@@ -455,7 +499,7 @@ function renderPanel(data) {
       // >1 ise zaten yüzdedir, tekrar 100'le çarpma (daha önce "%2778.0" hatası buradan geliyordu).
       display = (v > 1 ? v : v * 100).toFixed(1) + "%";
     }
-    div.innerHTML = `<div class="stat-label">${label}</div><div class="stat-value">${display}</div>`;
+    div.innerHTML = `<div class="stat-label">${label}</div><div class="stat-value">${esc(display)}</div>`;
     statGrid.appendChild(div);
   });
 
@@ -510,7 +554,7 @@ function renderPanel(data) {
       <td>${row.bid != null ? "$" + row.bid.toFixed(2) : "n/a"}</td>
       <td class="${acosClass}">${acos != null ? (acos * 100).toFixed(1) + "%" : "n/a"}</td>
       <td>${row.cpa != null ? "$" + row.cpa.toFixed(2) : "n/a"}</td>
-      <td>${row.relevancy != null ? row.relevancy + (data.analysis_mode === "asin" ? "%" : "") : "n/a"}</td>`;
+      <td>${row.relevancy != null ? esc(row.relevancy) + (data.analysis_mode === "asin" ? "%" : "") : "n/a"}</td>`;
     tbody.appendChild(tr);
   });
 
@@ -661,7 +705,7 @@ function renderPanel(data) {
       div.className = "proof-item";
       div.innerHTML = `<span>${esc(a.type)} <span class="muted">(${a.points}p)</span> ${a.note ? "· " + esc(a.note) : ""}</span>
         <span style="display:flex;align-items:center;gap:8px;">
-          <span class="proof-item-status ${a.status}">${a.status}</span>
+          <span class="proof-item-status ${esc(a.status)}">${esc(a.status)}</span>
           ${a.status === "pending" ? `<button data-id="${a.id}">Onayla</button>` : ""}
         </span>`;
       const btn = div.querySelector("button");
@@ -1184,9 +1228,7 @@ async function loadDecisions() {
         card.addEventListener("click", () => {
           // Sorgu sayfasına dön, keyword'ü doldur, otomatik tekrar analiz et
           showView("search");
-          $("#kw-input").value = item.keyword;
-          $("#market-input").value = item.marketplace;
-          $("#search-form").requestSubmit();
+          runAnalysis(item.keyword, item.marketplace);
         });
         container.appendChild(card);
       });
@@ -1196,3 +1238,612 @@ async function loadDecisions() {
     summary.textContent = `Hata: ${err.message}`;
   }
 }
+
+// ===========================================================================
+// Veri görünümleri: Keyword Araştırma · Rakip Analizi · Raporlar
+// YALNIZCA görsel katman — son analiz payload'unu (lastAnalysis) ve mevcut
+// /api/decisions + /api/recent uçlarını okur. Hiçbir metrik yeniden
+// hesaplanmaz; sıralama/filtreleme/sayfalama tamamen istemci tarafında.
+// ===========================================================================
+
+/** Aynı canvas'a tekrar çizmeden önce eski Chart örneğini yok et */
+function makeChart(canvas, config) {
+  if (!canvas || !window.Chart) return null;
+  const old = Chart.getChart(canvas);
+  if (old) old.destroy();
+  return new Chart(canvas, config);
+}
+
+/** Basit sayfalama çubuğu */
+function renderPager(el, page, pages, onChange) {
+  if (!el) return;
+  el.innerHTML = "";
+  if (pages <= 1) return;
+  const mk = (label, target, { active = false, disabled = false, icon = false } = {}) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = `pager-btn${active ? " active" : ""}`;
+    b.disabled = disabled;
+    b.innerHTML = icon ? `<span class="material-symbols-outlined" style="font-size:16px">${label}</span>` : String(label);
+    b.setAttribute("aria-label", icon ? (label === "chevron_left" ? "Önceki sayfa" : "Sonraki sayfa") : `Sayfa ${label}`);
+    if (!disabled && !active) b.addEventListener("click", () => onChange(target));
+    el.appendChild(b);
+  };
+  mk("chevron_left", page - 1, { disabled: page <= 1, icon: true });
+  const nums = new Set([1, pages, page - 1, page, page + 1].filter(n => n >= 1 && n <= pages));
+  let prev = 0;
+  [...nums].sort((a, b) => a - b).forEach(n => {
+    if (n - prev > 1) { const gap = document.createElement("span"); gap.className = "pager-gap"; gap.textContent = "…"; el.appendChild(gap); }
+    mk(n, n, { active: n === page });
+    prev = n;
+  });
+  mk("chevron_right", page + 1, { disabled: page >= pages, icon: true });
+}
+
+/** Segment (sekme benzeri) buton grubunu tek seçimli yap */
+function bindSegment(container, attr, onChange) {
+  if (!container) return;
+  container.querySelectorAll(`[data-${attr}]`).forEach(btn => btn.addEventListener("click", () => {
+    container.querySelectorAll(`[data-${attr}]`).forEach(b => b.classList.toggle("active", b === btn));
+    onChange(btn.dataset[attr]);
+  }));
+}
+
+const ACOS_CLASS = (acos) => acos == null ? "" : acos < 0.2 ? "acos-good" : acos < 0.5 ? "acos-mid" : "acos-bad";
+const fmtPct = (v, d = 1) => v == null || isNaN(v) ? "n/a" : (Number(v) * 100).toFixed(d) + "%";
+const fmtUsd = (v, d = 2) => v == null || isNaN(v) ? "n/a" : "$" + Number(v).toFixed(d);
+/** Puanı görüntü için 1 haneye yuvarla (değer değişmez, yalnızca biçim) */
+const fmtRating = (v) => v == null || v === "" || isNaN(v) ? "n/a" : Number(v).toFixed(1);
+
+function renderDataViews() {
+  const active = $(".view.active")?.id;
+  if (active === "view-keywords") renderKeywordView();
+  if (active === "view-competitors") renderCompetitorView();
+}
+
+// ---------------------------------------------------------------------------
+// Keyword Araştırma
+// ---------------------------------------------------------------------------
+const kwvState = { filter: "all", query: "", sortKey: null, sortDir: -1, page: 1, perPage: 10 };
+
+function kwvMainRow(data) {
+  const rows = data.keyword_rows || [];
+  return rows.find(r => (r.keyword || "").toLowerCase() === String(data.keyword || "").toLowerCase())
+    // ASIN modunda ana satır = ön değerlendirmedeki ACOS'un geldiği satır
+    || rows.find(r => r.acos != null && r.acos === (data.pre_assessment?.criteria || []).find(c => c.label === "ACOS")?.value)
+    || null;
+}
+
+function renderKeywordView() {
+  const data = lastAnalysis;
+  $("#kwv-empty").classList.toggle("hidden", !!data);
+  $("#kwv-content").classList.toggle("hidden", !data);
+  $("#kwv-export").disabled = !data;
+  if (!data) return;
+
+  const rows = data.keyword_rows || [];
+  const main = kwvMainRow(data);
+  const isAsin = data.analysis_mode === "asin";
+
+  $("#kwv-k-count").textContent = fmtNum(rows.length);
+  $("#kwv-k-vol").textContent = main ? fmtCompact(main.searches) : "n/a";
+  $("#kwv-k-vol-sub").textContent = main ? main.keyword : "Ana keyword satırı bulunamadı";
+  $("#kwv-k-bid").textContent = main ? fmtUsd(main.bid) : "n/a";
+  $("#kwv-k-cpa").textContent = main && main.cpa != null ? `CPA ${fmtUsd(main.cpa)} / satış` : "";
+  $("#kwv-k-acos").textContent = main ? fmtPct(main.acos) : "n/a";
+  const acosCls = ACOS_CLASS(main?.acos);
+  $("#kwv-k-acos-chip").innerHTML = main?.acos == null ? ""
+    : `<span class="chip ${acosCls === "acos-good" ? "ok" : acosCls === "acos-mid" ? "warn" : "bad"}">hesaplanan</span>`;
+  $("#kwv-k-cvr").textContent = main && main.click_cvr != null ? `Click CVR ${fmtPct(main.click_cvr)} (hesaplanan)` : "";
+
+  const relTh = $(".kwv-th-rel");
+  relTh.textContent = isAsin ? "Traffic Share" : "Relevancy";
+  relTh.title = isAsin ? "Bu ürünün toplam trafiğinin yüzde kaçı bu kelimeden geliyor" : "Aranan ürünle ilgililik (0-100)";
+
+  renderKeywordTable();
+
+  // Search volume trend (payload'daki search_volume_trend — keyword'ün kendi hacmi)
+  const svt = data.search_volume_trend || [];
+  const trendCanvas = $("#kwv-trend");
+  const trendEmpty = $("#kwv-trend-empty");
+  trendCanvas.style.display = svt.length ? "block" : "none";
+  trendEmpty.style.display = svt.length ? "none" : "block";
+  trendEmpty.textContent = "Search volume verisi bu keyword için şu an mevcut değil.";
+  if (svt.length) {
+    makeChart(trendCanvas, {
+      type: "line",
+      data: { labels: svt.map(i => i.month ?? ""), datasets: [{ data: svt.map(i => i.search_volume ?? 0), borderColor: "#005c55", backgroundColor: "rgba(15,118,110,0.10)", fill: true, tension: 0.35, pointRadius: 0, borderWidth: 2 }] },
+      options: baseOptions({ scales: {
+        y: { grid: { color: CHART_GRID }, border: { display: false }, ticks: { color: CHART_TICK, callback: v => fmtCompact(v) } },
+        x: { grid: { display: false }, ticks: { color: CHART_TICK, maxTicksLimit: 6 } } } }),
+    });
+  } else {
+    const old = window.Chart && Chart.getChart(trendCanvas); if (old) old.destroy();
+  }
+
+  // En çok satış getiren 5 keyword (purchases'a göre ham sıralama)
+  const top = rows.filter(r => r.purchases != null).sort((a, b) => b.purchases - a.purchases).slice(0, 5);
+  const maxP = top[0]?.purchases || 1;
+  $("#kwv-top-purchases").innerHTML = top.length ? top.map(r => `
+    <div>
+      <div class="flex justify-between gap-3 text-[13px]"><span class="truncate font-medium" title="${esc(r.keyword)}">${esc(r.keyword)}</span><span class="tabular text-secondary shrink-0">${fmtCompact(r.purchases)}</span></div>
+      <div class="h-1.5 rounded-full bg-surface-container mt-1.5"><div class="h-full rounded-full bg-primary-container" style="width:${(r.purchases / maxP) * 100}%"></div></div>
+    </div>`).join("") : `<div class="text-xs text-secondary">Satış verisi yok.</div>`;
+}
+
+function renderKeywordTable() {
+  const data = lastAnalysis;
+  if (!data) return;
+  const isAsin = data.analysis_mode === "asin";
+  const main = kwvMainRow(data);
+  const minVol = parseFloat($("#kwv-minvol").value) || 0;
+  const q = kwvState.query.toLowerCase();
+
+  let rows = (data.keyword_rows || []).filter(r => {
+    if (minVol && (r.searches ?? 0) < minVol) return false;
+    if (q && !(r.keyword || "").toLowerCase().includes(q)) return false;
+    if (kwvState.filter === "highvol" && (r.searches ?? 0) < 10000) return false;
+    if (kwvState.filter === "lowacos" && !(r.acos != null && r.acos < 0.2)) return false;
+    return true;
+  });
+  if (kwvState.sortKey) {
+    const k = kwvState.sortKey, dir = kwvState.sortDir;
+    rows = [...rows].sort((a, b) => {
+      const av = a[k], bv = b[k];
+      if (av == null && bv == null) return 0;
+      if (av == null) return 1;
+      if (bv == null) return -1;
+      return (typeof av === "string" ? av.localeCompare(bv, "tr") : av - bv) * dir;
+    });
+  }
+  $$("#kwv-table th[data-sort]").forEach(th => {
+    th.classList.toggle("sorted", th.dataset.sort === kwvState.sortKey);
+    th.dataset.dir = th.dataset.sort === kwvState.sortKey ? (kwvState.sortDir > 0 ? "asc" : "desc") : "";
+  });
+
+  const total = rows.length;
+  const pages = Math.max(1, Math.ceil(total / kwvState.perPage));
+  kwvState.page = Math.min(kwvState.page, pages);
+  const start = (kwvState.page - 1) * kwvState.perPage;
+  const pageRows = rows.slice(start, start + kwvState.perPage);
+  const maxVol = Math.max(1, ...(data.keyword_rows || []).map(r => r.searches || 0));
+
+  $("#kwv-result-chip").textContent = `${fmtNum(total)} sonuç`;
+  $("#kwv-range").textContent = total ? `${start + 1}–${start + pageRows.length} arası gösteriliyor (toplam ${fmtNum(total)})` : "";
+  const tbody = $("#kwv-tbody");
+  tbody.innerHTML = pageRows.length ? "" : `<tr><td colspan="10" class="muted !text-center !py-8">Filtreye uyan keyword yok.</td></tr>`;
+  pageRows.forEach(row => {
+    const isMain = main && row === main;
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td class="l">
+        <div class="flex items-center gap-2 min-w-0">
+          <span class="material-symbols-outlined ${isMain ? "text-primary" : "text-outline"}" style="font-size:16px" title="${isMain ? "Ana keyword" : "İlişkili keyword"}">${isMain ? "verified" : "tag"}</span>
+          <span class="font-medium whitespace-normal break-words min-w-[140px]">${esc(row.keyword ?? "")}</span>
+        </div>
+      </td>
+      <td title="${fmtNum(row.searches)}">
+        <div class="flex items-center justify-end gap-2"><span>${fmtCompact(row.searches)}</span>
+          <span class="vol-bar"><span style="width:${((row.searches || 0) / maxVol) * 100}%"></span></span></div>
+      </td>
+      <td title="${fmtNum(row.clicks)}">${fmtCompact(row.clicks)}</td>
+      <td title="${fmtNum(row.purchases)}">${fmtCompact(row.purchases)}</td>
+      <td>${row.click_cvr != null ? fmtPct(row.click_cvr) : "n/a"}</td>
+      <td>${row.bid != null ? fmtUsd(row.bid) : "n/a"}</td>
+      <td class="${ACOS_CLASS(row.acos)}">${row.acos != null ? fmtPct(row.acos) : "n/a"}</td>
+      <td>${row.cpa != null ? fmtUsd(row.cpa) : "n/a"}</td>
+      <td>${row.relevancy != null ? esc(row.relevancy) + (isAsin ? "%" : "") : "n/a"}</td>
+      <td class="!text-center"><button type="button" class="icon-btn" title="Bu keyword'ü analiz et (canlı MCP çağrısı)" aria-label="Bu keyword'ü analiz et"><span class="material-symbols-outlined">arrow_forward</span></button></td>`;
+    tr.querySelector(".icon-btn").addEventListener("click", () => {
+      runAnalysis(row.keyword, data.marketplace);
+    });
+    tbody.appendChild(tr);
+  });
+  renderPager($("#kwv-pager"), kwvState.page, pages, (p) => { kwvState.page = p; renderKeywordTable(); });
+}
+
+(function bindKeywordView() {
+  $("#kwv-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    kwvState.page = 1;
+    runAnalysis($("#kwv-input").value, $("#kwv-market").value);
+  });
+  $("#kwv-minvol").addEventListener("input", () => { kwvState.page = 1; renderKeywordTable(); });
+  $("#kwv-search").addEventListener("input", (e) => { kwvState.query = e.target.value.trim(); kwvState.page = 1; renderKeywordTable(); });
+  bindSegment($("#kwv-filters"), "filter", (f) => { kwvState.filter = f; kwvState.page = 1; renderKeywordTable(); });
+  $$("#kwv-table th[data-sort]").forEach(th => th.addEventListener("click", () => {
+    const k = th.dataset.sort;
+    if (kwvState.sortKey === k) kwvState.sortDir *= -1;
+    else { kwvState.sortKey = k; kwvState.sortDir = k === "keyword" ? 1 : -1; }
+    kwvState.page = 1;
+    renderKeywordTable();
+  }));
+  // Excel: mevcut /api/export/keywords ucu (payload değişmedi)
+  $("#kwv-export").addEventListener("click", async (e) => {
+    const data = lastAnalysis;
+    if (!data) return;
+    const btn = e.currentTarget;
+    const originalHtml = btn.innerHTML;
+    btn.disabled = true;
+    btn.textContent = "hazırlanıyor…";
+    try {
+      const res = await apiFetch(`${API_BASE}/api/export/keywords`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ keyword: data.keyword, keyword_rows: data.keyword_rows || [] }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      await downloadBlob(res, `${data.keyword}_keywords.xlsx`);
+    } catch (err) {
+      alert(`Excel oluşturulamadı: ${err.message}`);
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = originalHtml;
+    }
+  });
+})();
+
+// ---------------------------------------------------------------------------
+// Rakip Analizi
+// ---------------------------------------------------------------------------
+const cvState = { scope: "all", bsr: false, fba: false, page: 1, perPage: 10 };
+const AMAZON_DOMAIN = { US: "amazon.com", UK: "amazon.co.uk", CA: "amazon.ca" };
+
+function fmtLaunch(v) {
+  if (v === null || v === undefined || v === "") return "n/a";
+  const t = typeof v === "number" ? v : Date.parse(v);
+  if (!isFinite(t)) return esc(v);
+  return new Date(t).toLocaleDateString("tr-TR", { month: "short", year: "numeric" });
+}
+function brandInitials(brand) {
+  const words = String(brand || "?").trim().split(/\s+/).filter(Boolean);
+  return ((words[0]?.[0] || "?") + (words[1]?.[0] || words[0]?.[1] || "")).toUpperCase();
+}
+function isFba(f) { return /FBA|AMZ/i.test(String(f || "")); }
+
+function renderCompetitorView() {
+  const data = lastAnalysis;
+  $("#cv-empty").classList.toggle("hidden", !!data);
+  const content = $("#cv-content");
+  content.classList.toggle("hidden", !data);
+  content.classList.toggle("flex", !!data);
+  if (!data) return;
+
+  const comps = data.top_competitors || [];
+  const stats = data.market_stats || {};
+  const title = data.analysis_mode === "asin" ? (data.asin || data.keyword) : data.keyword;
+  $("#cv-market-name").textContent = `${title} (${data.marketplace})`;
+  $("#cv-asin-count").textContent = `${comps.length} rakip ASIN`;
+
+  const lead = comps[0];
+  $("#cv-top-revenue").textContent = lead?.revenue != null ? "$" + fmtNum(Math.round(lead.revenue)) : "n/a";
+  $("#cv-top-revenue-sub").textContent = lead ? `${lead.brand || "?"} · ${fmtCompact(lead.units)} adet/ay` : "Rakip verisi yok";
+
+  // --- Marka ciro payı (brand_concentration — totalRevenueRatio) ---
+  const brands = data.brand_concentration || [];
+  const brandCanvas = $("#cv-brand-chart");
+  if (brands.length) {
+    makeChart(brandCanvas, {
+      type: "doughnut",
+      data: { labels: brands.map(b => b.brand ?? b.name ?? "?"),
+        datasets: [{ data: brands.map(b => { const raw = b.totalRevenueRatio ?? 0; return raw > 1 ? raw : raw * 100; }),
+          backgroundColor: CHART_COLORS, borderColor: "#ffffff", borderWidth: 2 }] },
+      options: { responsive: true, maintainAspectRatio: false, cutout: "64%",
+        plugins: { legend: { position: "right", labels: { color: CHART_TICK, boxWidth: 8, boxHeight: 8, usePointStyle: true, font: { size: 11 } } },
+          tooltip: { callbacks: { label: (ctx) => ` ${ctx.label}: %${Number(ctx.raw).toFixed(1)}` } } } },
+    });
+  } else {
+    const old = window.Chart && Chart.getChart(brandCanvas); if (old) old.destroy();
+  }
+  const brandCrit = (data.pre_assessment?.criteria || []).find(c => c.label === "En Büyük Marka Payı");
+  $("#cv-brand-foot").innerHTML = brandCrit && brandCrit.value != null
+    ? `<div class="flex items-center justify-between gap-2"><span>En büyük marka payı <b class="text-on-surface">${fmtPct(brandCrit.value)}</b> · eşik ≤ ${fmtPct(brandCrit.threshold, 0)}</span>
+        <span class="chip ${brandCrit.flag === "OK" ? "ok" : brandCrit.flag === "OLUMSUZ" ? "bad" : "na"}">${brandCrit.flag === "OK" ? "Olumlu" : brandCrit.flag === "OLUMSUZ" ? "Olumsuz" : "Veri Yok"}</span></div>`
+    : (brands.length ? "" : "Marka konsantrasyonu verisi yok.");
+
+  // --- Fiyat vs. Puan (ham rakip verisi; nokta boyutu yalnızca görsel ölçek) ---
+  const pts = comps.filter(c => c.price != null && c.rating != null);
+  const maxUnits = Math.max(1, ...pts.map(c => c.units || 0));
+  makeChart($("#cv-scatter-chart"), {
+    type: "bubble",
+    data: { datasets: [{
+      data: pts.map(c => ({ x: Number(c.price), y: Number(c.rating), r: 4 + Math.sqrt((c.units || 0) / maxUnits) * 10, _c: c })),
+      backgroundColor: "rgba(15,118,110,0.35)", borderColor: "#005c55", borderWidth: 1 }] },
+    options: { responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false }, tooltip: { callbacks: { label: (ctx) => {
+        const c = ctx.raw._c; return ` ${c.brand || c.asin}: $${Number(c.price).toFixed(2)} · ★${c.rating} · ${fmtCompact(c.units)} adet/ay`; } } } },
+      scales: {
+        x: { title: { display: true, text: "Fiyat ($)", color: CHART_TICK }, grid: { color: CHART_GRID }, ticks: { color: CHART_TICK, callback: v => "$" + v } },
+        y: { title: { display: true, text: "Puan", color: CHART_TICK }, grid: { color: CHART_GRID }, border: { display: false }, ticks: { color: CHART_TICK } } } },
+  });
+  $("#cv-scatter-foot").innerHTML = `
+    <div>Kategori ort. fiyat<br><b class="text-on-surface text-sm">${stats.avgPrice != null ? fmtUsd(stats.avgPrice) : "n/a"}</b></div>
+    <div>Kategori ort. puan<br><b class="text-on-surface text-sm">${stats.avgRating != null ? fmtRating(stats.avgRating) : "n/a"}</b></div>`;
+
+  // --- Rakip yorum sayıları ---
+  const withReviews = comps.filter(c => c.ratings != null);
+  makeChart($("#cv-review-chart"), {
+    type: "bar",
+    data: { labels: withReviews.map((c, i) => `#${i + 1}`),
+      datasets: [{ data: withReviews.map(c => c.ratings), backgroundColor: "#a15600", borderRadius: 3, maxBarThickness: 18 }] },
+    options: baseOptions({
+      plugins: { legend: { display: false }, tooltip: { callbacks: {
+        title: (items) => { const c = withReviews[items[0].dataIndex]; return `${c.brand || ""} · ${c.asin || ""}`; },
+        label: (ctx) => ` ${fmtNum(ctx.raw)} yorum` } } },
+      scales: { y: { grid: { color: CHART_GRID }, border: { display: false }, ticks: { color: CHART_TICK, callback: v => fmtCompact(v) } },
+                x: { grid: { display: false }, ticks: { color: CHART_TICK, maxTicksLimit: 10 } } } }),
+  });
+  $("#cv-review-foot").innerHTML = `
+    <div>Kategori ort. yorum<br><b class="text-on-surface text-sm">${stats.avgRatings != null ? fmtCompact(stats.avgRatings) : "n/a"}</b></div>
+    <div>Yeni ürün oranı (12 ay)<br><b class="text-on-surface text-sm">${stats.newProductProportion != null
+      ? (Number(stats.newProductProportion) > 1 ? Number(stats.newProductProportion) : Number(stats.newProductProportion) * 100).toFixed(1) + "%" : "n/a"}</b></div>`;
+
+  // --- Pazar liderleri (backend sırası: total_units desc) ---
+  const LEADER_TAG = ["Satış lideri #1", "Satış #2", "Satış #3"];
+  $("#cv-leaders").innerHTML = comps.slice(0, 3).map((c, i) => `
+    <div class="card p-4 flex gap-3 min-w-0">
+      <div class="w-12 h-12 shrink-0 rounded-lg bg-surface-container grid place-items-center font-display font-semibold text-primary">${esc(brandInitials(c.brand))}</div>
+      <div class="min-w-0">
+        <div class="eyebrow text-primary">${LEADER_TAG[i]}</div>
+        <div class="font-semibold text-sm truncate mt-0.5">${esc(c.brand || "?")}</div>
+        <div class="text-xs text-secondary line-clamp-2 mt-0.5" title="${esc(c.title || "")}">${esc(c.title || c.asin || "")}</div>
+        <div class="flex flex-wrap gap-x-3 gap-y-1 text-xs mt-2 tabular">
+          <span>${c.price != null ? fmtUsd(c.price) : "n/a"}</span>
+          <span>${fmtCompact(c.units)} adet/ay</span>
+          <span>★ ${fmtRating(c.rating)}</span>
+          ${c.bsr != null ? `<span class="text-secondary">BSR #${fmtNum(c.bsr)}</span>` : ""}
+        </div>
+      </div>
+    </div>`).join("") || `<div class="text-sm text-secondary">Rakip verisi yok.</div>`;
+
+  renderCompetitorTable();
+}
+
+function renderCompetitorTable() {
+  const data = lastAnalysis;
+  if (!data) return;
+  let rows = (data.top_competitors || []).map((c, i) => ({ ...c, _rank: i + 1 }));
+  if (cvState.scope !== "all") rows = rows.slice(0, Number(cvState.scope));
+  if (cvState.bsr) rows = rows.filter(c => c.bsr != null && c.bsr < 5000);
+  if (cvState.fba) rows = rows.filter(c => isFba(c.fulfillment));
+
+  const total = rows.length;
+  const pages = Math.max(1, Math.ceil(total / cvState.perPage));
+  cvState.page = Math.min(cvState.page, pages);
+  const start = (cvState.page - 1) * cvState.perPage;
+  const pageRows = rows.slice(start, start + cvState.perPage);
+  const domain = AMAZON_DOMAIN[data.marketplace] || "amazon.com";
+
+  $("#cv-range").textContent = total ? `${start + 1}–${start + pageRows.length} arası · toplam ${total} rakip gösteriliyor` : "";
+  const tbody = $("#cv-tbody");
+  tbody.innerHTML = pageRows.length ? "" : `<tr><td colspan="9" class="muted !text-center !py-8">Filtreye uyan rakip yok.</td></tr>`;
+  pageRows.forEach(c => {
+    const asinOk = /^[A-Z0-9]{10}$/i.test(String(c.asin || ""));
+    const isNew = isWithinLastYear(c.availableDate);
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td class="l">
+        <div class="flex items-center gap-3 min-w-0">
+          <span class="avatar">${esc(brandInitials(c.brand))}</span>
+          <div class="min-w-0">
+            <div class="font-semibold truncate max-w-[220px]" title="${esc(c.title || "")}">${esc(c.brand || "?")} <span class="muted font-normal text-xs">#${c._rank}</span></div>
+            <div class="mono muted">${esc(c.asin || "")}</div>
+          </div>
+        </div>
+      </td>
+      <td class="l">${fmtLaunch(c.availableDate)}${isNew ? ' <span class="chip warn ml-1">Yeni</span>' : ""}</td>
+      <td class="font-medium">${c.price != null ? fmtUsd(c.price) : "n/a"}</td>
+      <td title="${fmtNum(c.units)} adet">${fmtCompact(c.units)} <span class="muted text-xs">ad</span></td>
+      <td class="font-semibold text-primary" title="$${fmtNum(Math.round(c.revenue || 0))}">$${fmtCompact(Math.round(c.revenue || 0))}</td>
+      <td><span class="inline-flex items-center gap-1"><span class="material-symbols-outlined text-tertiary-container" style="font-size:15px">star</span>${fmtRating(c.rating)}</span> <span class="muted text-xs">(${fmtCompact(c.ratings)})</span></td>
+      <td>${c.bsr != null ? "#" + fmtNum(c.bsr) : "n/a"}</td>
+      <td class="!text-center">${c.fulfillment ? `<span class="chip ${isFba(c.fulfillment) ? "ok" : "na"}">${esc(c.fulfillment)}</span>` : "n/a"}</td>
+      <td class="!text-center">${asinOk
+        ? `<a class="icon-btn" href="https://www.${domain}/dp/${encodeURIComponent(c.asin)}" target="_blank" rel="noopener noreferrer" title="Amazon'da aç" aria-label="Amazon'da aç"><span class="material-symbols-outlined">open_in_new</span></a>`
+        : ""}</td>`;
+    tbody.appendChild(tr);
+  });
+  renderPager($("#cv-pager"), cvState.page, pages, (p) => { cvState.page = p; renderCompetitorTable(); });
+}
+
+(function bindCompetitorView() {
+  bindSegment($("#cv-scope"), "scope", (s) => { cvState.scope = s; cvState.page = 1; renderCompetitorTable(); });
+  [["#cv-f-bsr", "bsr"], ["#cv-f-fba", "fba"]].forEach(([sel, key]) => {
+    const btn = $(sel);
+    btn.addEventListener("click", () => {
+      cvState[key] = !cvState[key];
+      btn.setAttribute("aria-pressed", String(cvState[key]));
+      cvState.page = 1;
+      renderCompetitorTable();
+    });
+  });
+  // Tam rapor: Ürün Analizi panelindeki mevcut export butonunu kullan
+  // (kar analizi sonucu da aynı şekilde eklensin diye aynı kod yolu).
+  $("#cv-export").addEventListener("click", () => {
+    const btn = $("#result-container .export-report-btn");
+    if (btn) btn.click();
+  });
+})();
+
+// ---------------------------------------------------------------------------
+// Raporlar — /api/decisions + /api/recent (kullanıcıya özel)
+// ---------------------------------------------------------------------------
+const repState = { status: "all", query: "", range: "all", market: "all", items: [] };
+const DECISION_CHIP = { "Uygun": "ok", "Sınırda": "warn", "Elenmiş": "bad" };
+
+async function loadReports() {
+  const list = $("#rep-list");
+  list.innerHTML = `<p class="p-6 text-sm text-secondary">yükleniyor…</p>`;
+  try {
+    const [decRes, recRes] = await Promise.all([
+      apiFetch(`${API_BASE}/api/decisions`),
+      apiFetch(`${API_BASE}/api/recent?limit=200`),
+    ]);
+    if (!decRes.ok || !recRes.ok) throw new Error(`HTTP ${decRes.ok ? recRes.status : decRes.status}`);
+    const grouped = await decRes.json();
+    const recent = await recRes.json();
+
+    // (keyword, pazar) başına tek kayıt: en son karar + en son sorgu
+    const map = new Map();
+    const keyOf = (kw, m) => `${String(kw).toLowerCase()}|${m}`;
+    Object.entries(grouped || {}).forEach(([decision, items]) => (items || []).forEach(it => {
+      map.set(keyOf(it.keyword, it.marketplace), {
+        keyword: it.keyword, marketplace: it.marketplace, decision, note: it.note || "",
+        decided_at: it.decided_at, decided_by: it.decided_by || "", verdict: null, queried_at: null,
+      });
+    }));
+    (Array.isArray(recent) ? recent : []).forEach(r => {
+      const k = keyOf(r.keyword, r.marketplace);
+      const cur = map.get(k);
+      if (cur) {
+        if (!cur.queried_at || r.fetched_at > cur.queried_at) { cur.queried_at = r.fetched_at; cur.verdict = r.verdict; }
+      } else {
+        map.set(k, { keyword: r.keyword, marketplace: r.marketplace, decision: null, note: "",
+          decided_at: null, decided_by: "", verdict: r.verdict, queried_at: r.fetched_at });
+      }
+    });
+    repState.items = [...map.values()].sort((a, b) =>
+      Math.max(b.decided_at || 0, b.queried_at || 0) - Math.max(a.decided_at || 0, a.queried_at || 0));
+    renderReports();
+  } catch (err) {
+    list.innerHTML = `<p class="p-6 text-sm text-error">Raporlar yüklenemedi: ${esc(err.message)}</p>`;
+  }
+}
+
+function repFiltered() {
+  const now = Date.now() / 1000;
+  const q = repState.query.toLowerCase();
+  return repState.items.filter(it => {
+    const ts = Math.max(it.decided_at || 0, it.queried_at || 0);
+    if (repState.range !== "all" && now - ts > Number(repState.range) * 86400) return false;
+    if (repState.market !== "all" && it.marketplace !== repState.market) return false;
+    if (repState.status === "decided" && !it.decision) return false;
+    if (repState.status === "pending" && it.decision) return false;
+    if (q && !`${it.keyword} ${it.note}`.toLowerCase().includes(q)) return false;
+    return true;
+  });
+}
+
+function renderReports() {
+  const items = repFiltered();
+  const nowS = Date.now() / 1000;
+  const inRange = repState.items.filter(it => {
+    const ts = Math.max(it.decided_at || 0, it.queried_at || 0);
+    return (repState.range === "all" || nowS - ts <= Number(repState.range) * 86400)
+      && (repState.market === "all" || it.marketplace === repState.market);
+  });
+  const count = (d) => inRange.filter(it => it.decision === d).length;
+  const cU = count("Uygun"), cS = count("Sınırda"), cE = count("Elenmiş");
+  const undecided = inRange.filter(it => !it.decision).length;
+  const decidedTotal = cU + cS + cE;
+  const total = inRange.length;
+  const week = inRange.filter(it => nowS - Math.max(it.decided_at || 0, it.queried_at || 0) <= 7 * 86400).length;
+  const pct = (n, d) => d ? Math.round((n / d) * 1000) / 10 : 0;
+
+  $("#rep-k-total").textContent = fmtNum(total);
+  $("#rep-k-week").textContent = week ? `+${week} bu hafta` : "";
+  $("#rep-k-uygun").textContent = fmtNum(cU);
+  $("#rep-k-uygun-pct").textContent = `%${pct(cU, decidedTotal)} kararların`;
+  $("#rep-k-elenmis").textContent = fmtNum(cE);
+  $("#rep-k-elenmis-pct").textContent = `%${pct(cE, decidedTotal)} kararların`;
+  $("#rep-k-sinirda").textContent = fmtNum(cS);
+  $("#rep-k-sinirda-sub").textContent = undecided ? `+${undecided} kararsız` : "";
+  $("#rep-b-uygun").style.width = pct(cU, decidedTotal) + "%";
+  $("#rep-b-elenmis").style.width = pct(cE, decidedTotal) + "%";
+  $("#rep-b-sinirda").style.width = pct(cS, decidedTotal) + "%";
+
+  // --- Karar dağılımı ---
+  $("#rep-dist-total").textContent = fmtNum(decidedTotal);
+  $("#rep-dist-range").textContent = repState.range === "all" ? "Tüm zamanlar" : `Son ${repState.range} gün`;
+  const dist = [["Uygun", cU, "#005c55"], ["Sınırda", cS, "#a15600"], ["Elenmiş", cE, "#ba1a1a"]];
+  makeChart($("#rep-dist-chart"), {
+    type: "doughnut",
+    data: { labels: dist.map(d => d[0]), datasets: [{ data: decidedTotal ? dist.map(d => d[1]) : [1],
+      backgroundColor: decidedTotal ? dist.map(d => d[2]) : ["#e5eeff"], borderColor: "#ffffff", borderWidth: 3 }] },
+    options: { responsive: true, maintainAspectRatio: false, cutout: "74%",
+      plugins: { legend: { display: false }, tooltip: { enabled: !!decidedTotal } } },
+  });
+  $("#rep-dist-legend").innerHTML = dist.map(([l, n, col]) => `
+    <div class="flex items-center justify-between gap-2">
+      <span class="flex items-center gap-2"><span class="w-2.5 h-2.5 rounded-full" style="background:${col}"></span>${l}</span>
+      <span class="tabular font-medium">%${pct(n, decidedTotal)} (${n})</span>
+    </div>`).join("");
+
+  // --- Liste ---
+  $("#rep-count").textContent = `${items.length} dosya listeleniyor`;
+  const list = $("#rep-list");
+  if (!items.length) {
+    list.innerHTML = `<p class="p-6 text-sm text-secondary">${repState.items.length ? "Filtreye uyan kayıt yok." : "Henüz analiz ya da karar kaydı yok."}</p>`;
+    return;
+  }
+  list.innerHTML = "";
+  const fmtDate = (s) => s ? new Date(s * 1000).toLocaleString("tr-TR", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" }) : "—";
+  items.forEach(it => {
+    const div = document.createElement("div");
+    div.className = "rep-item";
+    const statusChip = it.decision
+      ? `<span class="chip ${DECISION_CHIP[it.decision] || "na"}">${esc(it.decision)} · ekip kararı</span>`
+      : `<span class="chip na">İnceleniyor · karar yok</span>`;
+    const verdictHtml = it.verdict
+      ? `<span class="chip ${DECISION_CHIP[it.verdict] || "na"}">${esc(it.verdict)}</span>` : `<span class="text-secondary">—</span>`;
+    div.innerHTML = `
+      <div class="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+        <div class="flex gap-3 min-w-0">
+          <span class="w-10 h-10 shrink-0 rounded-lg bg-surface-container-low grid place-items-center text-primary"><span class="material-symbols-outlined">${/^B0[A-Z0-9]{8}/i.test(it.keyword) ? "inventory_2" : "manage_search"}</span></span>
+          <div class="min-w-0">
+            <div class="font-display font-semibold text-[16px] leading-snug break-words">${esc(it.keyword)}</div>
+            <div class="flex flex-wrap items-center gap-2 text-xs text-secondary mt-1">
+              <span class="chip chip-dot na">${esc(it.marketplace)} Pazarı</span>
+              <span>${fmtDate(Math.max(it.decided_at || 0, it.queried_at || 0))}</span>
+            </div>
+          </div>
+        </div>
+        <div class="shrink-0">${statusChip}</div>
+      </div>
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-3 rounded-xl bg-surface-container-low p-3 mt-4 text-xs">
+        <div><div class="text-secondary">Pazar kararı</div><div class="font-semibold text-sm mt-0.5">${esc(it.decision || "—")}</div></div>
+        <div><div class="text-secondary">Ön öneri (algoritmik)</div><div class="mt-0.5">${verdictHtml}</div></div>
+        <div><div class="text-secondary">Karar tarihi</div><div class="font-medium text-sm mt-0.5">${it.decided_at ? fmtDate(it.decided_at) : "—"}</div></div>
+        <div><div class="text-secondary">Son sorgu</div><div class="font-medium text-sm mt-0.5">${it.queried_at ? fmtDate(it.queried_at) : "—"}</div></div>
+      </div>
+      ${it.note ? `<div class="text-[13px] text-on-surface-variant italic mt-3 break-words">"${esc(it.note)}"</div>` : ""}
+      <div class="flex flex-wrap items-center justify-between gap-2 mt-3">
+        <span class="text-xs text-secondary">${it.decided_by ? "Karar: " + esc(it.decided_by) : ""}</span>
+        <button type="button" class="rep-open crit-more !text-[13px]">Yeniden Analiz Et <span class="material-symbols-outlined" style="font-size:16px">arrow_forward</span></button>
+      </div>`;
+    div.querySelector(".rep-open").addEventListener("click", () => {
+      showView("search");
+      runAnalysis(it.keyword, it.marketplace);
+    });
+    list.appendChild(div);
+  });
+}
+
+/** CSV hücresi: tırnak kaçışı + formül enjeksiyonuna karşı (=,+,-,@ ile başlayanlar) önek */
+function csvCell(v) {
+  let s = String(v ?? "");
+  if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
+  return `"${s.replace(/"/g, '""')}"`;
+}
+
+(function bindReportsView() {
+  $("#rep-search").addEventListener("input", (e) => { repState.query = e.target.value.trim(); renderReports(); });
+  bindSegment($("#rep-status"), "status", (s) => { repState.status = s; renderReports(); });
+  $("#rep-range").addEventListener("change", (e) => { repState.range = e.target.value; renderReports(); });
+  $("#rep-market").addEventListener("change", (e) => { repState.market = e.target.value; renderReports(); });
+  $("#rep-csv").addEventListener("click", () => {
+    const items = repFiltered();
+    const iso = (s) => s ? new Date(s * 1000).toISOString() : "";
+    const lines = [["keyword", "pazar", "pazar_karari", "on_oneri", "not", "karar_tarihi", "son_sorgu", "karar_veren"].map(csvCell).join(",")]
+      .concat(items.map(it => [it.keyword, it.marketplace, it.decision || "", it.verdict || "", it.note,
+        iso(it.decided_at), iso(it.queried_at), it.decided_by].map(csvCell).join(",")));
+    const blob = new Blob(["﻿" + lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `pl_pazar_raporlari_${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  });
+})();
