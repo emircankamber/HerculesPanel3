@@ -134,16 +134,23 @@ const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 // ---------------------------------------------------------------------------
 // Navigasyon
 // ---------------------------------------------------------------------------
-$$(".nav-btn").forEach(btn => {
-  btn.addEventListener("click", () => {
-    $$(".nav-btn").forEach(b => b.classList.remove("active"));
-    btn.classList.add("active");
-    $$(".view").forEach(v => v.classList.remove("active"));
-    $(`#view-${btn.dataset.view}`).classList.add("active");
-    if (btn.dataset.view === "history") loadHistory();
-    if (btn.dataset.view === "decisions") loadDecisions();
-  });
-});
+function showView(view) {
+  $$(".nav-btn").forEach(b => b.classList.toggle("active", b.dataset.view === view));
+  $$(".view").forEach(v => v.classList.remove("active"));
+  $(`#view-${view}`).classList.add("active");
+  if (view === "history") loadHistory();
+  if (view === "decisions") loadDecisions();
+}
+$$(".nav-btn").forEach(btn => btn.addEventListener("click", () => showView(btn.dataset.view)));
+$$("[data-goto]").forEach(btn => btn.addEventListener("click", () => showView(btn.dataset.goto)));
+
+/** Üst çubuktaki veri durumu chip'i ("Veri Hazır · Son çekim …") */
+function setDataState(kind, text) {
+  const chip = $("#data-state-chip");
+  if (!chip) return;
+  chip.className = `chip chip-dot ${kind} hidden sm:inline-flex`;
+  chip.textContent = text;
+}
 
 // ---------------------------------------------------------------------------
 // Arama formu
@@ -159,7 +166,8 @@ $("#search-form").addEventListener("submit", async (e) => {
   const status = $("#status-line");
   btn.disabled = true;
   status.textContent = "SellerSprite MCP'den veri çekiliyor… (9-10 çağrı, birkaç saniye sürebilir)";
-  status.className = "status-line";
+  status.className = "status-line loading";
+  setDataState("warn", "Veri çekiliyor…");
 
   try {
     // ASIN mi keyword mü? (B0 + 8 alfanümerik = Amazon ASIN formatı)
@@ -188,10 +196,14 @@ $("#search-form").addEventListener("submit", async (e) => {
     status.textContent = data.source === "cache"
       ? "önbellekten yüklendi (24 saat içinde daha önce çekilmiş)"
       : "canlı SellerSprite verisi yüklendi";
+    status.className = "status-line";
     renderPanel(data);
+    const t = data.fetched_at_iso ? new Date(data.fetched_at_iso) : new Date();
+    setDataState("ok", `Veri Hazır · Son çekim: ${t.toLocaleTimeString("tr-TR")}`);
   } catch (err) {
     status.textContent = `Hata: ${err.message}`;
     status.className = "status-line error";
+    setDataState("bad", "Veri çekilemedi");
   } finally {
     btn.disabled = false;
   }
@@ -203,23 +215,52 @@ $("#search-form").addEventListener("submit", async (e) => {
 function renderPanel(data) {
   const tpl = $("#tpl-panel").content.cloneNode(true);
   const root = tpl.querySelector(".panel");
+  const isAsinMode = data.analysis_mode === "asin";
 
-  root.querySelector(".kw-title").textContent = data.keyword;
+  // --- Başlık kartı: chip'ler, başlık, kategori breadcrumb ---
   const fetchedTime = data.fetched_at_iso ? new Date(data.fetched_at_iso).toLocaleTimeString("tr-TR") : null;
-  root.querySelector(".kw-sub").textContent = `${data.marketplace} · canlı SellerSprite MCP verisi${fetchedTime ? " · çekilme saati: " + fetchedTime : ""}${data.category_used ? " · Kategori: " + data.category_used : ""}`;
+  const chips = [];
+  if (isAsinMode && data.asin) chips.push(`<span class="chip">ASIN: ${esc(data.asin)}</span>`);
+  chips.push(`<span class="chip">Pazar: ${esc(data.marketplace)}</span>`);
+  chips.push(`<span class="chip chip-dot ok">Canlı SellerSprite MCP Verisi</span>`);
+  if (fetchedTime) chips.push(`<span class="chip na">Çekilme: ${fetchedTime}</span>`);
+  root.querySelector(".panel-chips").innerHTML = chips.join("");
+  root.querySelector(".kw-title").textContent = (isAsinMode && data.asin_info?.title) || data.keyword;
+
+  if (data.category_used) {
+    // "A:B:C (gerçek rakip ürün verisinden)" -> breadcrumb + kaynak notu
+    const m = String(data.category_used).match(/^(.*?)\s*(\([^()]*\))?\s*$/);
+    const path = (m && m[1]) || "";
+    const note = (m && m[2]) || "";
+    const parts = path.split(/\s*[:›>]\s*/).filter(Boolean);
+    root.querySelector(".kw-breadcrumb").innerHTML = parts.length
+      ? `<span class="material-symbols-outlined" style="font-size:15px">category</span>` +
+        parts.map(p => `<span>${esc(p)}</span>`).join(`<span class="material-symbols-outlined" style="font-size:14px">chevron_right</span>`)
+      : "";
+    root.querySelector(".kw-sub").innerHTML = note
+      ? `<span class="inline-flex items-center gap-1 text-primary font-medium"><span class="material-symbols-outlined" style="font-size:15px">verified</span>Kategori kaynağı</span> ${esc(note.replace(/^\(|\)$/g, ""))}`
+      : (!parts.length ? esc(data.category_used) : "");
+  }
 
   // --- Ön öneri rozeti ---
   const pa = data.pre_assessment || {};
   const badge = root.querySelector(".verdict-badge");
-  const verdictClass = { "Uygun": "uygun", "Sınırda": "sinirda", "Elenmiş": "elenmis" }[pa.verdict] || "sinirda";
-  badge.textContent = pa.verdict || "—";
-  badge.classList.add(verdictClass);
-  root.querySelector(".neg-count").textContent = pa.negative_count ?? "—";
+  const verdictHint = root.querySelector(".verdict-hint");
+  const VERDICT_CLASS = { "Uygun": "uygun", "Sınırda": "sinirda", "Elenmiş": "elenmis" };
+  const VERDICT_HINT = { "Uygun": "İlk bakışta girilebilir", "Sınırda": "Yüksek dikkat gerektirir", "Elenmiş": "Zorlu pazar" };
+  function setVerdict(verdict, negCount) {
+    badge.textContent = verdict || "—";
+    badge.className = `verdict-badge ${VERDICT_CLASS[verdict] || "sinirda"}`;
+    verdictHint.textContent = VERDICT_HINT[verdict] || "";
+    root.querySelector(".neg-count").textContent = negCount ?? "—";
+    root.querySelector(".neg-chip").className = `neg-chip chip ${negCount ? "bad" : "ok"}`;
+  }
+  setVerdict(pa.verdict, pa.negative_count);
 
   // --- Sade dille özet: neden bu karar? ---
-  function buildPlainSummary(assessment) {
-    const negatives = (assessment.criteria || []).filter(c => c.flag === "OLUMSUZ");
-    const naCount = (assessment.criteria || []).filter(c => c.flag === "n/a").length;
+  function buildPlainSummary(criteria) {
+    const negatives = criteria.filter(c => c.flag === "OLUMSUZ");
+    const naCount = criteria.filter(c => c.flag === "n/a").length;
     const REASON = {
       "Ort. Satış Fiyatı": "ortalama fiyat düşük (kar marjı sıkışır)",
       "Gross Margin": "pazarın brüt kar marjı hedefin altında",
@@ -238,13 +279,11 @@ function renderPanel(data) {
         : `${negatives.length} kriter olumsuz (tek başına eleme sebebi değil): ${reasons}.`;
     }
     if (naCount) txt += ` ${naCount} kriter için veri yok.`;
-    txt += " Son karar sizindir — aşağıdaki verileri inceleyip Pazar Kararı'nı işaretleyin.";
-    return txt;
+    return `<div class="font-medium">${esc(txt)}</div><div class="text-xs text-secondary mt-1">Son karar sizindir — aşağıdaki kriter kartlarını ve verileri inceleyip Pazar Kararı'nı işaretleyin.</div>`;
   }
   const summaryEl = root.querySelector(".verdict-summary");
-  if (summaryEl) summaryEl.textContent = buildPlainSummary(pa);
 
-  // --- Ön değerlendirme kriter grid ---
+  // --- Ön değerlendirme: mevcut 6 kriter (scoring.py) — yalnızca görsel katman ---
   const critGrid = root.querySelector(".crit-grid");
   // KRİTİK DÜZELTME: eskiden büyüklüğe bakarak ("< 3 ise yüzdedir") tahmin
   // ediyordu — "Güçlü Yeni Marka" gibi düz SAYI kriterlerinde (örn. 2 marka)
@@ -265,50 +304,112 @@ function renderPanel(data) {
     if (unit === "usd") return "$" + v.toFixed(2);
     return (v * 100).toFixed(1) + "%";  // "percent" (varsayılan)
   };
-  (pa.criteria || []).forEach(c => {
-    const div = document.createElement("div");
-    div.className = "crit";
+  const critContext = buildCriterionContext(data);
+  const criteria = (pa.criteria || []).map(c => ({ ...c }));
+
+  function renderCriterion(div, c, idx) {
+    const unit = resolveUnit(c);
+    const ctx = critContext[c.label] || {};
+    const isNetMargin = c.label === "Net Kar Marjı (kar analizi)";
+    const flagInfo = c.flag === "OK" ? ["ok", "Olumlu"]
+      : c.flag === "OLUMSUZ" ? ["bad", "Olumsuz"]
+      : ["na", isNetMargin ? "Veri Bekleniyor" : "Veri Yok"];
+    const dirLabel = c.direction === ">=" ? "≥" : "≤";
+    const hasVal = typeof c.value === "number";
+
+    // Eşik çubuğu: yüzde kriterleri 0-100% ölçeğinde, diğerleri eşiğin 2 katına kadar
+    const scaleMax = unit === "percent"
+      ? Math.max(1, hasVal ? c.value : 0)
+      : Math.max(c.threshold * 2, hasVal ? c.value * 1.1 : 0) || 1;
+    const fillPct = hasVal ? Math.max(0, Math.min(100, (c.value / scaleMax) * 100)) : 0;
+    const markerPct = Math.max(0, Math.min(100, (c.threshold / scaleMax) * 100));
+
+    const valueHtml = hasVal
+      ? `${fmtCrit(c.value, unit)}${ctx.suffix ? `<small>${ctx.suffix}</small>` : ""}`
+      : `<span class="text-outline">—</span>`;
+    const vizHtml = typeof ctx.viz === "function" ? ctx.viz(c) : (ctx.viz || "");
+
+    div.className = "crit card";
     div.dataset.label = c.label;
+    div.dataset.flag = c.flag;
     div.dataset.direction = c.direction;
     div.dataset.threshold = c.threshold;
-    div.dataset.unit = resolveUnit(c);
-    if (CRIT_HELP[c.label]) div.title = CRIT_HELP[c.label];
-    const dirLabel = c.direction === ">=" ? "≥" : "≤";
+    div.dataset.unit = unit;
     div.innerHTML = `
-      <span>${c.label}<br><span class="crit-val">${fmtCrit(c.value, resolveUnit(c))} <small>(${dirLabel}${fmtCrit(c.threshold, resolveUnit(c))})</small></span></span>
-      <span class="crit-flag ${c.flag === "OK" ? "ok" : c.flag === "OLUMSUZ" ? "olumsuz" : "na"}">${c.flag}</span>`;
+      <div class="crit-head">
+        <div class="min-w-0">
+          <div class="eyebrow">Kriter ${String(idx + 1).padStart(2, "0")}</div>
+          <div class="crit-name">${esc(ctx.title || c.label)}</div>
+        </div>
+        <span class="crit-flag chip ${flagInfo[0]}">${flagInfo[1]}</span>
+      </div>
+      <div class="crit-body">
+        <div class="min-w-0">
+          <div class="crit-val">${valueHtml}</div>
+          <div class="crit-sub">${ctx.sub || ""}</div>
+        </div>
+        <div class="crit-viz">${vizHtml}</div>
+      </div>
+      <div class="crit-track">
+        <div class="crit-fill ${c.flag === "OK" ? "" : c.flag === "OLUMSUZ" ? "bad" : "na"}" style="width:${fillPct}%"></div>
+        <div class="crit-marker" style="left:calc(${markerPct}% - 1px)" title="Eşik"></div>
+      </div>
+      <div class="crit-foot">
+        <span>Eşik: ${dirLabel} ${fmtCrit(c.threshold, unit)}</span>
+        <button type="button" class="crit-more">Detay Gör <span class="material-symbols-outlined" style="font-size:16px">expand_more</span></button>
+      </div>
+      <div class="crit-help">${esc(CRIT_HELP[c.label] || "")}${isNetMargin
+        ? ` <button type="button" class="crit-goto-profit crit-more">Kâr hesaplayıcıyı aç <span class="material-symbols-outlined" style="font-size:15px">arrow_forward</span></button>` : ""}</div>`;
+    div.querySelector(".crit-more").addEventListener("click", () => div.classList.toggle("open"));
+    const gotoProfit = div.querySelector(".crit-goto-profit");
+    if (gotoProfit) gotoProfit.addEventListener("click", () => {
+      activateTab("profit");
+      root.querySelector('[data-pane="profit"]').scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  }
+
+  criteria.forEach((c, idx) => {
+    const div = document.createElement("div");
+    renderCriterion(div, c, idx);
     critGrid.appendChild(div);
   });
+  if (summaryEl) summaryEl.innerHTML = buildPlainSummary(criteria);
 
   // --- Ön değerlendirmeyi kar analizindeki net marjla güncelle (canlı) ---
   function updateNetMarginCriterion(marginValue) {
-    const card = [...critGrid.children].find(el => el.dataset.label === "Net Kar Marjı (kar analizi)");
-    if (!card) return;
-    const threshold = parseFloat(card.dataset.threshold);
-    const flag = marginValue >= threshold ? "OK" : "OLUMSUZ";
-    card.querySelector(".crit-val").innerHTML = `${(marginValue * 100).toFixed(1)}% <small>(≥${(threshold * 100).toFixed(1)}%)</small>`;
-    const flagEl = card.querySelector(".crit-flag");
-    flagEl.textContent = flag;
-    flagEl.className = `crit-flag ${flag === "OK" ? "ok" : "olumsuz"}`;
+    const idx = criteria.findIndex(c => c.label === "Net Kar Marjı (kar analizi)");
+    if (idx < 0) return;
+    const c = criteria[idx];
+    c.value = marginValue;
+    c.flag = marginValue >= c.threshold ? "OK" : "OLUMSUZ";
+    const card = [...critGrid.children].find(el => el.dataset.label === c.label);
+    const wasOpen = card.classList.contains("open");
+    renderCriterion(card, c, idx);
+    if (wasOpen) card.classList.add("open");
 
     // Toplam olumsuz sayısını ve ön öneriyi yeniden hesapla
-    const negCount = [...critGrid.children].filter(el => el.querySelector(".crit-flag").textContent === "OLUMSUZ").length;
-    root.querySelector(".neg-count").textContent = negCount;
+    const negCount = criteria.filter(x => x.flag === "OLUMSUZ").length;
     const newVerdict = negCount === 0 ? "Uygun" : (negCount < 4 ? "Sınırda" : "Elenmiş");
-    const verdictClass = { "Uygun": "uygun", "Sınırda": "sinirda", "Elenmiş": "elenmis" }[newVerdict];
-    badge.textContent = newVerdict;
-    badge.className = `verdict-badge ${verdictClass}`;
+    setVerdict(newVerdict, negCount);
+    if (summaryEl) summaryEl.innerHTML = buildPlainSummary(criteria);
   }
+
+  // --- Detay sekmeleri ---
+  function activateTab(name) {
+    root.querySelectorAll(".tab-btn").forEach(b => b.classList.toggle("active", b.dataset.tab === name));
+    root.querySelectorAll(".tab-pane").forEach(p => p.classList.toggle("active", p.dataset.pane === name));
+  }
+  root.querySelectorAll(".tab-btn").forEach(b => b.addEventListener("click", () => activateTab(b.dataset.tab)));
 
   // ASIN modunda "İlgililik" sütunu aslında TRAFİK PAYI'nı gösteriyor — başlığı düzelt
   const relHeader = root.querySelector(".th-relevancy");
-  if (relHeader && data.analysis_mode === "asin") {
+  if (relHeader && isAsinMode) {
     relHeader.textContent = "Traffic Share";
     relHeader.title = "Bu ürünün toplam trafiğinin yüzde kaçı bu kelimeden geliyor";
   }
 
   // --- ASIN bilgi bloğu (yalnızca reverse ASIN modunda) ---
-  if (data.analysis_mode === "asin" && data.asin_info) {
+  if (isAsinMode && data.asin_info) {
     const block = root.querySelector(".asin-info-block");
     const grid = root.querySelector(".asin-info-grid");
     if (block && grid) {
@@ -322,11 +423,7 @@ function renderPanel(data) {
         ["Fulfillment", a.fulfillment], ["Trafik KW Sayısı", a.total_traffic_keywords],
       ].filter(([, v]) => v !== null && v !== undefined);
       grid.innerHTML = cells.map(([l, v]) =>
-        `<div class="stat-card"><div class="stat-label">${l}</div><div class="stat-value">${v}</div></div>`).join("");
-      if (a.title) {
-        grid.insertAdjacentHTML("beforebegin",
-          `<div class="asin-title">${a.title}</div>`);
-      }
+        `<div class="stat-card"><div class="stat-label">${l}</div><div class="stat-value">${esc(v)}</div></div>`).join("");
     }
   }
 
@@ -405,11 +502,11 @@ function renderPanel(data) {
     const acos = row.acos;
     const acosClass = acos == null ? "" : acos < 0.2 ? "acos-good" : acos < 0.5 ? "acos-mid" : "acos-bad";
     tr.innerHTML = `
-      <td style="font-family:var(--font-ui)">${row.keyword ?? ""}</td>
+      <td class="font-medium">${esc(row.keyword ?? "")}</td>
       <td title="${fmtNum(row.searches)}">${fmtCompact(row.searches)}</td>
       <td title="${fmtNum(row.clicks)}">${fmtCompact(row.clicks)}</td>
       <td title="${fmtNum(row.purchases)}">${fmtCompact(row.purchases)}</td>
-      <td>${row.click_cvr != null ? (row.click_cvr * 100).toFixed(1) + "%" : "n/a"}</td>
+      <td title="hesaplanan">${row.click_cvr != null ? (row.click_cvr * 100).toFixed(1) + "%" : "n/a"}</td>
       <td>${row.bid != null ? "$" + row.bid.toFixed(2) : "n/a"}</td>
       <td class="${acosClass}">${acos != null ? (acos * 100).toFixed(1) + "%" : "n/a"}</td>
       <td>${row.cpa != null ? "$" + row.cpa.toFixed(2) : "n/a"}</td>
@@ -474,15 +571,21 @@ function renderPanel(data) {
     const tbody = root.querySelector(".comp-tbody");
     tbody.innerHTML = "";
     if (!rows.length) {
-      tbody.innerHTML = "<tr><td colspan='8'>Otomatik rakip bulunamadı — ASIN'leri manuel gir.</td></tr>";
+      tbody.innerHTML = "<tr><td colspan='7' class='muted'>Otomatik rakip bulunamadı — ASIN'leri manuel gir.</td></tr>";
       return;
     }
     rows.forEach(r => {
       const tr = document.createElement("tr");
-      tr.innerHTML = `<td>${r.asin ?? ""}</td><td>${r.brand ?? ""}</td><td>$${(r.price ?? 0).toFixed(2)}</td>
-        <td title="${fmtNum(r.units)} adet">${fmtCompact(r.units)}</td>
-        <td title="$${fmtNum(Math.round(r.revenue || 0))}">$${fmtCompact(Math.round(r.revenue || 0))}</td>
-        <td>${r.bsr ?? "n/a"}</td><td>${r.rating ?? "n/a"}</td>
+      const isNew = isWithinLastYear(r.availableDate);
+      tr.innerHTML = `<td class="l">
+          <div class="flex items-center gap-2"><span class="mono font-semibold">${esc(r.asin ?? "")}</span>${isNew ? '<span class="chip warn">Yeni Giriş</span>' : ""}</div>
+          <div class="text-xs muted truncate max-w-[280px]" title="${esc(r.title ?? "")}">${esc(r.brand ?? "")}${r.title ? " · " + esc(r.title) : ""}</div>
+        </td>
+        <td>$${Number(r.price ?? 0).toFixed(2)}</td>
+        <td title="${fmtNum(r.units)} adet">${fmtCompact(r.units)} <span class="muted text-xs">adet</span></td>
+        <td class="font-semibold" title="$${fmtNum(Math.round(r.revenue || 0))}">$${fmtCompact(Math.round(r.revenue || 0))}</td>
+        <td>${r.bsr != null ? '<span class="chip">#' + fmtNum(r.bsr) + "</span>" : "n/a"}</td>
+        <td>${r.rating != null ? '<span class="inline-flex items-center gap-1"><span class="material-symbols-outlined text-tertiary-container" style="font-size:15px">star</span>' + r.rating + "</span>" : "n/a"}</td>
         <td title="${fmtNum(r.reviews ?? r.ratings)} yorum">${fmtCompact(r.reviews ?? r.ratings)}</td>`;
       tbody.appendChild(tr);
     });
@@ -494,10 +597,11 @@ function renderPanel(data) {
       asin: i.asin, brand: i.brand, price: i.price,
       units: i.units ?? 0, revenue: i.revenue ?? 0,
       bsr: i.bsr, rating: i.rating, reviews: i.ratings,
+      title: i.title, availableDate: i.availableDate,
     }));
     renderCompetitorRows(competitorRows);
   } else {
-    root.querySelector(".comp-tbody").innerHTML = "<tr><td colspan='8'>Otomatik rakip bulunamadı — ASIN'leri manuel gir.</td></tr>";
+    renderCompetitorRows([]);
   }
 
   root.querySelector(".competitor-fetch-btn").addEventListener("click", async () => {
@@ -505,7 +609,7 @@ function renderPanel(data) {
     if (!asinsRaw) return;
     const asins = asinsRaw.split(",").map(s => s.trim()).filter(Boolean);
     const tbody = root.querySelector(".comp-tbody");
-    tbody.innerHTML = "<tr><td colspan='8'>yükleniyor…</td></tr>";
+    tbody.innerHTML = "<tr><td colspan='7' class='muted'>yükleniyor…</td></tr>";
     try {
       const res = await apiFetch(`${API_BASE}/api/competitors`, {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -517,10 +621,11 @@ function renderPanel(data) {
         asin: i.asin, brand: i.brand, price: i.price ?? i.averagePrice,
         units: i.units ?? i.amzUnit ?? 0, revenue: i.revenue ?? i.amzSales ?? 0,
         bsr: i.bsr, rating: i.rating, reviews: i.ratings,
+        title: i.title, availableDate: i.availableDate,
       }));
       renderCompetitorRows(competitorRows);
     } catch (err) {
-      tbody.innerHTML = `<tr><td colspan='8'>Hata: ${err.message}</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan='7' class='muted'>Hata: ${esc(err.message)}</td></tr>`;
     }
   });
 
@@ -554,7 +659,7 @@ function renderPanel(data) {
     (result.assets || []).forEach(a => {
       const div = document.createElement("div");
       div.className = "proof-item";
-      div.innerHTML = `<span>${a.type} <span style="color:var(--text-muted)">(${a.points}p)</span> ${a.note ? "· " + a.note : ""}</span>
+      div.innerHTML = `<span>${esc(a.type)} <span class="muted">(${a.points}p)</span> ${a.note ? "· " + esc(a.note) : ""}</span>
         <span style="display:flex;align-items:center;gap:8px;">
           <span class="proof-item-status ${a.status}">${a.status}</span>
           ${a.status === "pending" ? `<button data-id="${a.id}">Onayla</button>` : ""}
@@ -593,14 +698,14 @@ function renderPanel(data) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ keyword: data.keyword, marketplace: data.marketplace, decision, note }),
     });
-    root.querySelector(".decision-saved-msg").textContent = "✓ kaydedildi";
+    root.querySelector(".decision-saved-msg").textContent = `✓ kaydedildi · ${new Date().toLocaleTimeString("tr-TR")}`;
   });
 
   // --- Excel export: tam rapor ---
   root.querySelector(".export-report-btn").addEventListener("click", async (e) => {
     const btn = e.currentTarget;
     btn.disabled = true;
-    const originalText = btn.textContent;
+    const originalHtml = btn.innerHTML;
     btn.textContent = "hazırlanıyor…";
     try {
       const exportPayload = { ...data, profit_analysis: lastProfitResult };
@@ -614,7 +719,7 @@ function renderPanel(data) {
       alert(`Excel oluşturulamadı: ${err.message}`);
     } finally {
       btn.disabled = false;
-      btn.textContent = originalText;
+      btn.innerHTML = originalHtml;
     }
   });
 
@@ -622,7 +727,7 @@ function renderPanel(data) {
   root.querySelector(".export-keywords-btn").addEventListener("click", async (e) => {
     const btn = e.currentTarget;
     btn.disabled = true;
-    const originalText = btn.textContent;
+    const originalHtml = btn.innerHTML;
     btn.textContent = "hazırlanıyor…";
     try {
       const res = await apiFetch(`${API_BASE}/api/export/keywords`, {
@@ -635,7 +740,7 @@ function renderPanel(data) {
       alert(`Excel oluşturulamadı: ${err.message}`);
     } finally {
       btn.disabled = false;
-      btn.textContent = originalText;
+      btn.innerHTML = originalHtml;
     }
   });
 
@@ -676,6 +781,114 @@ const CRIT_HELP = {
   "Net Kar Marjı (kar analizi)": "Aşağıdaki kar analizi hesaplayıcısına girdiğiniz maliyetlere göre hesaplanan net kar marjınız.",
 };
 
+/** innerHTML'e giden metinler için HTML kaçışı */
+function esc(v) {
+  return String(v ?? "").replace(/[&<>"']/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
+}
+
+/** availableDate (ms ya da tarih metni) son 12 ay içinde mi — backend'in "Güçlü Yeni Marka" proxy'siyle aynı pencere */
+function isWithinLastYear(v) {
+  if (v === null || v === undefined || v === "") return false;
+  const t = typeof v === "number" ? v : Date.parse(v);
+  if (!isFinite(t)) return false;
+  return Date.now() - t <= 365 * 24 * 3600 * 1000;
+}
+
+/** Küçük halka gösterge (kriter kartları) */
+function ringSvg(fraction, color) {
+  const f = Math.max(0, Math.min(1, Number(fraction) || 0));
+  const r = 20, c = 2 * Math.PI * r;
+  return `<svg width="56" height="56" viewBox="0 0 56 56" aria-hidden="true">
+    <circle cx="28" cy="28" r="${r}" fill="none" stroke="#e5eeff" stroke-width="6"/>
+    <circle cx="28" cy="28" r="${r}" fill="none" stroke="${color}" stroke-width="6" stroke-linecap="round"
+      stroke-dasharray="${(f * c).toFixed(2)} ${c.toFixed(2)}" transform="rotate(-90 28 28)"/>
+    <text x="28" y="31.5" text-anchor="middle" font-size="10.5" font-weight="600" fill="#0b1c30" font-family="Inter,sans-serif">${Math.round(f * 100)}%</text>
+  </svg>`;
+}
+const flagColor = (c) => c.flag === "OK" ? "#005c55" : c.flag === "OLUMSUZ" ? "#ba1a1a" : "#bdc9c6";
+
+/**
+ * Mevcut 6 kriterin (scoring.py) kartlarında gösterilecek bağlam + mini görsel.
+ * YALNIZCA görsel katman: değer/eşik/flag backend'den gelir, burada yeniden
+ * hesaplanmaz — yalnızca payload'daki mevcut alanlar (market_stats, dağılımlar,
+ * keyword_rows, top_competitors) açıklama/mini grafik için okunur.
+ */
+function buildCriterionContext(data) {
+  const stats = data.market_stats || {};
+  const priceDist = data.price_distribution || [];
+  const brands = data.brand_concentration || [];
+  const comps = data.top_competitors || [];
+
+  const topBrand = brands.reduce((best, b) =>
+    (b.totalRevenueRatio ?? 0) > (best?.totalRevenueRatio ?? -1) ? b : best, null);
+
+  return {
+    "Ort. Satış Fiyatı": {
+      title: "Ort. Satış Fiyatı",
+      suffix: "/ ort.",
+      sub: `Kategori ortalama fiyatı${stats.brands != null ? ` · ${fmtNum(stats.brands)} marka` : ""}`,
+      viz: () => {
+        const vals = priceDist.slice(0, 8).map(i => Number(i.unitsRatio ?? i.ratio ?? i.percentage ?? 0));
+        if (!vals.length) return "";
+        const max = Math.max(...vals) || 1;
+        return `<div class="mini-bars" title="Fiyat dağılımı (satış adedi payı)">${vals.map(v =>
+          `<span class="${v === max ? "hl" : ""}" style="height:${Math.max(8, (v / max) * 100)}%"></span>`).join("")}</div>`;
+      },
+    },
+    "Gross Margin": {
+      title: "Gross Margin",
+      suffix: "brüt marj",
+      sub: "Kategori ortalaması (avgProfit)",
+      viz: (c) => typeof c.value === "number" ? ringSvg(c.value, flagColor(c)) : "",
+    },
+    "ACOS": {
+      title: "ACOS (hesaplanan)",
+      sub: "Ana keyword · reklam maliyeti / satış",
+      viz: (c) => {
+        const row = (data.keyword_rows || []).find(r => typeof c.value === "number" && r.acos === c.value);
+        if (!row) return typeof c.value === "number" ? ringSvg(c.value, flagColor(c)) : "";
+        return `<div class="text-right text-[11.5px] leading-5 text-secondary">
+          <div>Bid <b class="text-on-surface">${row.bid != null ? "$" + row.bid.toFixed(2) : "n/a"}</b></div>
+          <div>CVR <b class="text-on-surface">${row.click_cvr != null ? (row.click_cvr * 100).toFixed(1) + "%" : "n/a"}</b></div>
+          <div>CPA <b class="text-on-surface">${row.cpa != null ? "$" + row.cpa.toFixed(2) : "n/a"}</b></div>
+        </div>`;
+      },
+    },
+    "En Büyük Marka Payı": {
+      title: "En Büyük Marka Payı",
+      suffix: "tek marka",
+      sub: topBrand?.brand ? `Lider: ${esc(topBrand.brand)}` : "Kategori ciro payı",
+      viz: (c) => {
+        if (typeof c.value !== "number") return "";
+        const lead = Math.max(0, Math.min(100, c.value * 100));
+        const col = flagColor(c);
+        return `<div class="split-bar">
+          <div class="labels"><span style="color:${col}">%${lead.toFixed(0)}<br><span class="font-normal">Lider</span></span>
+          <span class="text-secondary text-right">%${(100 - lead).toFixed(0)}<br><span class="font-normal">Diğer</span></span></div>
+          <div class="bar"><span style="width:${lead}%;background:${col}"></span></div>
+        </div>`;
+      },
+    },
+    "Güçlü Yeni Marka (1 yıl)": {
+      title: "Güçlü Yeni Marka (1 yıl)",
+      suffix: "marka",
+      sub: comps.length
+        ? `En çok satan ${comps.length} ürün içinde son 1 yılda listelenen farklı marka`
+        : "Rakip verisi yok",
+      viz: () => {
+        if (!comps.length) return "";
+        return `<div class="dot-grid" title="Dolu nokta = son 12 ayda listelenen ürün">${comps.slice(0, 20).map(it =>
+          `<span class="${isWithinLastYear(it.availableDate) ? "on" : ""}"></span>`).join("")}</div>`;
+      },
+    },
+    "Net Kar Marjı (kar analizi)": {
+      title: "Net Kâr Marjı",
+      sub: "Birim Maliyet & Kâr hesaplayıcısından (canlı)",
+      viz: (c) => typeof c.value === "number" ? ringSvg(c.value, flagColor(c)) : "",
+    },
+  };
+}
+
 function fmtNum(v) {
   if (v == null) return "n/a";
   return Number(v).toLocaleString("tr-TR");
@@ -684,18 +897,30 @@ function fmtNum(v) {
 // ---------------------------------------------------------------------------
 // Grafikler (Chart.js) — SellerSprite alan adları netleşince burada eşleştir
 // ---------------------------------------------------------------------------
-const CHART_COLORS = ["#2FBF9F", "#4C8DFF", "#E8A33D", "#E5484D", "#8B7FD4", "#5FA8D3", "#C4787A", "#7A8B99"];
+// Açık tema paleti (Editorial Intelligence token'ları)
+const CHART_COLORS = ["#005c55", "#3f6fb0", "#a15600", "#0f9488", "#7a86a8", "#c98a4b", "#80d5cb", "#bec6e0", "#ba1a1a", "#6e7977"];
+const CHART_GRID = "#e5eeff";
+const CHART_TICK = "#565e74";
+if (window.Chart) {
+  Chart.defaults.font.family = "Inter, system-ui, sans-serif";
+  Chart.defaults.font.size = 11;
+  Chart.defaults.color = CHART_TICK;
+}
 
 function baseOptions(extra = {}) {
   return {
     responsive: true,
     maintainAspectRatio: false,
     plugins: { legend: { display: false } },
-    scales: { y: { grid: { color: "#2C323D" }, ticks: { color: "#9AA3B2" } },
-              x: { grid: { display: false }, ticks: { color: "#9AA3B2" } } },
+    scales: { y: { grid: { color: CHART_GRID }, border: { display: false }, ticks: { color: CHART_TICK } },
+              x: { grid: { display: false }, ticks: { color: CHART_TICK } } },
     ...extra,
   };
 }
+const pctScales = () => ({
+  y: { ticks: { callback: v => v + "%", color: CHART_TICK }, grid: { color: CHART_GRID }, border: { display: false } },
+  x: { grid: { display: false }, ticks: { color: CHART_TICK } },
+});
 
 function drawBrandChart(canvas, items) {
   if (!items || !items.length) return;
@@ -707,9 +932,9 @@ function drawBrandChart(canvas, items) {
   });
   new Chart(canvas, {
     type: "doughnut",
-    data: { labels, datasets: [{ data: values, backgroundColor: CHART_COLORS, borderColor: "#1B1F26", borderWidth: 2 }] },
-    options: { responsive: true, maintainAspectRatio: false, cutout: "58%",
-      plugins: { legend: { position: "bottom", labels: { color: "#9AA3B2", boxWidth: 10, font: { size: 10.5 } } } } },
+    data: { labels, datasets: [{ data: values, backgroundColor: CHART_COLORS, borderColor: "#ffffff", borderWidth: 2 }] },
+    options: { responsive: true, maintainAspectRatio: false, cutout: "62%",
+      plugins: { legend: { position: "right", labels: { color: CHART_TICK, boxWidth: 8, boxHeight: 8, usePointStyle: true, font: { size: 11 } } } } },
   });
 }
 
@@ -718,8 +943,8 @@ function drawPriceChart(canvas, items) {
   if (!items || !items.length) return;
   new Chart(canvas, {
     type: "bar",
-    data: { labels: items.map(i => i.label ?? i.range), datasets: [{ data: items.map(i => (i.unitsRatio ?? i.ratio ?? i.percentage ?? 0) * 100), backgroundColor: "#4C8DFF", borderRadius: 4 }] },
-    options: baseOptions({ scales: { y: { ticks: { callback: v => v + "%", color: "#9AA3B2" }, grid: { color: "#2C323D" } }, x: { grid: { display: false }, ticks: { color: "#9AA3B2" } } } }),
+    data: { labels: items.map(i => i.label ?? i.range), datasets: [{ data: items.map(i => (i.unitsRatio ?? i.ratio ?? i.percentage ?? 0) * 100), backgroundColor: "#0f766e", borderRadius: 4, maxBarThickness: 36 }] },
+    options: baseOptions({ scales: pctScales() }),
   });
 }
 
@@ -737,8 +962,8 @@ function drawLaunchChart(canvas, items) {
   if (!items || !items.length) return;
   new Chart(canvas, {
     type: "bar",
-    data: { labels: items.map(i => translateLaunchLabel(i.label ?? i.range)), datasets: [{ data: items.map(i => (i.unitsRatio ?? i.ratio ?? i.percentage ?? 0) * 100), backgroundColor: "#E8A33D", borderRadius: 4 }] },
-    options: baseOptions({ scales: { y: { ticks: { callback: v => v + "%", color: "#9AA3B2" }, grid: { color: "#2C323D" } }, x: { grid: { display: false }, ticks: { color: "#9AA3B2" } } } }),
+    data: { labels: items.map(i => translateLaunchLabel(i.label ?? i.range)), datasets: [{ data: items.map(i => (i.unitsRatio ?? i.ratio ?? i.percentage ?? 0) * 100), backgroundColor: "#a15600", borderRadius: 4, maxBarThickness: 36 }] },
+    options: baseOptions({ scales: pctScales() }),
   });
 }
 
@@ -752,7 +977,7 @@ function drawTrendChart(canvas, items) {
   if (!items || !items.length) return;
   new Chart(canvas, {
     type: "line",
-    data: { labels: items.map(i => i.month ?? ""), datasets: [{ data: items.map(i => i.search_volume ?? 0), borderColor: "#2FBF9F", backgroundColor: "rgba(47,191,159,0.1)", fill: true, tension: 0.3, pointRadius: 2 }] },
+    data: { labels: items.map(i => i.month ?? ""), datasets: [{ data: items.map(i => i.search_volume ?? 0), borderColor: "#005c55", backgroundColor: "rgba(15,118,110,0.10)", fill: true, tension: 0.35, pointRadius: 2, borderWidth: 2 }] },
     options: baseOptions(),
   });
 }
@@ -762,19 +987,21 @@ function drawTrendChart(canvas, items) {
 // ---------------------------------------------------------------------------
 async function loadHistory() {
   const list = $("#history-list");
-  list.innerHTML = "yükleniyor…";
+  list.innerHTML = "<p class='p-6 text-sm text-secondary'>yükleniyor…</p>";
   try {
     const res = await apiFetch(`${API_BASE}/api/recent`);
     const rows = await res.json();
     list.innerHTML = "";
-    if (!rows.length) { list.innerHTML = "<p>Henüz hiç keyword analiz edilmemiş.</p>"; return; }
+    if (!rows.length) { list.innerHTML = "<p class='p-6 text-sm text-secondary'>Henüz hiç keyword analiz edilmemiş.</p>"; return; }
     rows.forEach(r => {
       const div = document.createElement("div");
       div.className = "hist-row";
       const date = new Date(r.fetched_at * 1000).toLocaleString("tr-TR");
-      div.innerHTML = `<span class="hist-kw">${r.keyword} <span class="hist-meta">(${r.marketplace})</span></span>
+      const vClass = { "Uygun": "ok", "Sınırda": "warn", "Elenmiş": "bad" }[r.verdict] || "na";
+      div.innerHTML = `<span class="hist-kw">${esc(r.keyword)} <span class="hist-meta">(${esc(r.marketplace)})</span></span>
         <span style="display:flex;align-items:center;gap:10px;">
-          <span class="hist-meta">${r.verdict ?? "—"} · ${date}</span>
+          <span class="chip ${vClass}">${esc(r.verdict ?? "—")}</span>
+          <span class="hist-meta">${date}</span>
           <button class="card-delete-btn" title="Bu kaydı sil">&times;</button>
         </span>`;
       div.querySelector(".card-delete-btn").addEventListener("click", async (ev) => {
@@ -789,12 +1016,12 @@ async function loadHistory() {
       div.addEventListener("click", () => {
         $("#kw-input").value = r.keyword;
         $("#market-input").value = r.marketplace;
-        $$(".nav-btn")[0].click();
+        showView("search");
       });
       list.appendChild(div);
     });
   } catch {
-    list.innerHTML = "Geçmiş yüklenemedi (backend erişilebilir mi kontrol et).";
+    list.innerHTML = "<p class='p-6 text-sm text-error'>Geçmiş yüklenemedi (backend erişilebilir mi kontrol et).</p>";
   }
 }
 
@@ -872,10 +1099,10 @@ function renderSignalResults(root, result) {
   const barsEl = root.querySelector(".signal-bars");
   barsEl.innerHTML = "";
   const signals = [
-    ["Market", result.market.score, "#4C8DFF"],
-    ["Demand", result.demand.score, "#2FBF9F"],
-    ["Truth", result.truth.score, "#8B7FD4"],
-    ["Risk", result.risk.score, "#E5484D"],
+    ["Market", result.market.score, "#0f766e"],
+    ["Demand", result.demand.score, "#3f6fb0"],
+    ["Truth", result.truth.score, "#565e74"],
+    ["Risk", result.risk.score, "#ba1a1a"],
   ];
   signals.forEach(([label, score, color]) => {
     const row = document.createElement("div");
@@ -889,7 +1116,7 @@ function renderSignalResults(root, result) {
   root.querySelector(".opp-score-val").textContent = result.opportunity_score.toFixed(1);
 
   const boBadge = root.querySelector(".blue-ocean-badge");
-  boBadge.textContent = result.blue_ocean ? "🌊 Blue Ocean" : "Blue Ocean değil";
+  boBadge.textContent = result.blue_ocean ? "Blue Ocean" : "Blue Ocean değil";
   boBadge.className = "blue-ocean-badge " + (result.blue_ocean ? "yes" : "no");
 
   const gateBadge = root.querySelector(".stage-gate-badge");
@@ -939,11 +1166,11 @@ async function loadDecisions() {
         const date = new Date(item.decided_at * 1000).toLocaleDateString("tr-TR");
         card.innerHTML = `
           <div class="decision-card-top">
-            <div class="decision-card-kw">${item.keyword}</div>
+            <div class="decision-card-kw">${esc(item.keyword)}</div>
             <button class="card-delete-btn" title="Bu kararı sil">&times;</button>
           </div>
-          <div class="decision-card-meta"><span>${item.marketplace}</span><span>${date}</span></div>
-          ${item.note ? `<div class="decision-card-note">"${item.note}"</div>` : ""}
+          <div class="decision-card-meta"><span>${esc(item.marketplace)}</span><span>${date}</span></div>
+          ${item.note ? `<div class="decision-card-note">"${esc(item.note)}"</div>` : ""}
         `;
         card.querySelector(".card-delete-btn").addEventListener("click", async (ev) => {
           ev.stopPropagation();  // karta tıklama (analiz açma) tetiklenmesin
@@ -956,7 +1183,7 @@ async function loadDecisions() {
         });
         card.addEventListener("click", () => {
           // Sorgu sayfasına dön, keyword'ü doldur, otomatik tekrar analiz et
-          $$(".nav-btn")[0].click();
+          showView("search");
           $("#kw-input").value = item.keyword;
           $("#market-input").value = item.marketplace;
           $("#search-form").requestSubmit();
