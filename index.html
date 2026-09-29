@@ -64,6 +64,7 @@
       <button data-view="keywords" class="nav-btn"><span class="material-symbols-outlined">manage_search</span>Keyword Araştırma</button>
       <button data-view="competitors" class="nav-btn"><span class="material-symbols-outlined">compare_arrows</span>Rakip Analizi</button>
       <button data-view="reports" class="nav-btn"><span class="material-symbols-outlined">folder_open</span>Raporlar</button>
+      <button data-view="settings" class="nav-btn"><span class="material-symbols-outlined">tune</span>Ayarlar</button>
       <div class="hidden lg:block h-px bg-hairline my-2 mx-2"></div>
       <button data-view="decisions" class="nav-btn"><span class="material-symbols-outlined">view_kanban</span>Pazar Kararları</button>
       <button data-view="history" class="nav-btn"><span class="material-symbols-outlined">history</span>Geçmiş</button>
@@ -415,6 +416,52 @@
             </div>
             <div id="rep-dist-legend" class="flex flex-col gap-2 mt-5 text-sm"></div>
             <div class="rounded-xl bg-surface-container-low p-3 mt-5 text-xs text-on-surface-variant leading-relaxed">Her keyword için <b>en son</b> kaydedilen ekip kararı sayılır. Kararsız kayıtlar dağılıma dahil değildir.</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===================== AYARLAR ===================== -->
+      <section id="view-settings" class="view">
+        <div class="card card-pad hero-bg">
+          <div class="eyebrow flex items-center gap-1.5 text-primary"><span class="w-1.5 h-1.5 rounded-full bg-primary"></span>Ayarlar · /api/thresholds</div>
+          <h1 class="font-display text-[26px] sm:text-[32px] font-semibold tracking-tight leading-tight mt-2">Analiz Kriterleri ve Eşikler</h1>
+          <p class="text-sm text-on-surface-variant mt-2 leading-relaxed max-w-2xl">Ön değerlendirmedeki 6 private label kriterinin eşik değerleri. Değerler backend'den okunur; kaydetme ve sıfırlama backend'e gönderilir, panel kendi başına yeniden puanlama yapmaz.</p>
+        </div>
+
+        <div id="set-banner" class="set-banner mt-6" role="status" style="display:none;"></div>
+
+        <div class="card card-pad mt-6">
+          <div class="flex flex-wrap items-start justify-between gap-3">
+            <div class="flex gap-3">
+              <span class="w-10 h-10 shrink-0 rounded-lg bg-surface-container-low grid place-items-center text-primary"><span class="material-symbols-outlined">rule</span></span>
+              <div>
+                <h3 class="font-display text-lg font-semibold">Private Label Eleme Kriteri Eşikleri</h3>
+                <p class="text-xs text-secondary mt-0.5">scoring.py · ön değerlendirmenin Olumlu / Olumsuz sınırları</p>
+              </div>
+            </div>
+            <span id="set-dirty-chip" class="chip na">Yükleniyor…</span>
+          </div>
+          <form id="set-form" class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-5" novalidate></form>
+
+          <div class="rounded-xl bg-surface-container-low p-4 mt-4 flex flex-col sm:flex-row sm:items-center gap-3">
+            <span class="material-symbols-outlined text-primary">filter_alt_off</span>
+            <div class="flex-1 text-[13px]">
+              <div class="font-semibold">Otomatik eleme kuralı</div>
+              <div class="text-secondary text-xs mt-0.5">0 olumsuz = Uygun · 1–3 = Sınırda · 4 ve üzeri olumsuz = Elenmiş. Bu kural backend'de sabittir, buradan değiştirilemez.</div>
+            </div>
+            <span class="chip bad shrink-0">4+ olumsuz → Elenmiş</span>
+          </div>
+        </div>
+
+        <div class="set-actionbar card mt-6">
+          <div class="min-w-0">
+            <div class="font-semibold text-sm">Eşik değişiklikleri</div>
+            <div id="set-status" class="text-xs text-secondary mt-0.5">—</div>
+          </div>
+          <div class="flex flex-wrap gap-2">
+            <button type="button" id="set-revert" class="btn btn-outline" disabled><span class="material-symbols-outlined">undo</span>Geri Al</button>
+            <button type="button" id="set-reset" class="btn btn-outline" disabled><span class="material-symbols-outlined">restart_alt</span>Sıfırla</button>
+            <button type="button" id="set-save" class="btn btn-primary" disabled><span class="material-symbols-outlined">check</span>Kaydet</button>
           </div>
         </div>
       </section>

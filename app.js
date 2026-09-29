@@ -141,6 +141,7 @@ function showView(view) {
   if (view === "history") loadHistory();
   if (view === "decisions") loadDecisions();
   if (view === "reports") loadReports();
+  if (view === "settings") loadSettings();
   // Chart.js gizli (display:none) kapsayıcıda 0 boyutla çizer — veri
   // görünümleri yalnızca görünür olduklarında (yeniden) render edilir.
   if (view === "keywords") renderKeywordView();
@@ -1845,5 +1846,212 @@ function csvCell(v) {
     a.click();
     a.remove();
     URL.revokeObjectURL(url);
+  });
+})();
+
+
+// ---------------------------------------------------------------------------
+// Ayarlar — /api/thresholds
+// GET mevcut. PUT /api/thresholds ve POST /api/thresholds/reset backend'de
+// HENÜZ YOK: çağrılar yapılır, 404/405/501 gelirse kullanıcıya "backend
+// desteklemiyor" denir ve form değerleri korunur. Beklenen sözleşme:
+//   PUT  gövde = 6 anahtar (DEFAULT_THRESHOLDS ile aynı birim: oranlar 0-1)
+//   POST /reset → varsayılan eşik nesnesi
+// Panel hiçbir analizi bu eşiklerle yeniden puanlamaz.
+// ---------------------------------------------------------------------------
+const THRESHOLD_FIELDS = [
+  { key: "min_avg_price", label: "Ort. Satış Fiyatı", dir: "≥", unit: "usd", min: 0, max: 100, step: 0.5,
+    help: "Pazar ortalama fiyatı bu değerin altındaysa kriter olumsuz." },
+  { key: "min_gross_margin", label: "Gross Margin", dir: "≥", unit: "pct", min: 0, max: 100, step: 1,
+    help: "Kategori ortalama brüt marjı (avgProfit) için alt sınır." },
+  { key: "max_acos", label: "ACOS (hesaplanan)", dir: "≤", unit: "pct", min: 0, max: 150, step: 1,
+    help: "Ana keyword'ün hesaplanan ACOS'u bu değeri aşarsa olumsuz." },
+  { key: "max_brand_share", label: "En Büyük Marka Payı", dir: "≤", unit: "pct", min: 0, max: 100, step: 1,
+    help: "Lider markanın ciro payı bu değeri aşarsa olumsuz." },
+  { key: "min_strong_new_brands", label: "Güçlü Yeni Marka (1 yıl)", dir: "≥", unit: "count", min: 0, max: 20, step: 1,
+    help: "Son 12 ayda en çok satanlara giren farklı marka sayısı için alt sınır." },
+  { key: "min_net_margin", label: "Net Kâr Marjı", dir: "≥", unit: "pct", min: 0, max: 100, step: 1,
+    help: "Kâr hesaplayıcısındaki net marj için alt sınır." },
+];
+const setState = { loaded: null, busy: false };
+
+// Birim dönüşümü yalnızca gösterim içindir: oranlar formda yüzde olarak düzenlenir
+const toDisplay = (f, v) => v == null || isNaN(v) ? "" : f.unit === "pct" ? +(Number(v) * 100).toFixed(2) : +Number(v).toFixed(2);
+const fromDisplay = (f, v) => f.unit === "pct" ? +(v / 100).toFixed(4) : f.unit === "count" ? Math.round(v) : +v;
+const fmtThreshold = (f, v) => v == null || isNaN(v) ? "—"
+  : f.unit === "usd" ? "$" + Number(v).toFixed(2) : f.unit === "pct" ? "%" + toDisplay(f, v) : String(v);
+
+function setBanner(kind, html) {
+  const el = $("#set-banner");
+  if (!kind) { el.style.display = "none"; el.innerHTML = ""; return; }
+  const icon = { ok: "check_circle", warn: "info", bad: "error" }[kind];
+  el.className = `set-banner ${kind} mt-6`;
+  el.innerHTML = `<span class="material-symbols-outlined">${icon}</span><div>${html}</div>`;
+  el.style.display = "flex";
+}
+
+function buildSettingsForm() {
+  const form = $("#set-form");
+  form.innerHTML = "";
+  THRESHOLD_FIELDS.forEach((f, i) => {
+    const wrap = document.createElement("div");
+    wrap.className = "set-field";
+    wrap.dataset.key = f.key;
+    const prefix = f.unit === "usd" ? "$" : f.unit === "pct" ? "%" : "";
+    const suffix = f.unit === "count" ? "marka" : "";
+    const scale = (v) => f.unit === "usd" ? "$" + v : f.unit === "pct" ? "%" + v : String(v);
+    wrap.innerHTML = `
+      <div class="flex items-start justify-between gap-3">
+        <label for="set-in-${f.key}" class="flex items-start gap-2 min-w-0">
+          <span class="chip na shrink-0">${String(i + 1).padStart(2, "0")}</span>
+          <span class="min-w-0"><span class="block font-semibold text-sm">${esc(f.label)} <span class="text-secondary font-normal">${f.dir}</span></span>
+          <span class="block text-xs text-secondary mt-0.5">${esc(f.help)}</span></span>
+        </label>
+        <span class="set-num shrink-0">${prefix}<input type="number" id="set-in-${f.key}" class="field" min="${f.min}" max="${f.max}" step="${f.step}" inputmode="decimal">${suffix ? `<span class="text-xs font-normal text-secondary">${suffix}</span>` : ""}</span>
+      </div>
+      <input type="range" class="set-range" min="${f.min}" max="${f.max}" step="${f.step}" aria-label="${esc(f.label)} eşiği">
+      <div class="set-scale"><span>${scale(f.min)}</span><span class="set-loaded"></span><span>${scale(f.max)}</span></div>
+      <div class="set-err"></div>`;
+    const num = wrap.querySelector('input[type="number"]');
+    const range = wrap.querySelector('input[type="range"]');
+    num.addEventListener("input", () => { if (num.value !== "") range.value = num.value; updateSettingsState(); });
+    range.addEventListener("input", () => { num.value = range.value; updateSettingsState(); });
+    form.appendChild(wrap);
+  });
+}
+
+function fillSettingsForm(values) {
+  THRESHOLD_FIELDS.forEach(f => {
+    const wrap = $(`#set-form [data-key="${f.key}"]`);
+    const v = toDisplay(f, values?.[f.key]);
+    wrap.querySelector('input[type="number"]').value = v;
+    wrap.querySelector('input[type="range"]').value = v === "" ? f.min : v;
+    wrap.querySelector(".set-loaded").textContent = `Kayıtlı: ${fmtThreshold(f, values?.[f.key])}`;
+  });
+  updateSettingsState();
+}
+
+/** Formu doğrula; geçerliyse backend birimiyle 6 anahtarlı nesneyi döndür */
+function readSettingsForm() {
+  const out = {};
+  let valid = true, dirty = 0;
+  THRESHOLD_FIELDS.forEach(f => {
+    const wrap = $(`#set-form [data-key="${f.key}"]`);
+    const raw = wrap.querySelector('input[type="number"]').value.trim();
+    const v = Number(raw);
+    let err = "";
+    if (raw === "" || !isFinite(v)) err = "Sayı girin.";
+    else if (v < f.min || v > f.max) err = `${f.min}–${f.max} aralığında olmalı.`;
+    else if (f.unit === "count" && !Number.isInteger(v)) err = "Tam sayı olmalı.";
+    wrap.querySelector(".set-err").textContent = err;
+    wrap.classList.toggle("invalid", !!err);
+    if (err) { valid = false; wrap.classList.remove("dirty"); return; }
+    out[f.key] = fromDisplay(f, v);
+    const isDirty = setState.loaded && Math.abs(out[f.key] - Number(setState.loaded[f.key])) > 1e-9;
+    wrap.classList.toggle("dirty", !!isDirty);
+    if (isDirty) dirty++;
+  });
+  return { values: out, valid, dirty };
+}
+
+function updateSettingsState() {
+  const { valid, dirty } = readSettingsForm();
+  const ready = !!setState.loaded && !setState.busy;
+  $("#set-save").disabled = !ready || !valid || !dirty;
+  $("#set-revert").disabled = !ready || !dirty;
+  $("#set-reset").disabled = !ready;
+  const chip = $("#set-dirty-chip");
+  if (!setState.loaded) { chip.className = "chip bad"; chip.textContent = "Yüklenemedi"; }
+  else if (!valid) { chip.className = "chip bad"; chip.textContent = "Geçersiz değer var"; }
+  else if (dirty) { chip.className = "chip warn"; chip.textContent = `${dirty} kaydedilmemiş değişiklik`; }
+  else { chip.className = "chip ok"; chip.textContent = "Kayıtlı değerlerle aynı"; }
+  $("#set-status").textContent = !setState.loaded ? "Eşikler okunamadı."
+    : dirty ? `${dirty} eşik değişti — henüz kaydedilmedi.` : "Tüm eşikler backend'deki değerlerle aynı.";
+}
+
+/** 6 anahtarın hepsi sayı mı? (backend yanıtını olduğu gibi kabul etmeden önce) */
+function isThresholdObject(o) {
+  return o && typeof o === "object" && THRESHOLD_FIELDS.every(f => typeof o[f.key] === "number" && isFinite(o[f.key]));
+}
+
+async function loadSettings() {
+  if (!$("#set-form").children.length) buildSettingsForm();
+  setBanner(null);
+  $("#set-dirty-chip").className = "chip na";
+  $("#set-dirty-chip").textContent = "Yükleniyor…";
+  try {
+    const res = await apiFetch(`${API_BASE}/api/thresholds`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const body = await res.json();
+    if (!isThresholdObject(body)) throw new Error("beklenmeyen yanıt biçimi");
+    setState.loaded = body;
+    fillSettingsForm(body);
+  } catch (err) {
+    setState.loaded = null;
+    updateSettingsState();
+    setBanner("bad", `Eşikler yüklenemedi: ${esc(err.message)}`);
+  }
+}
+
+/** PUT / reset çağrısı — uç yoksa (404/405/501) açık bir "desteklenmiyor" hatası */
+async function thresholdWrite(method, url, body) {
+  const res = await apiFetch(url, {
+    method, headers: { "Content-Type": "application/json" },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  });
+  if ([404, 405, 501].includes(res.status)) {
+    const e = new Error(`Backend bu işlemi henüz desteklemiyor (HTTP ${res.status} — ${method} ${url.replace(API_BASE, "")}).`);
+    e.unsupported = true;
+    throw e;
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+  return data;
+}
+
+async function runSettingsAction(btn, fn) {
+  setState.busy = true;
+  updateSettingsState();
+  const originalHtml = btn.innerHTML;
+  btn.textContent = "gönderiliyor…";
+  try {
+    await fn();
+  } catch (err) {
+    setBanner(err.unsupported ? "warn" : "bad", esc(err.message) +
+      (err.unsupported ? "<br><span class='text-xs'>Değerleriniz formda korundu; PUT /api/thresholds ve POST /api/thresholds/reset eklendiğinde bu buton çalışır.</span>" : ""));
+  } finally {
+    btn.innerHTML = originalHtml;
+    setState.busy = false;
+    updateSettingsState();
+  }
+}
+
+(function bindSettingsView() {
+  $("#set-save").addEventListener("click", (e) => {
+    const { values, valid, dirty } = readSettingsForm();
+    if (!valid || !dirty) return;
+    runSettingsAction(e.currentTarget, async () => {
+      const data = await thresholdWrite("PUT", `${API_BASE}/api/thresholds`, values);
+      setState.loaded = isThresholdObject(data) ? data : values;
+      fillSettingsForm(setState.loaded);
+      setBanner("ok", "Eşikler kaydedildi. Mevcut analiz ekranı yeniden puanlanmaz; değişiklik yeni analizlerde backend tarafından uygulanır.");
+    });
+  });
+  $("#set-reset").addEventListener("click", (e) => {
+    if (!confirm("6 eşik de varsayılan değerlere döndürülecek. Emin misiniz?")) return;
+    runSettingsAction(e.currentTarget, async () => {
+      const data = await thresholdWrite("POST", `${API_BASE}/api/thresholds/reset`);
+      if (isThresholdObject(data)) setState.loaded = data;
+      else {
+        await loadSettings();
+        if (!setState.loaded) throw new Error("Sıfırlama sonrası eşikler okunamadı.");
+      }
+      fillSettingsForm(setState.loaded);
+      setBanner("ok", "Eşikler varsayılan değerlere sıfırlandı.");
+    });
+  });
+  $("#set-revert").addEventListener("click", () => {
+    if (setState.loaded) fillSettingsForm(setState.loaded);
+    setBanner(null);
   });
 })();
