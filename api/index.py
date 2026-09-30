@@ -31,7 +31,7 @@ import asyncio
 from fastapi import FastAPI, HTTPException, Query, BackgroundTasks, Depends, Header
 from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from mcp_client import call_tool
 from scoring import calc_keyword_ad_metrics, calc_profit, pre_assessment, DEFAULT_THRESHOLDS
@@ -642,12 +642,16 @@ async def thresholds(user: dict = Depends(require_auth)):
 
 
 class ThresholdUpdateRequest(BaseModel):
-    min_avg_price: float | None = None
-    min_gross_margin: float | None = None
-    max_acos: float | None = None
-    max_brand_share: float | None = None
-    min_strong_new_brands: float | None = None
-    min_net_margin: float | None = None
+    # Sınırlar app.js::THRESHOLD_FIELDS min/max ile BİREBİR aynı (tek kaynak
+    # tutarlılığı) — biri değişirse diğeri de değişmeli. Yüzde alanları formda
+    # 0-100 gösterilir ama buraya 0-1 oran olarak gelir (ACOS formda 0-150).
+    # Aralık dışı değer -> FastAPI otomatik 422.
+    min_avg_price: float | None = Field(None, ge=0, le=100)          # $0-100
+    min_gross_margin: float | None = Field(None, ge=0, le=1)         # %0-100
+    max_acos: float | None = Field(None, ge=0, le=1.5)               # %0-150
+    max_brand_share: float | None = Field(None, ge=0, le=1)          # %0-100
+    min_strong_new_brands: int | None = Field(None, ge=0, le=20)     # 0-20 marka, tam sayı
+    min_net_margin: float | None = Field(None, ge=0, le=1)           # %0-100
 
 
 @app.put("/api/thresholds")
