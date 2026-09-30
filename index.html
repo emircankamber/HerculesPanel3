@@ -63,6 +63,7 @@
       <button data-view="search" class="nav-btn active"><span class="material-symbols-outlined">monitoring</span>Ürün Analizi</button>
       <button data-view="keywords" class="nav-btn"><span class="material-symbols-outlined">manage_search</span>Keyword Araştırma</button>
       <button data-view="competitors" class="nav-btn"><span class="material-symbols-outlined">compare_arrows</span>Rakip Analizi</button>
+      <button data-view="trends" class="nav-btn"><span class="material-symbols-outlined">trending_up</span>Trendler &amp; Fırsatlar</button>
       <button data-view="reports" class="nav-btn"><span class="material-symbols-outlined">folder_open</span>Raporlar</button>
       <button data-view="settings" class="nav-btn"><span class="material-symbols-outlined">tune</span>Ayarlar</button>
       <div class="hidden lg:block h-px bg-hairline my-2 mx-2"></div>
@@ -243,6 +244,73 @@
               </div>
             </div>
           </div>
+        </div>
+      </section>
+
+      <!-- ===================== TRENDLER & FIRSATLAR ===================== -->
+      <section id="view-trends" class="view">
+        <div class="card card-pad hero-bg">
+          <div class="flex flex-wrap items-center gap-2"><span class="chip chip-dot ok">ABA arama sıralaması</span><span class="text-xs text-secondary">aba_research_weekly / monthly · POST /api/discovery/trending</span></div>
+          <h1 class="font-display text-[26px] sm:text-[32px] font-semibold tracking-tight leading-tight mt-3">Erken Sinyalleri Yakalayın</h1>
+          <p class="text-sm text-on-surface-variant mt-2 leading-relaxed max-w-3xl">Amazon arama sıralamasında hızla yükselen keyword'ler. <b>Sıralama İvmesi</b>, keyword'ün arama <b>sırasının</b> ne kadar yükseldiğini gösterir (0.909 ≈ 11. sıradan 1. sıraya) — arama hacmi büyümesi değildir. Hacim için "Arama Hacmi" sütununa bakın.</p>
+        </div>
+
+        <form id="trd-form" class="card card-pad mt-6" novalidate>
+          <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-[minmax(0,1.4fr)_repeat(4,minmax(0,1fr))_auto] gap-3 items-end">
+            <label class="flex flex-col gap-1.5 min-w-0"><span class="eyebrow">Pazar tipi</span>
+              <select id="trd-model" class="field !h-11">
+                <option value="1">Popüler Pazar</option>
+                <option value="2">Anormal Hareketli</option>
+                <option value="3">Sürekli Büyüyen</option>
+                <option value="4" selected>Hızlı Yükselen</option>
+                <option value="5">Potansiyel</option>
+                <option value="6">Uzun Kuyruk</option>
+              </select>
+            </label>
+            <label class="flex flex-col gap-1.5 min-w-0"><span class="eyebrow">Periyot</span>
+              <select id="trd-gran" class="field !h-11"><option value="weekly" selected>Haftalık</option><option value="monthly">Aylık</option></select>
+            </label>
+            <label class="flex flex-col gap-1.5 min-w-0"><span class="eyebrow">Pazar yeri</span>
+              <select id="trd-market" class="field !h-11"><option value="US">US</option><option value="UK">UK</option><option value="CA">CA</option></select>
+            </label>
+            <label class="flex flex-col gap-1.5 min-w-0"><span class="eyebrow">Min. arama hacmi</span>
+              <input type="number" id="trd-minsearch" class="field !h-11" min="0" step="100" placeholder="opsiyonel">
+            </label>
+            <label class="flex flex-col gap-1.5 min-w-0"><span class="eyebrow">Sonuç sayısı</span>
+              <select id="trd-size" class="field !h-11"><option value="10">10</option><option value="20" selected>20</option><option value="50">50</option></select>
+            </label>
+            <button type="submit" id="trd-scan" class="btn btn-primary !h-11"><span class="material-symbols-outlined">radar</span>Tara</button>
+          </div>
+          <div class="flex flex-wrap items-center justify-between gap-2 mt-3">
+            <div id="trd-status" class="status-line"></div>
+            <div id="trd-stale" class="text-xs text-tertiary font-medium" style="display:none;">Filtreler değişti — sonuçları güncellemek için Tara'ya basın.</div>
+          </div>
+          <div class="text-xs text-secondary mt-1">Her tarama 1 SellerSprite MCP çağrısıdır; filtre değişince otomatik çekilmez.</div>
+        </form>
+
+        <div id="trd-empty" class="card card-pad mt-6 text-center py-12">
+          <span class="material-symbols-outlined text-outline" style="font-size:36px">radar</span>
+          <div class="font-display text-lg font-semibold mt-2">Henüz tarama yapılmadı</div>
+          <p class="text-sm text-secondary mt-1">Pazar tipini seçip Tara'ya basın.</p>
+        </div>
+
+        <div id="trd-content" class="hidden mt-6">
+          <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
+            <div class="flex flex-wrap items-center gap-2">
+              <h3 class="section-title">Öncelikli Fırsat Radarı</h3>
+              <span id="trd-summary-chip" class="chip ok"></span>
+              <span id="trd-meta" class="text-xs text-secondary"></span>
+            </div>
+            <label class="flex items-center gap-2 text-xs text-secondary">Sıralama
+              <select id="trd-sort" class="field !h-8 text-xs">
+                <option value="backend">Backend sırası</option>
+                <option value="growth_rate">Sıralama İvmesi</option>
+                <option value="searches">Arama Hacmi</option>
+                <option value="purchases">Satış</option>
+              </select>
+            </label>
+          </div>
+          <div id="trd-list" class="grid grid-cols-1 lg:grid-cols-2 gap-4"></div>
         </div>
       </section>
 

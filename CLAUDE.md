@@ -225,8 +225,12 @@ parametresi (1-6) pazar tipini seçiyor: 1=Popüler, 2=Anormal Hareketli,
 Nişler" kartının gerçek karşılığı), 5=Potansiyel, 6=Uzun Kuyruk.
 
 Gerçek alan adları: `data.items` (dict içinde liste, keyword_miner gibi),
-her item'da `searches`, `searchRankGrowthRate` (0-1 oran, büyüme %'si),
-`w4RankGrowthRate`/`w12RankGrowthRate` (4/12 haftalık karşılaştırma),
+her item'da `searches` (arama HACMİ — hacim için tek doğru alan),
+`searchRankGrowthRate` (0-1 oran; arama SIRALAMASININ yükselme oranı, hacim
+büyümesi DEĞİL — ör. 0.909 ≈ 11. sıradan 1. sıraya çıkış; panelde "Sıralama
+İvmesi" olarak etiketleniyor, asla "hacim büyümesi" deme),
+`w4RankGrowthRate`/`w12RankGrowthRate` (aynı sıralama ivmesinin 4/12 haftalık
+karşılaştırması),
 `top3Brands`, `top3AsinDtoList` (görsel URL + CTR/CVR ile).
 
 **Kullanılmayan (bilerek):** `google_trend` tool'u da var (Amazon dışı,

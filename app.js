@@ -142,6 +142,7 @@ function showView(view) {
   if (view === "decisions") loadDecisions();
   if (view === "reports") loadReports();
   if (view === "settings") loadSettings();
+  if (view === "trends") updateTrendsStale();
   // Chart.js gizli (display:none) kapsayıcıda 0 boyutla çizer — veri
   // görünümleri yalnızca görünür olduklarında (yeniden) render edilir.
   if (view === "keywords") renderKeywordView();
@@ -2054,4 +2055,163 @@ async function runSettingsAction(btn, fn) {
     if (setState.loaded) fillSettingsForm(setState.loaded);
     setBanner(null);
   });
+})();
+
+
+// ---------------------------------------------------------------------------
+// Trendler & Fırsatlar — POST /api/discovery/trending (aba_research_weekly/monthly)
+// ALAN ANLAMI: growth_rate / growth_4w / growth_12w = searchRankGrowthRate,
+// yani arama SIRALAMASININ yükselme oranı (0.909 ≈ 11. sıradan 1. sıraya).
+// Arama hacmi büyümesi DEĞİLDİR → panelde "Sıralama İvmesi". Hacim = searches.
+// Her tarama 1 MCP çağrısı: filtre değişince otomatik çekme YOK, yalnızca "Tara".
+// ---------------------------------------------------------------------------
+const SEARCH_MODEL_LABELS = { 1: "Popüler Pazar", 2: "Anormal Hareketli", 3: "Sürekli Büyüyen", 4: "Hızlı Yükselen", 5: "Potansiyel", 6: "Uzun Kuyruk" };
+const trdState = { data: null, lastParams: null, busy: false, sort: "backend" };
+
+/** Görsel URL'ine yalnızca https ise izin ver; aksi halde null */
+function safeHttpsUrl(v) {
+  if (typeof v !== "string" || !v) return null;
+  try {
+    const u = new URL(v);
+    return u.protocol === "https:" ? u.href : null;
+  } catch { return null; }
+}
+
+/** Sıralama ivmesi: 0-1 oran → "+%90.9" (negatifse sıralama düşmüş) */
+function fmtRankAccel(v) {
+  if (v == null || v === "" || isNaN(v)) return "n/a";
+  const n = Number(v) * 100;
+  return (n > 0 ? "+" : n < 0 ? "−" : "") + "%" + Math.abs(n).toFixed(1);
+}
+const rankAccelClass = (v) => v == null || isNaN(v) ? "text-secondary" : Number(v) > 0 ? "text-primary" : Number(v) < 0 ? "text-error" : "text-secondary";
+
+/** CTR/CVR/satın alma oranı: 0-1 geldiyse yüzdeye çevir, >1 ise zaten yüzde say */
+function fmtRate(v) {
+  if (v == null || v === "" || isNaN(v)) return "n/a";
+  const n = Number(v);
+  return "%" + (n <= 1 ? n * 100 : n).toFixed(1);
+}
+
+function readTrendParams() {
+  const minRaw = $("#trd-minsearch").value.trim();
+  const min = minRaw === "" ? null : Math.max(0, Math.round(Number(minRaw)));
+  return {
+    marketplace: $("#trd-market").value,
+    search_model: Number($("#trd-model").value),
+    granularity: $("#trd-gran").value,
+    ...(min ? { min_searches: min } : {}),
+    size: Number($("#trd-size").value),
+  };
+}
+
+function updateTrendsStale() {
+  const stale = !!trdState.lastParams && JSON.stringify(readTrendParams()) !== JSON.stringify(trdState.lastParams);
+  $("#trd-stale").style.display = stale ? "block" : "none";
+}
+
+async function scanTrends() {
+  if (trdState.busy) return;
+  const minRaw = $("#trd-minsearch").value.trim();
+  const status = $("#trd-status");
+  if (minRaw !== "" && (!isFinite(Number(minRaw)) || Number(minRaw) < 0)) {
+    status.textContent = "Min. arama hacmi 0 veya daha büyük bir sayı olmalı.";
+    status.className = "status-line error";
+    return;
+  }
+  const params = readTrendParams();
+  trdState.busy = true;
+  $("#trd-scan").disabled = true;
+  status.textContent = `${SEARCH_MODEL_LABELS[params.search_model]} keyword'ler taranıyor… (1 MCP çağrısı)`;
+  status.className = "status-line loading";
+  try {
+    const res = await apiFetch(`${API_BASE}/api/discovery/trending`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(params),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(apiErrorText(data, res.status));
+    if (!data || !Array.isArray(data.results)) throw new Error("Backend beklenmeyen bir yanıt döndürdü.");
+    trdState.data = { ...data, _params: params, _at: new Date() };
+    trdState.lastParams = params;
+    status.textContent = `Tarama tamamlandı · ${data.results.length} keyword`;
+    status.className = "status-line";
+    renderTrends();
+  } catch (err) {
+    status.textContent = `Hata: ${err.message}`;
+    status.className = "status-line error";
+  } finally {
+    trdState.busy = false;
+    $("#trd-scan").disabled = false;
+    updateTrendsStale();
+  }
+}
+
+function renderTrends() {
+  const d = trdState.data;
+  $("#trd-empty").classList.toggle("hidden", !!d);
+  $("#trd-content").classList.toggle("hidden", !d);
+  if (!d) return;
+  const p = d._params;
+  $("#trd-summary-chip").textContent = `${d.search_model_label || SEARCH_MODEL_LABELS[p.search_model]} · ${d.results.length} aday`;
+  $("#trd-meta").textContent = `${p.marketplace} · ${p.granularity === "monthly" ? "aylık" : "haftalık"}${d.total != null ? ` · toplam ${fmtNum(d.total)} eşleşme` : ""} · ${d._at.toLocaleTimeString("tr-TR")}`;
+
+  let rows = d.results.map((r, i) => ({ ...r, _rank: i + 1 }));
+  if (trdState.sort !== "backend") {
+    const k = trdState.sort;
+    rows.sort((a, b) => (b[k] ?? -Infinity) - (a[k] ?? -Infinity));
+  }
+  const list = $("#trd-list");
+  list.innerHTML = rows.length ? "" : `<div class="card card-pad text-sm text-secondary lg:col-span-2">Bu filtrelerle sonuç bulunamadı. Min. arama hacmini düşürmeyi ya da başka bir pazar tipini deneyin.</div>`;
+  rows.forEach(r => {
+    const card = document.createElement("div");
+    card.className = "card p-5 flex flex-col gap-4 min-w-0";
+    const depts = (r.departments || []).slice(0, 3).map(x => `<span class="chip na">${esc(x)}</span>`).join("");
+    const brands = (r.top3_brands || []).map(b => `<span class="chip">${esc(b)}</span>`).join("") || `<span class="text-xs text-secondary">—</span>`;
+    const asins = (r.top3_asins || []).map(a => {
+      const img = safeHttpsUrl(a.image_url);
+      const tip = `${a.asin || ""} · CTR ${fmtRate(a.click_rate)} · CVR ${fmtRate(a.conversion_rate)}`;
+      return `<div class="flex items-center gap-2 min-w-0" title="${esc(tip)}">
+        ${img ? `<img src="${esc(img)}" alt="" loading="lazy" referrerpolicy="no-referrer" class="w-10 h-10 rounded-lg object-contain bg-surface-container-low border border-hairline shrink-0">`
+              : `<span class="w-10 h-10 rounded-lg bg-surface-container-low grid place-items-center text-outline shrink-0"><span class="material-symbols-outlined">image</span></span>`}
+        <div class="min-w-0 text-[11px] leading-4"><div class="mono font-semibold truncate">${esc(a.asin || "—")}</div><div class="text-secondary">CTR ${fmtRate(a.click_rate)} · CVR ${fmtRate(a.conversion_rate)}</div></div>
+      </div>`;
+    }).join("");
+    const bidRange = r.bid_min != null && r.bid_max != null ? ` <span class="text-secondary font-normal text-xs">(${fmtUsd(r.bid_min)}–${fmtUsd(r.bid_max)})</span>` : "";
+    card.innerHTML = `
+      <div class="flex items-start justify-between gap-3">
+        <div class="min-w-0">
+          <div class="flex flex-wrap items-center gap-1.5"><span class="chip ok">#${r._rank}</span>${depts}</div>
+          <div class="font-display font-semibold text-[17px] leading-snug mt-2 break-words">${esc(r.keyword || "—")}</div>
+        </div>
+        <div class="text-right shrink-0" title="Arama sıralamasının yükselme oranı (searchRankGrowthRate). Arama hacmi büyümesi DEĞİLDİR.">
+          <div class="eyebrow">Sıralama İvmesi</div>
+          <div class="font-display text-[26px] font-medium tracking-tight tabular ${rankAccelClass(r.growth_rate)}">${fmtRankAccel(r.growth_rate)}</div>
+          <div class="text-[11px] text-secondary tabular">4H <span class="${rankAccelClass(r.growth_4w)}">${fmtRankAccel(r.growth_4w)}</span> · 12H <span class="${rankAccelClass(r.growth_12w)}">${fmtRankAccel(r.growth_12w)}</span></div>
+        </div>
+      </div>
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 rounded-xl bg-surface-container-low p-3 text-xs">
+        <div><div class="text-secondary">Arama hacmi</div><div class="font-semibold text-sm tabular mt-0.5" title="${fmtNum(r.searches)}">${fmtCompact(r.searches)}</div></div>
+        <div><div class="text-secondary">Arama sırası</div><div class="font-semibold text-sm tabular mt-0.5">${r.search_rank != null ? "#" + fmtNum(r.search_rank) : "n/a"}</div></div>
+        <div><div class="text-secondary">Satış</div><div class="font-semibold text-sm tabular mt-0.5" title="${fmtNum(r.purchases)}">${fmtCompact(r.purchases)} <span class="font-normal text-secondary">(${fmtRate(r.purchase_rate)})</span></div></div>
+        <div><div class="text-secondary">Bid</div><div class="font-semibold text-sm tabular mt-0.5">${r.bid != null ? fmtUsd(r.bid) : "n/a"}${bidRange}</div></div>
+      </div>
+      <div><div class="eyebrow mb-1.5">Tıklama payı en yüksek 3 marka</div><div class="flex flex-wrap gap-1.5">${brands}</div></div>
+      ${asins ? `<div><div class="eyebrow mb-2">İlk 3 ASIN</div><div class="grid grid-cols-1 sm:grid-cols-3 gap-2">${asins}</div></div>` : ""}
+      <div class="flex justify-end mt-auto"><button type="button" class="trd-analyze btn btn-outline btn-sm"><span class="material-symbols-outlined">monitoring</span>Analiz Et</button></div>`;
+    card.querySelector(".trd-analyze").addEventListener("click", () => {
+      showView("search");
+      runAnalysis(r.keyword, p.marketplace);
+    });
+    list.appendChild(card);
+  });
+}
+
+(function bindTrendsView() {
+  $("#trd-form").addEventListener("submit", (e) => { e.preventDefault(); scanTrends(); });
+  // Filtre değişikliği yalnızca "güncel değil" uyarısını açar — MCP çağrısı yapmaz
+  ["#trd-model", "#trd-gran", "#trd-market", "#trd-minsearch", "#trd-size"].forEach(sel => {
+    $(sel).addEventListener("input", updateTrendsStale);
+    $(sel).addEventListener("change", updateTrendsStale);
+  });
+  $("#trd-sort").addEventListener("change", (e) => { trdState.sort = e.target.value; renderTrends(); });
 })();
