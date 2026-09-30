@@ -1852,12 +1852,14 @@ function csvCell(v) {
 
 // ---------------------------------------------------------------------------
 // Ayarlar — /api/thresholds
-// GET mevcut. PUT /api/thresholds ve POST /api/thresholds/reset backend'de
-// HENÜZ YOK: çağrılar yapılır, 404/405/501 gelirse kullanıcıya "backend
-// desteklemiyor" denir ve form değerleri korunur. Beklenen sözleşme:
-//   PUT  gövde = 6 anahtar (DEFAULT_THRESHOLDS ile aynı birim: oranlar 0-1)
-//   POST /reset → varsayılan eşik nesnesi
-// Panel hiçbir analizi bu eşiklerle yeniden puanlamaz.
+// Kullanıcıya özel eşikler (api/index.py + api/database.py::user_thresholds):
+//   GET   /api/thresholds        → DEFAULT_THRESHOLDS + kullanıcının override'ları
+//   PUT   /api/thresholds        → kısmi güncelleme; yanıt birleşik eşik nesnesi
+//   POST  /api/thresholds/reset  → override'ları siler; yanıt DEFAULT_THRESHOLDS
+// Birim DEFAULT_THRESHOLDS ile aynı (oranlar 0-1). Backend aralık doğrulaması
+// yapmıyor — aralık/tam sayı kontrolü burada, göndermeden önce yapılır.
+// Kaydedilen eşikler SONRAKİ /api/analyze(-asin) çağrılarında pre_assessment'a
+// geçer; açık analiz ekranı frontend'de yeniden puanlanmaz.
 // ---------------------------------------------------------------------------
 const THRESHOLD_FIELDS = [
   { key: "min_avg_price", label: "Ort. Satış Fiyatı", dir: "≥", unit: "usd", min: 0, max: 100, step: 0.5,
@@ -1966,7 +1968,7 @@ function updateSettingsState() {
   else if (dirty) { chip.className = "chip warn"; chip.textContent = `${dirty} kaydedilmemiş değişiklik`; }
   else { chip.className = "chip ok"; chip.textContent = "Kayıtlı değerlerle aynı"; }
   $("#set-status").textContent = !setState.loaded ? "Eşikler okunamadı."
-    : dirty ? `${dirty} eşik değişti — henüz kaydedilmedi.` : "Tüm eşikler backend'deki değerlerle aynı.";
+    : dirty ? `${dirty} eşik değişti — henüz kaydedilmedi.` : "Tüm eşikler kayıtlı değerlerle aynı.";
 }
 
 /** 6 anahtarın hepsi sayı mı? (backend yanıtını olduğu gibi kabul etmeden önce) */
@@ -1993,19 +1995,24 @@ async function loadSettings() {
   }
 }
 
-/** PUT / reset çağrısı — uç yoksa (404/405/501) açık bir "desteklenmiyor" hatası */
+/** FastAPI hata gövdesini okunur metne çevir (400: string, 422: doğrulama listesi) */
+function apiErrorText(data, status) {
+  const d = data && data.detail;
+  if (Array.isArray(d)) return d.map(x => `${(x.loc || []).slice(-1)[0] || "alan"}: ${x.msg || "geçersiz"}`).join(" · ");
+  if (typeof d === "string" && d) return d;
+  return `HTTP ${status}`;
+}
+
+/** PUT /api/thresholds ve POST /api/thresholds/reset — yanıt 6 anahtarlı eşik nesnesi */
 async function thresholdWrite(method, url, body) {
   const res = await apiFetch(url, {
     method, headers: { "Content-Type": "application/json" },
     ...(body ? { body: JSON.stringify(body) } : {}),
   });
-  if ([404, 405, 501].includes(res.status)) {
-    const e = new Error(`Backend bu işlemi henüz desteklemiyor (HTTP ${res.status} — ${method} ${url.replace(API_BASE, "")}).`);
-    e.unsupported = true;
-    throw e;
-  }
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+  if (res.status === 401) throw new Error("Oturum gerekli — giriş yapıp tekrar deneyin.");
+  if (!res.ok) throw new Error(apiErrorText(data, res.status));
+  if (!isThresholdObject(data)) throw new Error("Backend beklenmeyen bir yanıt döndürdü.");
   return data;
 }
 
@@ -2017,8 +2024,7 @@ async function runSettingsAction(btn, fn) {
   try {
     await fn();
   } catch (err) {
-    setBanner(err.unsupported ? "warn" : "bad", esc(err.message) +
-      (err.unsupported ? "<br><span class='text-xs'>Değerleriniz formda korundu; PUT /api/thresholds ve POST /api/thresholds/reset eklendiğinde bu buton çalışır.</span>" : ""));
+    setBanner("bad", `İşlem başarısız: ${esc(err.message)}<br><span class='text-xs'>Değerleriniz formda korundu.</span>`);
   } finally {
     btn.innerHTML = originalHtml;
     setState.busy = false;
@@ -2031,23 +2037,17 @@ async function runSettingsAction(btn, fn) {
     const { values, valid, dirty } = readSettingsForm();
     if (!valid || !dirty) return;
     runSettingsAction(e.currentTarget, async () => {
-      const data = await thresholdWrite("PUT", `${API_BASE}/api/thresholds`, values);
-      setState.loaded = isThresholdObject(data) ? data : values;
+      setState.loaded = await thresholdWrite("PUT", `${API_BASE}/api/thresholds`, values);
       fillSettingsForm(setState.loaded);
-      setBanner("ok", "Eşikler kaydedildi. Mevcut analiz ekranı yeniden puanlanmaz; değişiklik yeni analizlerde backend tarafından uygulanır.");
+      setBanner("ok", "Eşikler kaydedildi. Bir sonraki analizde ön değerlendirme bu eşiklerle yapılır; açık analiz ekranı yeniden puanlanmaz.");
     });
   });
   $("#set-reset").addEventListener("click", (e) => {
     if (!confirm("6 eşik de varsayılan değerlere döndürülecek. Emin misiniz?")) return;
     runSettingsAction(e.currentTarget, async () => {
-      const data = await thresholdWrite("POST", `${API_BASE}/api/thresholds/reset`);
-      if (isThresholdObject(data)) setState.loaded = data;
-      else {
-        await loadSettings();
-        if (!setState.loaded) throw new Error("Sıfırlama sonrası eşikler okunamadı.");
-      }
+      setState.loaded = await thresholdWrite("POST", `${API_BASE}/api/thresholds/reset`);
       fillSettingsForm(setState.loaded);
-      setBanner("ok", "Eşikler varsayılan değerlere sıfırlandı.");
+      setBanner("ok", "Eşikler varsayılan değerlere sıfırlandı. Bir sonraki analizde varsayılanlar kullanılır.");
     });
   });
   $("#set-revert").addEventListener("click", () => {
