@@ -41,6 +41,9 @@ button,input,select{font-family:inherit;}
 .font-display{font-family:var(--font-display);}
 .tabular{font-variant-numeric:tabular-nums;}
 .material-symbols-outlined{font-variation-settings:'FILL' 0,'wght' 400,'GRAD' 0,'opsz' 20;font-size:18px;line-height:1;vertical-align:middle;}
+/* İkon fontu yüklenemezse ligatür adı (ör. "compare_arrows") düz metin olarak
+   yerleşimi taşırmasın: ikon kutusu her zaman 1em kare, taşan kısım kırpılır. */
+.material-symbols-outlined{display:inline-block;width:1em;min-width:1em;overflow:hidden;white-space:nowrap;flex-shrink:0;}
 
 /* ---------- Görünümler & navigasyon ---------- */
 .view{display:none;}
@@ -294,3 +297,13 @@ select.field{padding-right:28px;}
   .set-actionbar .btn{height:34px;padding:0 10px;font-size:12px;}
   .set-field{padding:14px;}
 }
+
+/* ---------- Ana Sayfa ---------- */
+.home-market{display:flex;align-items:center;gap:12px;width:100%;padding:12px;border-radius:12px;border:1px solid transparent;
+  background:var(--surface-lowest);cursor:pointer;text-align:left;font:inherit;color:inherit;transition:background .15s,border-color .15s;}
+.home-market:hover{background:var(--surface-low);border-color:var(--hairline);}
+.home-market:focus-visible{outline:2px solid var(--primary);outline-offset:2px;}
+.home-feed{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px 24px;}
+@media (max-width:900px){ .home-feed{grid-template-columns:1fr;} }
+.home-event{display:flex;gap:12px;padding:10px 4px;border-bottom:1px solid var(--hairline);}
+.home-event-dot{width:9px;height:9px;border-radius:50%;margin-top:5px;flex-shrink:0;}

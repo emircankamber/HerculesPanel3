@@ -233,6 +233,14 @@ büyümesi DEĞİL — ör. 0.909 ≈ 11. sıradan 1. sıraya çıkış; panelde
 karşılaştırması),
 `top3Brands`, `top3AsinDtoList` (görsel URL + CTR/CVR ile).
 
+**Oran birimleri (gerçek MCP verisiyle doğrulandı):** `purchaseRate`,
+`top3AsinDtoList[].clickRate` ve `top3AsinDtoList[].conversionRate` (backend'de
+`purchase_rate`, `click_rate`, `conversion_rate`) HER ZAMAN 0-1 oran. Kanıt:
+`purchaseRate = purchases / searches` (17881 / 2518485 = 0.0071 = %0.71).
+Frontend'de büyüklüğe bakan tahmin mantığı YOK — daima ×100 ile yüzdeye
+çevrilir (`app.js::fmtRate`). Küçük değerler (%0.71 gibi) doğrudur, "yanlış
+birim" sanıp düzeltmeye çalışma.
+
 **Kullanılmayan (bilerek):** `google_trend` tool'u da var (Amazon dışı,
 Google arama trendini veriyor) ama henüz backend'e bağlanmadı —
 "Mevsimsellik Riski" kartı için kullanılabilir, ihtiyaç olursa test edilip

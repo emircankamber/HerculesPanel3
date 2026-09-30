@@ -65,6 +65,7 @@ async function checkAuthStatus() {
     }
     // Giriş yapılmamışsa (auth zorunlu olsun olmasın) manuel giriş/kayıt butonu görünsün
     if (openLoginBtn) openLoginBtn.style.display = s.logged_in ? "none" : "inline-block";
+    return s;
   } catch {
     // Backend erişilemezse giriş ekranını zorla açma — kullanıcı en azından hatayı görsün
   }
@@ -85,6 +86,7 @@ async function doAuth(endpoint) {
     setToken(body.token);
     hideLogin();
     await checkAuthStatus();
+    if ($("#view-home")?.classList.contains("active")) loadHome();
   } catch (e) {
     err.textContent = `Bağlantı hatası: ${e.message}`;
   }
@@ -124,7 +126,12 @@ document.addEventListener("DOMContentLoaded", () => {
     loadHistory();
   });
 
-  checkAuthStatus();
+  // Ana Sayfa varsayılan görünüm: yalnızca DB okuyan uçlar (MCP çağrısı YOK).
+  // Giriş zorunlu ve oturum yoksa 401 yerine önce girişi bekle.
+  checkAuthStatus().then(s => {
+    if (s && s.auth_required && !s.logged_in) return;
+    if ($("#view-home")?.classList.contains("active")) loadHome();
+  });
 });
 
 
@@ -141,6 +148,7 @@ function showView(view) {
   if (view === "history") loadHistory();
   if (view === "decisions") loadDecisions();
   if (view === "reports") loadReports();
+  if (view === "home") loadHome();
   if (view === "settings") loadSettings();
   if (view === "trends") updateTrendsStale();
   // Chart.js gizli (display:none) kapsayıcıda 0 boyutla çizer — veri
@@ -251,7 +259,7 @@ $("#global-search-form")?.addEventListener("submit", (e) => {
   input.value = "";
   // Veri görünümlerinden birindeysen orada kal; değilse Ürün Analizi'ne geç
   const active = $(".view.active")?.id?.replace("view-", "");
-  if (!["search", "keywords", "competitors"].includes(active)) showView("search");
+  if (!["search", "keywords", "competitors"].includes(active)) showView("search");  // Ana Sayfa dahil diğerlerinden Ürün Analizi'ne geç
   runAnalysis(kw, $("#market-input").value);
 });
 
@@ -2085,11 +2093,14 @@ function fmtRankAccel(v) {
 }
 const rankAccelClass = (v) => v == null || isNaN(v) ? "text-secondary" : Number(v) > 0 ? "text-primary" : Number(v) < 0 ? "text-error" : "text-secondary";
 
-/** CTR/CVR/satın alma oranı: 0-1 geldiyse yüzdeye çevir, >1 ise zaten yüzde say */
+/**
+ * purchase_rate / click_rate / conversion_rate — gerçek MCP verisiyle doğrulandı:
+ * HER ZAMAN 0-1 oran (ör. purchase_rate = purchases/searches = 17881/2518485 = 0.0071).
+ * Büyüklüğe bakıp tahmin yapma; daima ×100 göster.
+ */
 function fmtRate(v) {
   if (v == null || v === "" || isNaN(v)) return "n/a";
-  const n = Number(v);
-  return "%" + (n <= 1 ? n * 100 : n).toFixed(1);
+  return "%" + (Number(v) * 100).toFixed(2);
 }
 
 function readTrendParams() {
@@ -2214,4 +2225,133 @@ function renderTrends() {
     $(sel).addEventListener("change", updateTrendsStale);
   });
   $("#trd-sort").addEventListener("change", (e) => { trdState.sort = e.target.value; renderTrends(); });
+})();
+
+
+// ---------------------------------------------------------------------------
+// Ana Sayfa — YALNIZCA veritabanından okur: GET /api/recent + GET /api/decisions.
+// Açılışta hiçbir MCP çağrısı yapılmaz; trend taraması bile otomatik değildir
+// (yalnızca Trendler sayfasına link). Tüm sayılar kayıtların sayımıdır.
+// ---------------------------------------------------------------------------
+const HOME_RECENT_LIMIT = 200;
+
+function fmtAgo(tsSec) {
+  if (!tsSec) return "—";
+  const diff = Math.max(0, Date.now() / 1000 - tsSec);
+  if (diff < 60) return "az önce";
+  if (diff < 3600) return `${Math.floor(diff / 60)} dk önce`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)} sa önce`;
+  if (diff < 7 * 86400) return `${Math.floor(diff / 86400)} gün önce`;
+  return new Date(tsSec * 1000).toLocaleDateString("tr-TR", { day: "2-digit", month: "short", year: "numeric" });
+}
+const fmtStamp = (tsSec) => tsSec ? new Date(tsSec * 1000).toLocaleString("tr-TR", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }) : "—";
+
+async function loadHome() {
+  const status = $("#home-status");
+  status.textContent = "yükleniyor…";
+  status.className = "text-xs text-secondary";
+  try {
+    const [recRes, decRes] = await Promise.all([
+      apiFetch(`${API_BASE}/api/recent?limit=${HOME_RECENT_LIMIT}`),
+      apiFetch(`${API_BASE}/api/decisions`),
+    ]);
+    if (recRes.status === 401 || decRes.status === 401) throw new Error("Giriş gerekli.");
+    const recBody = await recRes.json().catch(() => null);
+    const decBody = await decRes.json().catch(() => null);
+    if (!recRes.ok) throw new Error(apiErrorText(recBody, recRes.status));
+    if (!decRes.ok) throw new Error(apiErrorText(decBody, decRes.status));
+    renderHome(Array.isArray(recBody) ? recBody : [], decBody && typeof decBody === "object" ? decBody : {});
+    status.textContent = `Güncellendi · ${new Date().toLocaleTimeString("tr-TR")}`;
+  } catch (err) {
+    status.textContent = `Veriler yüklenemedi: ${err.message}`;
+    status.className = "text-xs text-error";
+  }
+}
+
+function renderHome(recent, grouped) {
+  const nowS = Date.now() / 1000;
+  const keyOf = (kw, m) => `${String(kw).toLowerCase()}|${m}`;
+
+  // --- Kararlar (backend: her keyword+pazar için EN SON karar) ---
+  const decisions = [];
+  ["Uygun", "Sınırda", "Elenmiş"].forEach(d => (grouped[d] || []).forEach(it => decisions.push({ ...it, decision: d })));
+  const decMap = new Map(decisions.map(d => [keyOf(d.keyword, d.marketplace), d]));
+  const cnt = (d) => (grouped[d] || []).length;
+  const cU = cnt("Uygun"), cS = cnt("Sınırda"), cE = cnt("Elenmiş");
+  const decTotal = cU + cS + cE;
+  const pct = (n) => decTotal ? (n / decTotal) * 100 : 0;
+
+  // --- Özet kartlar ---
+  const capped = recent.length >= HOME_RECENT_LIMIT;
+  $("#home-k-analyses").textContent = capped ? `${HOME_RECENT_LIMIT}+` : fmtNum(recent.length);
+  const week = recent.filter(r => nowS - (r.fetched_at || 0) <= 7 * 86400).length;
+  $("#home-k-week").textContent = week ? `+${week} bu hafta` : "bu hafta yok";
+  const markets = new Set(recent.map(r => keyOf(r.keyword, r.marketplace)));
+  $("#home-k-markets").textContent = `${fmtNum(markets.size)} farklı pazar${capped ? " (son " + HOME_RECENT_LIMIT + " sorgu)" : ""}`;
+  [["uygun", cU], ["sinirda", cS], ["elenmis", cE]].forEach(([k, n]) => {
+    $(`#home-k-${k}`).textContent = fmtNum(n);
+    $(`#home-b-${k}`).style.width = pct(n) + "%";
+    $(`#home-p-${k}`).textContent = decTotal ? `%${pct(n).toFixed(0)} kararların` : "henüz karar yok";
+  });
+
+  // --- Son incelenen pazarlar (recent zaten en yeni önce; keyword+pazar başına ilk kayıt) ---
+  const seen = new Set();
+  const latest = [];
+  recent.forEach(r => {
+    const k = keyOf(r.keyword, r.marketplace);
+    if (seen.has(k)) return;
+    seen.add(k);
+    latest.push(r);
+  });
+  $("#home-markets-count").textContent = latest.length ? `${latest.length} pazar` : "";
+  const list = $("#home-markets");
+  list.innerHTML = latest.length ? "" : `<div class="p-6 text-sm text-secondary">Henüz analiz yok. <button type="button" class="crit-more" data-goto-inline="search">İlk analizi başlat →</button></div>`;
+  latest.slice(0, 6).forEach(r => {
+    const dec = decMap.get(keyOf(r.keyword, r.marketplace));
+    const vChip = r.verdict ? `<span class="chip ${DECISION_CHIP[r.verdict] || "na"}">Ön öneri: ${esc(r.verdict)}</span>` : "";
+    const dChip = dec ? `<span class="chip ${DECISION_CHIP[dec.decision] || "na"} chip-dot">Karar: ${esc(dec.decision)}</span>`
+                      : `<span class="chip na">Karar yok</span>`;
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "home-market";
+    row.title = "Yeniden analiz et (canlı MCP çağrısı)";
+    row.innerHTML = `
+      <span class="w-10 h-10 shrink-0 rounded-lg bg-surface-container-low grid place-items-center text-primary"><span class="material-symbols-outlined">${/^B0[A-Z0-9]{8}/i.test(r.keyword) ? "inventory_2" : "manage_search"}</span></span>
+      <span class="min-w-0 flex-1 text-left">
+        <span class="block font-semibold text-[14px] leading-snug break-words">${esc(r.keyword)}</span>
+        <span class="block text-xs text-secondary mt-0.5">${esc(r.marketplace)} · ${fmtAgo(r.fetched_at)}</span>
+        ${dec?.note ? `<span class="block text-xs text-on-surface-variant italic mt-1 truncate">"${esc(dec.note)}"</span>` : ""}
+      </span>
+      <span class="flex flex-col items-end gap-1 shrink-0">${dChip}${vChip}</span>`;
+    row.addEventListener("click", () => { showView("search"); runAnalysis(r.keyword, r.marketplace); });
+    list.appendChild(row);
+  });
+  list.querySelectorAll("[data-goto-inline]").forEach(b => b.addEventListener("click", () => showView(b.dataset.gotoInline)));
+
+  // --- Son aktiviteler: yalnızca gerçek kayıt zaman damgaları ---
+  const events = [
+    ...recent.map(r => ({ ts: r.fetched_at, type: "analysis", keyword: r.keyword, marketplace: r.marketplace, verdict: r.verdict })),
+    ...decisions.map(d => ({ ts: d.decided_at, type: "decision", keyword: d.keyword, marketplace: d.marketplace, decision: d.decision, note: d.note, by: d.decided_by })),
+  ].filter(e => e.ts).sort((a, b) => b.ts - a.ts).slice(0, 12);
+  const feed = $("#home-feed");
+  feed.innerHTML = events.length ? events.map(e => e.type === "analysis" ? `
+    <li class="home-event">
+      <span class="home-event-dot bg-primary"></span>
+      <div class="min-w-0">
+        <div class="flex flex-wrap items-center gap-x-2 text-[11px] text-secondary"><span class="font-semibold tracking-wide uppercase text-primary">Analiz</span><span title="${esc(fmtStamp(e.ts))}">${fmtStamp(e.ts)}</span></div>
+        <div class="text-[13px] mt-0.5 break-words"><b>${esc(e.keyword)}</b> <span class="text-secondary">(${esc(e.marketplace)})</span> analiz edildi${e.verdict ? ` · ön öneri <span class="chip ${DECISION_CHIP[e.verdict] || "na"}">${esc(e.verdict)}</span>` : ""}</div>
+      </div>
+    </li>` : `
+    <li class="home-event">
+      <span class="home-event-dot" style="background:${e.decision === "Uygun" ? "var(--primary)" : e.decision === "Elenmiş" ? "var(--error)" : "var(--tertiary-container)"}"></span>
+      <div class="min-w-0">
+        <div class="flex flex-wrap items-center gap-x-2 text-[11px] text-secondary"><span class="font-semibold tracking-wide uppercase text-tertiary">Karar</span><span>${fmtStamp(e.ts)}</span>${e.by ? `<span>· ${esc(e.by)}</span>` : ""}</div>
+        <div class="text-[13px] mt-0.5 break-words"><b>${esc(e.keyword)}</b> <span class="text-secondary">(${esc(e.marketplace)})</span> → <span class="chip ${DECISION_CHIP[e.decision] || "na"}">${esc(e.decision)}</span></div>
+        ${e.note ? `<div class="text-xs text-on-surface-variant italic mt-0.5 break-words">"${esc(e.note)}"</div>` : ""}
+      </div>
+    </li>`).join("") : `<li class="text-sm text-secondary p-2">Henüz aktivite yok.</li>`;
+}
+
+(function bindHomeView() {
+  $("#home-refresh").addEventListener("click", loadHome);
 })();

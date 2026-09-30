@@ -60,7 +60,8 @@
       <span class="font-display text-[17px] font-semibold tracking-tight">PL Pazar Paneli</span>
     </div>
     <nav class="flex lg:flex-col gap-1 px-3 pb-3 lg:pb-0 overflow-x-auto">
-      <button data-view="search" class="nav-btn active"><span class="material-symbols-outlined">monitoring</span>Ürün Analizi</button>
+      <button data-view="home" class="nav-btn active"><span class="material-symbols-outlined">space_dashboard</span>Ana Sayfa</button>
+      <button data-view="search" class="nav-btn"><span class="material-symbols-outlined">monitoring</span>Ürün Analizi</button>
       <button data-view="keywords" class="nav-btn"><span class="material-symbols-outlined">manage_search</span>Keyword Araştırma</button>
       <button data-view="competitors" class="nav-btn"><span class="material-symbols-outlined">compare_arrows</span>Rakip Analizi</button>
       <button data-view="trends" class="nav-btn"><span class="material-symbols-outlined">trending_up</span>Trendler &amp; Fırsatlar</button>
@@ -93,8 +94,96 @@
 
     <main id="app" class="flex-1 px-4 sm:px-8 py-6 sm:py-8 max-w-[1280px] w-full mx-auto">
 
+      <!-- ===================== ANA SAYFA ===================== -->
+      <!-- Yalnızca /api/recent + /api/decisions (DB). Açılışta MCP çağrısı YOK. -->
+      <section id="view-home" class="view active">
+        <div class="flex flex-col md:flex-row md:items-end justify-between gap-4">
+          <div class="max-w-2xl">
+            <div class="eyebrow flex items-center gap-1.5 text-primary"><span class="material-symbols-outlined" style="font-size:16px">verified</span>Ana Sayfa · kayıtlı analiz ve kararların</div>
+            <h1 class="font-display text-[28px] sm:text-[34px] font-semibold tracking-tight leading-tight mt-2">Pazar İstihbarat Merkeziniz</h1>
+            <p class="text-sm sm:text-[15px] text-on-surface-variant mt-2 leading-relaxed">Son incelediğin pazarlar, ekip kararların ve aktivite geçmişi. Bu sayfa SellerSprite'a istek atmaz; yalnızca kayıtlı verileri okur.</p>
+          </div>
+          <div class="flex flex-wrap items-center gap-2 shrink-0">
+            <span id="home-status" class="text-xs text-secondary"></span>
+            <button type="button" id="home-refresh" class="btn btn-outline btn-sm" title="Kayıtları yeniden oku (MCP çağrısı yok)"><span class="material-symbols-outlined">refresh</span>Yenile</button>
+            <button type="button" class="btn btn-primary btn-sm" data-goto="search"><span class="material-symbols-outlined">add_chart</span>Yeni Analiz</button>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 mt-6">
+          <div class="card p-5">
+            <div class="flex justify-between gap-2"><div class="eyebrow">Analiz sayısı</div><span id="home-k-week" class="chip ok"></span></div>
+            <div class="mt-3 flex items-baseline gap-1.5"><span id="home-k-analyses" class="font-display text-[34px] font-medium tracking-tight tabular">—</span><span class="text-xs text-secondary">sorgu</span></div>
+            <div id="home-k-markets" class="text-xs text-secondary mt-1"></div>
+          </div>
+          <div class="card p-5">
+            <div class="flex justify-between"><div class="eyebrow">Uygun</div><span class="material-symbols-outlined text-primary">verified</span></div>
+            <div class="mt-3 flex items-baseline gap-1.5"><span id="home-k-uygun" class="font-display text-[34px] font-medium tracking-tight tabular">—</span><span class="text-xs text-secondary">karar</span></div>
+            <div class="crit-track"><div id="home-b-uygun" class="crit-fill" style="width:0"></div></div>
+            <div id="home-p-uygun" class="text-xs text-secondary mt-2"></div>
+          </div>
+          <div class="card p-5">
+            <div class="flex justify-between"><div class="eyebrow">Sınırda</div><span class="material-symbols-outlined text-tertiary">pending</span></div>
+            <div class="mt-3 flex items-baseline gap-1.5"><span id="home-k-sinirda" class="font-display text-[34px] font-medium tracking-tight tabular">—</span><span class="text-xs text-secondary">karar</span></div>
+            <div class="crit-track"><div id="home-b-sinirda" class="crit-fill" style="width:0;background:var(--tertiary-container)"></div></div>
+            <div id="home-p-sinirda" class="text-xs text-secondary mt-2"></div>
+          </div>
+          <div class="card p-5">
+            <div class="flex justify-between"><div class="eyebrow">Elenmiş</div><span class="material-symbols-outlined text-error">cancel</span></div>
+            <div class="mt-3 flex items-baseline gap-1.5"><span id="home-k-elenmis" class="font-display text-[34px] font-medium tracking-tight tabular">—</span><span class="text-xs text-secondary">karar</span></div>
+            <div class="crit-track"><div id="home-b-elenmis" class="crit-fill bad" style="width:0"></div></div>
+            <div id="home-p-elenmis" class="text-xs text-secondary mt-2"></div>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_340px] gap-6 mt-6">
+          <div class="card overflow-hidden min-w-0">
+            <div class="flex flex-wrap items-center justify-between gap-2 px-5 pt-5 pb-3">
+              <div>
+                <h3 class="font-display text-lg font-semibold">Son İncelenen Pazarlar &amp; Kararlar</h3>
+                <p class="text-xs text-secondary mt-0.5">Tıklayınca yeniden analiz edilir (canlı MCP çağrısı).</p>
+              </div>
+              <div class="flex items-center gap-2"><span id="home-markets-count" class="chip na"></span>
+                <button type="button" class="crit-more !text-[13px]" data-goto="reports">Tüm raporlar <span class="material-symbols-outlined" style="font-size:16px">arrow_forward</span></button></div>
+            </div>
+            <div id="home-markets" class="flex flex-col gap-2 px-3 pb-3"></div>
+          </div>
+
+          <div class="flex flex-col gap-6 min-w-0">
+            <div class="card card-pad hero-bg">
+              <div class="eyebrow flex items-center gap-1.5 text-primary"><span class="material-symbols-outlined" style="font-size:16px">trending_up</span>Trendler &amp; Fırsatlar</div>
+              <h3 class="font-display text-lg font-semibold mt-2">Yükselen nişleri tara</h3>
+              <p class="text-xs text-on-surface-variant mt-1.5 leading-relaxed">Arama sıralamasında hızla yükselen keyword'ler. Her tarama 1 MCP çağrısı olduğu için burada otomatik çalışmaz.</p>
+              <button type="button" class="btn btn-outline btn-sm mt-4" data-goto="trends"><span class="material-symbols-outlined">radar</span>Trendler sayfasına git</button>
+            </div>
+            <div class="card card-pad">
+              <div class="eyebrow mb-3">Hızlı erişim</div>
+              <div class="grid grid-cols-2 gap-2">
+                <button type="button" class="btn btn-outline btn-sm !justify-start min-w-0" data-goto="keywords"><span class="material-symbols-outlined">manage_search</span>Keyword</button>
+                <button type="button" class="btn btn-outline btn-sm !justify-start min-w-0" data-goto="competitors"><span class="material-symbols-outlined">compare_arrows</span>Rakipler</button>
+                <button type="button" class="btn btn-outline btn-sm !justify-start min-w-0" data-goto="decisions"><span class="material-symbols-outlined">view_kanban</span>Kararlar</button>
+                <button type="button" class="btn btn-outline btn-sm !justify-start min-w-0" data-goto="settings"><span class="material-symbols-outlined">tune</span>Ayarlar</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card card-pad mt-6">
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <div class="flex items-center gap-3">
+              <span class="w-9 h-9 rounded-lg bg-surface-container-low grid place-items-center text-primary"><span class="material-symbols-outlined">format_list_bulleted</span></span>
+              <div>
+                <h3 class="font-display text-lg font-semibold">Son Aktiviteler</h3>
+                <p class="text-xs text-secondary">Analiz ve karar kayıtlarının zaman damgaları · kararlarda her keyword'ün son kararı</p>
+              </div>
+            </div>
+          </div>
+          <ol id="home-feed" class="home-feed mt-4"></ol>
+        </div>
+      </section>
+
       <!-- ===================== SORGU ===================== -->
-      <section id="view-search" class="view active">
+      <section id="view-search" class="view">
         <div class="card hero-bg overflow-hidden">
           <div class="p-5 sm:p-8">
             <div class="flex flex-wrap items-center gap-2">
