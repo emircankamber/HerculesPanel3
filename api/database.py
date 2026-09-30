@@ -20,6 +20,10 @@ CACHE_TTL_SECONDS = 24 * 3600
 PAYLOAD_VERSION = 3
 
 _SCHEMAS = [
+    """CREATE TABLE IF NOT EXISTS user_thresholds (
+        user_id INTEGER PRIMARY KEY, min_avg_price REAL, min_gross_margin REAL,
+        max_acos REAL, max_brand_share REAL, min_strong_new_brands REAL,
+        min_net_margin REAL, updated_at INTEGER NOT NULL)""",
     """CREATE TABLE IF NOT EXISTS keyword_analysis (
         id INTEGER PRIMARY KEY AUTOINCREMENT, keyword TEXT NOT NULL, marketplace TEXT NOT NULL,
         fetched_at INTEGER NOT NULL, fetched_by TEXT, payload_json TEXT NOT NULL, verdict TEXT,
@@ -447,3 +451,52 @@ async def list_launch_checkpoints(keyword: str):
 async def get_hit_rate():
     rows = await fetch_all("SELECT verdict, COUNT(*) AS c FROM launch_checkpoints GROUP BY verdict")
     return {r["verdict"]: r["c"] for r in rows}
+
+
+# ---------------------------------------------------------------------------
+# KULLANICIYA ÖZEL EŞİK DEĞERLERİ (Ayarlar sayfası)
+# ---------------------------------------------------------------------------
+_THRESHOLD_KEYS = ["min_avg_price", "min_gross_margin", "max_acos",
+                    "max_brand_share", "min_strong_new_brands", "min_net_margin"]
+
+
+async def get_user_thresholds(user_id: int) -> dict:
+    """
+    Kullanıcının özelleştirdiği eşikleri döner (yalnızca override ettiği
+    alanlar, None olanlar hariç) — boş dict dönerse kullanıcı hiç
+    özelleştirme yapmamış demektir, çağıran taraf DEFAULT_THRESHOLDS'a düşer.
+    """
+    row = await fetch_one("SELECT * FROM user_thresholds WHERE user_id = ?", (user_id,))
+    if not row:
+        return {}
+    return {k: row[k] for k in _THRESHOLD_KEYS if row.get(k) is not None}
+
+
+async def save_user_thresholds(user_id: int, thresholds: dict):
+    """
+    Kısmi güncelleme kabul eder — yalnızca gönderilen alanlar değişir,
+    gönderilmeyenler (None) mevcut değerini korur (upsert mantığı).
+    """
+    existing = await fetch_one("SELECT * FROM user_thresholds WHERE user_id = ?", (user_id,))
+    merged = {k: (existing.get(k) if existing else None) for k in _THRESHOLD_KEYS}
+    for k, v in thresholds.items():
+        if k in _THRESHOLD_KEYS and v is not None:
+            merged[k] = v
+
+    now = int(time.time())
+    if USE_POSTGRES:
+        sql = f"""INSERT INTO user_thresholds (user_id, {', '.join(_THRESHOLD_KEYS)}, updated_at)
+                  VALUES (?, {', '.join(['?'] * len(_THRESHOLD_KEYS))}, ?)
+                  ON CONFLICT (user_id) DO UPDATE SET
+                  {', '.join(f'{k} = EXCLUDED.{k}' for k in _THRESHOLD_KEYS)}, updated_at = EXCLUDED.updated_at"""
+    else:
+        sql = f"""INSERT INTO user_thresholds (user_id, {', '.join(_THRESHOLD_KEYS)}, updated_at)
+                  VALUES (?, {', '.join(['?'] * len(_THRESHOLD_KEYS))}, ?)
+                  ON CONFLICT(user_id) DO UPDATE SET
+                  {', '.join(f'{k}=excluded.{k}' for k in _THRESHOLD_KEYS)}, updated_at=excluded.updated_at"""
+    await execute(sql, (user_id, *[merged[k] for k in _THRESHOLD_KEYS], now))
+
+
+async def reset_user_thresholds(user_id: int):
+    """Tüm özelleştirmeleri siler, kullanıcı DEFAULT_THRESHOLDS'a döner."""
+    await execute("DELETE FROM user_thresholds WHERE user_id = ?", (user_id,))

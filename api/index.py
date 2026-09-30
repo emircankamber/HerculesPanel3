@@ -462,6 +462,10 @@ async def analyze(req: AnalyzeRequest, user: dict = Depends(require_auth)):
         raw_gross_margin = stats_data.get("avgProfit")
         gross_margin = (raw_gross_margin / 100 if raw_gross_margin > 1 else raw_gross_margin) if raw_gross_margin is not None else None
 
+        # Kullanıcının Ayarlar'da özelleştirdiği eşikler (varsa) — yoksa
+        # pre_assessment zaten DEFAULT_THRESHOLDS'a düşer (bkz. scoring.py).
+        user_thresholds = await db.get_user_thresholds(uid)
+
         assessment = pre_assessment(
             avg_price=stats_data.get("avgPrice"),
             gross_margin=gross_margin,
@@ -469,6 +473,7 @@ async def analyze(req: AnalyzeRequest, user: dict = Depends(require_auth)):
             top_brand_share=top_brand_share,
             strong_new_brands=strong_new_brands_count,  # top 10 rakip availableDate proxy'si (bkz. yukarıdaki not)
             net_margin=None,
+            thresholds=user_thresholds,
         )
 
         payload = {
@@ -625,7 +630,48 @@ async def export_keywords(req: ExportKeywordsRequest, user: dict = Depends(requi
 
 
 @app.get("/api/thresholds")
-async def thresholds():
+async def thresholds(user: dict = Depends(require_auth)):
+    """
+    DEFAULT_THRESHOLDS + kullanıcının özelleştirdiği alanlar (varsa) birleşik
+    döner. auth kapalıyken (henüz kullanıcı yok) user_id=0 için kayıt
+    olmayacağı için saf DEFAULT_THRESHOLDS döner — davranış değişmez.
+    """
+    uid = user.get("user_id", 0)
+    overrides = await db.get_user_thresholds(uid)
+    return {**DEFAULT_THRESHOLDS, **overrides}
+
+
+class ThresholdUpdateRequest(BaseModel):
+    min_avg_price: float | None = None
+    min_gross_margin: float | None = None
+    max_acos: float | None = None
+    max_brand_share: float | None = None
+    min_strong_new_brands: float | None = None
+    min_net_margin: float | None = None
+
+
+@app.put("/api/thresholds")
+async def update_thresholds(req: ThresholdUpdateRequest, user: dict = Depends(require_auth)):
+    """
+    Kısmi güncelleme — yalnızca gönderilen (None olmayan) alanlar değişir.
+    Auth kapalıyken (auth_disabled) user_id=0 altında kaydedilir; ilk
+    kullanıcı kaydolduğunda bu "global" satırın miras alınması beklenmez —
+    her kullanıcı kendi eşiklerini yeniden ayarlamalı (bilinçli basit tutuldu).
+    """
+    uid = user.get("user_id", 0)
+    payload = req.dict(exclude_none=True)
+    if not payload:
+        raise HTTPException(400, "Güncellenecek en az bir alan gerekli")
+    await db.save_user_thresholds(uid, payload)
+    merged = {**DEFAULT_THRESHOLDS, **await db.get_user_thresholds(uid)}
+    return merged
+
+
+@app.post("/api/thresholds/reset")
+async def reset_thresholds(user: dict = Depends(require_auth)):
+    """Tüm özelleştirmeleri siler, kullanıcı fabrika eşiklerine döner."""
+    uid = user.get("user_id", 0)
+    await db.reset_user_thresholds(uid)
     return DEFAULT_THRESHOLDS
 
 
@@ -1285,9 +1331,11 @@ async def analyze_asin(req: AnalyzeAsinRequest, user: dict = Depends(require_aut
         raw_gm = stats_data.get("avgProfit")
         gross_margin = (raw_gm / 100 if raw_gm and raw_gm > 1 else raw_gm) if raw_gm is not None else None
 
+        user_thresholds = await db.get_user_thresholds(uid)
         assessment = pre_assessment(
             avg_price=stats_data.get("avgPrice"), gross_margin=gross_margin, acos=main_acos,
-            top_brand_share=top_brand_share, strong_new_brands=strong_new_brands_count, net_margin=None)
+            top_brand_share=top_brand_share, strong_new_brands=strong_new_brands_count, net_margin=None,
+            thresholds=user_thresholds)
 
         payload = {
             "keyword": f"{asin} — {(product.get('title') or '')[:60]}",
@@ -1328,3 +1376,76 @@ async def analyze_asin(req: AnalyzeAsinRequest, user: dict = Depends(require_aut
         raise
     except Exception as e:
         raise HTTPException(502, f"SellerSprite MCP hatası: {e}")
+
+
+# ---------------------------------------------------------------------------
+# TRENDLER & FIRSATLAR — aba_research_weekly/monthly (gerçek MCP verisiyle
+# doğrulandı) üzerine kurulu keşif endpoint'i
+# ---------------------------------------------------------------------------
+SEARCH_MODEL_LABELS = {
+    1: "Popüler Pazar", 2: "Anormal Hareketli", 3: "Sürekli Büyüyen",
+    4: "Hızlı Yükselen", 5: "Potansiyel", 6: "Uzun Kuyruk",
+}
+
+
+class TrendingRequest(BaseModel):
+    marketplace: str = "US"
+    search_model: int = 4  # varsayılan: hızlı yükselen (Breakout Nişler)
+    granularity: str = "weekly"  # "weekly" | "monthly"
+    departments: list[str] = []
+    min_searches: int | None = None
+    size: int = 20
+
+
+@app.post("/api/discovery/trending")
+async def discovery_trending(req: TrendingRequest, user: dict = Depends(require_auth)):
+    """
+    Trendler & Fırsatlar sayfası için: aba_research_weekly/monthly'den
+    yükselen/anormal/potansiyel keyword'leri çeker. Gerçek MCP çağrısıyla
+    doğrulanmış alan adları kullanılıyor — DÜRÜSTLÜK NOTU: Google Trends'i
+    (mcp__Seller_Sprite__google_trend) ya da sosyal medya/TikTok viral
+    katsayısını burada KULLANMIYORUZ — bu ikincisi için gerçek bir MCP
+    kaynağı bulunamadı (Stitch tasarımındaki "Viral Dönüşüm Katsayısı"
+    kartının backend karşılığı yok, eklenmemeli).
+    """
+    if req.search_model not in SEARCH_MODEL_LABELS:
+        raise HTTPException(400, f"search_model 1-6 arası olmalı: {SEARCH_MODEL_LABELS}")
+    tool = "aba_research_weekly" if req.granularity == "weekly" else "aba_research_monthly"
+
+    args = {
+        "marketplace": req.marketplace, "searchModel": req.search_model,
+        "size": req.size, "order": {"field": "searches_growth", "desc": True},
+    }
+    if req.departments:
+        args["departments"] = req.departments
+    if req.min_searches:
+        args["minSearches"] = req.min_searches
+
+    raw = await call_tool(tool, args)
+    items = raw.get("data", {}).get("items", []) if isinstance(raw.get("data"), dict) else []
+
+    results = [{
+        "keyword": it.get("keyword"),
+        "departments": it.get("departments", []),
+        "searches": it.get("searches"),
+        "search_rank": it.get("searchRank"),
+        "growth_rate": it.get("searchRankGrowthRate"),  # 0-1 oran, ör. 0.91 = %91 büyüme
+        "growth_4w": it.get("w4RankGrowthRate"),
+        "growth_12w": it.get("w12RankGrowthRate"),
+        "purchases": it.get("purchases"),
+        "purchase_rate": it.get("purchaseRate"),
+        "bid": it.get("bid"), "bid_min": it.get("bidMin"), "bid_max": it.get("bidMax"),
+        "top3_brands": [b for b in (it.get("top3Brands") or []) if b],
+        "top3_asins": [{
+            "asin": a.get("asin"), "image_url": a.get("imageUrl"),
+            "click_rate": a.get("clickRate"), "conversion_rate": a.get("conversionRate"),
+        } for a in (it.get("top3AsinDtoList") or [])],
+    } for it in items]
+
+    return {
+        "search_model": req.search_model,
+        "search_model_label": SEARCH_MODEL_LABELS[req.search_model],
+        "granularity": req.granularity,
+        "total": raw.get("data", {}).get("total") if isinstance(raw.get("data"), dict) else None,
+        "results": results,
+    }
