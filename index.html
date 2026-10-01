@@ -35,7 +35,7 @@
 
 <div id="login-overlay" class="login-overlay" style="display:none;">
   <div class="login-card">
-    <img src="assets/hercullogo.svg#svgView(viewBox(44,136,1136,344))" alt="Hercul — Private Label Market Intelligence" class="h-20 w-auto max-w-full self-start" width="264" height="80">
+    <img src="assets/hercullogo.svg#svgView(viewBox(44,136,1136,361))" alt="Hercul — Private Label Market Intelligence" class="h-20 w-auto max-w-full self-start" width="252" height="80">
     <div class="text-sm text-secondary mb-2">Devam etmek için giriş yapın</div>
     <input type="text" id="login-email" class="field" placeholder="e-posta veya kullanıcı adı" autocomplete="username">
     <input type="password" id="login-password" class="field" placeholder="şifre" autocomplete="current-password">
@@ -54,7 +54,10 @@
   <!-- Kenar çubuğu (mobilde üst şerit) -->
   <aside class="lg:w-60 lg:shrink-0 lg:border-r border-b lg:border-b-0 border-hairline bg-surface-container-lowest lg:sticky lg:top-0 lg:h-screen flex flex-col">
     <div class="flex items-center px-5 h-16 shrink-0">
-      <img src="assets/hercullogo.svg#svgView(viewBox(44,136,1136,344))" alt="Hercul — Private Label Market Intelligence" class="h-12 w-auto max-w-full" width="158" height="48">
+      <!-- "Inteligente" satırının gölge filtresi (userSpaceOnUse, % bölge) viewBox ~361x819'dan küçükse
+           hiç çizilmiyor; bu yüzden viewBox bu boyutta tutulup alt satır ("Private Label…") kutunun
+           overflow:hidden'ı ile gizleniyor. Logo dosyası değiştirilmedi. -->
+      <div class="h-11 overflow-hidden shrink-0"><img src="assets/hercullogo.svg#svgView(viewBox(150,136,820,365))" alt="Hercul Inteligente" class="block h-[60px] w-auto max-w-none" width="135" height="60"></div>
     </div>
     <nav class="flex lg:flex-col gap-1 px-3 pb-3 lg:pb-0 overflow-x-auto">
       <button data-view="home" class="nav-btn active"><span class="material-symbols-outlined">space_dashboard</span>Ana Sayfa</button>
@@ -63,6 +66,7 @@
       <button data-view="competitors" class="nav-btn"><span class="material-symbols-outlined">compare_arrows</span>Rakip Analizi</button>
       <button data-view="trends" class="nav-btn"><span class="material-symbols-outlined">trending_up</span>Trendler &amp; Fırsatlar</button>
       <button data-view="reports" class="nav-btn"><span class="material-symbols-outlined">folder_open</span>Raporlar</button>
+      <button data-view="training" class="nav-btn"><span class="material-symbols-outlined">school</span>Eğitim &amp; Görevler</button>
       <button data-view="settings" class="nav-btn"><span class="material-symbols-outlined">tune</span>Ayarlar</button>
       <div class="hidden lg:block h-px bg-hairline my-2 mx-2"></div>
       <button data-view="decisions" class="nav-btn"><span class="material-symbols-outlined">view_kanban</span>Pazar Kararları</button>
@@ -571,6 +575,104 @@
             <div id="rep-dist-legend" class="flex flex-col gap-2 mt-5 text-sm"></div>
             <div class="rounded-xl bg-surface-container-low p-3 mt-5 text-xs text-on-surface-variant leading-relaxed">Her keyword için <b>en son</b> kaydedilen ekip kararı sayılır. Kararsız kayıtlar dağılıma dahil değildir.</div>
           </div>
+        </div>
+      </section>
+
+      <!-- ===================== EĞİTİM & GÖREVLER ===================== -->
+      <!-- Yetki kontrolleri SUNUCUDA (require_user / require_staff / require_owner); burada yalnızca görünüm. -->
+      <section id="view-training" class="view">
+        <div class="card card-pad hero-bg">
+          <div class="flex flex-col md:flex-row md:items-end justify-between gap-5">
+            <div class="max-w-2xl">
+              <div class="eyebrow flex items-center gap-1.5 text-primary"><span class="w-1.5 h-1.5 rounded-full bg-primary"></span>Eğitim &amp; Görevler <span id="trn-role-chip" class="chip na ml-1"></span></div>
+              <h1 class="font-display text-[26px] sm:text-[32px] font-semibold tracking-tight leading-tight mt-2">Ekip Eğitimi</h1>
+              <p class="text-sm text-on-surface-variant mt-2 leading-relaxed">Sana atanan dersleri izle ve bitirdiklerini işaretle. Yöneticiler ders ekler, atar ve ilerlemeyi takip eder.</p>
+            </div>
+            <div id="trn-progress" class="min-w-[220px] md:text-right" style="display:none;">
+              <div class="eyebrow">İlerlemem</div>
+              <div class="font-display text-[34px] font-medium tracking-tight tabular mt-1"><span id="trn-progress-done">0</span><span class="text-secondary text-xl"> / <span id="trn-progress-total">0</span></span> <span class="text-sm text-secondary font-sans">tamamlandı</span></div>
+              <div class="crit-track"><div id="trn-progress-bar" class="crit-fill" style="width:0"></div></div>
+            </div>
+          </div>
+        </div>
+
+        <div id="trn-status" class="status-line mt-4"></div>
+
+        <div id="trn-guest" class="card card-pad mt-6 text-center py-12" style="display:none;">
+          <span class="material-symbols-outlined text-outline" style="font-size:36px">lock</span>
+          <div class="font-display text-lg font-semibold mt-2">Bu bölüm için giriş yapın</div>
+          <p class="text-sm text-secondary mt-1">Eğitimler kişiye atanır; görmek için kayıtlı bir hesapla giriş yapmalısın.</p>
+          <button type="button" id="trn-login" class="btn btn-primary mt-4"><span class="material-symbols-outlined">login</span>Giriş / Kayıt</button>
+        </div>
+
+        <section id="trn-mine" class="mt-6" style="display:none;">
+          <div class="flex items-baseline justify-between gap-2 mb-4">
+            <h3 class="section-title">Derslerim</h3>
+            <span id="trn-mine-count" class="text-xs text-secondary"></span>
+          </div>
+          <div id="trn-mine-list" class="grid grid-cols-1 xl:grid-cols-2 gap-4"></div>
+        </section>
+
+        <!-- Owner / admin -->
+        <div id="trn-staff" class="flex flex-col gap-6 mt-8" style="display:none;">
+          <section class="card card-pad">
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              <div><div class="eyebrow">Yönetim</div><h3 class="font-display text-lg font-semibold mt-1">Ders Yönetimi</h3></div>
+              <span id="trn-form-mode" class="chip na">Yeni ders</span>
+            </div>
+            <form id="trn-form" class="grid grid-cols-1 md:grid-cols-2 gap-3 mt-4" novalidate>
+              <input type="hidden" id="trn-f-id">
+              <label class="flex flex-col gap-1.5 md:col-span-2"><span class="eyebrow">Başlık *</span>
+                <input type="text" id="trn-f-title" class="field" maxlength="200" required placeholder="örn. Ürün araştırmasına giriş"></label>
+              <label class="flex flex-col gap-1.5 md:col-span-2"><span class="eyebrow">Açıklama</span>
+                <textarea id="trn-f-desc" class="field !h-24 py-2" maxlength="5000" placeholder="Dersin amacı, izlerken dikkat edilecekler…"></textarea></label>
+              <label class="flex flex-col gap-1.5 md:col-span-2"><span class="eyebrow">Video linki (https)</span>
+                <input type="url" id="trn-f-url" class="field" maxlength="500" placeholder="https://www.youtube.com/watch?v=…  ya da Loom / Drive linki">
+                <span id="trn-f-url-hint" class="text-xs text-secondary">YouTube linkleri sayfada oynatılır; diğer linkler yeni sekmede açılır.</span></label>
+              <label class="flex flex-col gap-1.5"><span class="eyebrow">Sıra</span>
+                <input type="number" id="trn-f-order" class="field" min="0" max="10000" step="1" value="1"></label>
+              <label class="flex flex-col gap-1.5"><span class="eyebrow">Son tarih (opsiyonel)</span>
+                <input type="date" id="trn-f-due" class="field"></label>
+              <fieldset class="md:col-span-2 flex flex-col gap-2">
+                <legend class="eyebrow mb-1.5">Atama</legend>
+                <div class="flex flex-wrap gap-4 text-sm">
+                  <label class="inline-flex items-center gap-2"><input type="radio" name="trn-assign" value="all" checked> Herkese</label>
+                  <label class="inline-flex items-center gap-2"><input type="radio" name="trn-assign" value="some"> Seçilen kişilere</label>
+                </div>
+                <div id="trn-f-users" class="trn-userpick" style="display:none;"></div>
+              </fieldset>
+              <div class="md:col-span-2 flex flex-wrap items-center gap-2">
+                <button type="submit" id="trn-f-save" class="btn btn-primary"><span class="material-symbols-outlined">save</span>Kaydet</button>
+                <button type="button" id="trn-f-cancel" class="btn btn-outline" style="display:none;">Vazgeç</button>
+                <span id="trn-f-msg" class="text-xs"></span>
+              </div>
+            </form>
+            <div class="table-wrap mt-6">
+              <table class="data-table">
+                <thead><tr><th class="l">Sıra</th><th class="l">Ders</th><th class="l">Video</th><th class="l">Son tarih</th><th class="l">Atama</th><th class="!text-center">İşlem</th></tr></thead>
+                <tbody id="trn-lessons-tbody"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="card card-pad">
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              <div><div class="eyebrow">Takip</div><h3 class="font-display text-lg font-semibold mt-1">Kişi × Ders Tamamlama</h3></div>
+              <div class="flex flex-wrap gap-3 text-xs text-secondary"><span><span class="trn-cell done">✓</span> tamamlandı</span><span><span class="trn-cell todo">—</span> atandı</span><span><span class="trn-cell na">·</span> atanmadı</span></div>
+            </div>
+            <div class="table-wrap mt-4">
+              <table class="data-table trn-matrix" id="trn-matrix"></table>
+            </div>
+          </section>
+
+          <section id="trn-roles" class="card card-pad" style="display:none;">
+            <div><div class="eyebrow">Yalnızca owner</div><h3 class="font-display text-lg font-semibold mt-1">Rol Yönetimi</h3>
+              <p class="text-xs text-secondary mt-1">Admin'ler ders ekler, atar ve ilerlemeyi görür. Owner'ın rolü değiştirilemez.</p></div>
+            <div class="table-wrap mt-4">
+              <table class="data-table"><thead><tr><th class="l">Kullanıcı</th><th class="l">Rol</th><th class="!text-center">Değiştir</th></tr></thead>
+                <tbody id="trn-roles-tbody"></tbody></table>
+            </div>
+          </section>
         </div>
       </section>
 

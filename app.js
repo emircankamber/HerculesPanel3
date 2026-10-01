@@ -24,6 +24,8 @@ async function apiFetch(url, options = {}) {
 }
 
 let authRequiredGlobal = false;
+// Oturumdaki kullanıcı (yalnızca GÖRÜNÜM için; tüm yetki kontrolleri sunucuda yapılır)
+let currentUser = { role: null, user_id: null, email: null };
 
 function showLogin(errorMsg = "", dismissible = false) {
   const overlay = document.getElementById("login-overlay");
@@ -43,6 +45,7 @@ async function checkAuthStatus() {
     const res = await apiFetch(`${API_BASE}/api/auth/status`);
     const s = await res.json();
     authRequiredGlobal = !!s.auth_required;
+    currentUser = { role: s.role || null, user_id: s.user_id || null, email: s.email || null };
 
     // Paylaşımlı depolama uyarısı
     const warnEl = document.getElementById("storage-warning");
@@ -87,6 +90,7 @@ async function doAuth(endpoint) {
     hideLogin();
     await checkAuthStatus();
     if ($("#view-home")?.classList.contains("active")) loadHome();
+    if ($("#view-training")?.classList.contains("active")) loadTraining();
   } catch (e) {
     err.textContent = `Bağlantı hatası: ${e.message}`;
   }
@@ -150,6 +154,7 @@ function showView(view) {
   if (view === "reports") loadReports();
   if (view === "home") loadHome();
   if (view === "settings") loadSettings();
+  if (view === "training") loadTraining();
   if (view === "trends") updateTrendsStale();
   // Chart.js gizli (display:none) kapsayıcıda 0 boyutla çizer — veri
   // görünümleri yalnızca görünür olduklarında (yeniden) render edilir.
@@ -2354,4 +2359,295 @@ function renderHome(recent, grouped) {
 
 (function bindHomeView() {
   $("#home-refresh").addEventListener("click", loadHome);
+})();
+
+
+// ---------------------------------------------------------------------------
+// Eğitim & Görevler
+// Sunucu uçları: GET /api/training/lessons (herkes, kendi atamaları),
+// POST/PUT/DELETE /api/training/lessons[/id] (owner/admin),
+// POST /api/training/lessons/{id}/complete (yalnızca kendi kaydı),
+// GET /api/training/progress + GET /api/users (owner/admin),
+// POST /api/users/{id}/role (yalnızca owner). Arayüzdeki gizleme yalnızca kolaylık.
+// ---------------------------------------------------------------------------
+const YT_ID_RE = /^[A-Za-z0-9_-]{11}$/;
+const ROLE_LABEL = { owner: "Owner", admin: "Admin", member: "Üye" };
+const trnState = { data: null, users: [], progress: null, editing: null };
+
+const isStaff = () => currentUser.role === "owner" || currentUser.role === "admin";
+const todayISO = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
+const fmtDue = (iso) => { if (!iso) return ""; const [y, m, d] = iso.split("-").map(Number); return new Date(y, m - 1, d).toLocaleDateString("tr-TR", { day: "2-digit", month: "short", year: "numeric" }); };
+
+function dueChip(lesson) {
+  if (!lesson.due_date) return "";
+  const t = todayISO();
+  if (!lesson.completed && lesson.due_date < t) return `<span class="chip bad">Gecikti · ${esc(fmtDue(lesson.due_date))}</span>`;
+  return `<span class="chip ${lesson.completed ? "na" : "warn"}">Son tarih · ${esc(fmtDue(lesson.due_date))}</span>`;
+}
+
+/** Video alanı: YouTube (ID tekrar doğrulanır) -> nocookie gömme butonu; diğer https -> yeni sekme */
+function lessonVideoHtml(l) {
+  if (l.youtube_id && YT_ID_RE.test(l.youtube_id)) {
+    return `<div class="trn-video-slot"><button type="button" class="trn-play btn btn-outline btn-sm" data-yt="${esc(l.youtube_id)}"><span class="material-symbols-outlined">play_circle</span>Videoyu oynat</button></div>`;
+  }
+  const url = safeHttpsUrl(l.video_url);
+  if (url) {
+    let host = ""; try { host = new URL(url).hostname.replace(/^www\./, ""); } catch {}
+    return `<a class="btn btn-outline btn-sm" href="${esc(url)}" target="_blank" rel="noopener noreferrer"><span class="material-symbols-outlined">open_in_new</span>Videoyu aç${host ? ` <span class="text-secondary font-normal">(${esc(host)})</span>` : ""}</a>`;
+  }
+  return "";
+}
+
+function embedYouTube(slot, id) {
+  if (!YT_ID_RE.test(id)) return;
+  const wrap = document.createElement("div");
+  wrap.className = "trn-video";
+  const f = document.createElement("iframe");
+  f.src = `https://www.youtube-nocookie.com/embed/${encodeURIComponent(id)}?rel=0&autoplay=1`;
+  f.title = "Ders videosu";
+  f.loading = "lazy";
+  f.referrerPolicy = "strict-origin-when-cross-origin";
+  f.allow = "accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture; fullscreen";
+  f.allowFullscreen = true;
+  wrap.appendChild(f);
+  slot.replaceChildren(wrap);
+}
+
+async function loadTraining() {
+  const status = $("#trn-status");
+  const guest = !currentUser.role;
+  $("#trn-guest").style.display = guest ? "block" : "none";
+  $("#trn-mine").style.display = guest ? "none" : "block";
+  $("#trn-progress").style.display = guest ? "none" : "block";
+  $("#trn-staff").style.display = !guest && isStaff() ? "flex" : "none";
+  $("#trn-roles").style.display = currentUser.role === "owner" ? "block" : "none";
+  $("#trn-role-chip").textContent = guest ? "" : ROLE_LABEL[currentUser.role] || "";
+  $("#trn-role-chip").style.display = guest ? "none" : "";
+  if (guest) { status.textContent = ""; return; }
+
+  status.textContent = "yükleniyor…"; status.className = "status-line loading mt-4";
+  try {
+    const reqs = [apiFetch(`${API_BASE}/api/training/lessons`)];
+    if (isStaff()) reqs.push(apiFetch(`${API_BASE}/api/users`), apiFetch(`${API_BASE}/api/training/progress`));
+    const resps = await Promise.all(reqs);
+    const bodies = await Promise.all(resps.map(r => r.json().catch(() => ({}))));
+    resps.forEach((r, i) => { if (!r.ok) throw new Error(apiErrorText(bodies[i], r.status)); });
+    trnState.data = bodies[0];
+    // Sunucunun döndürdüğü rol esastır (ör. rol bu arada değiştiyse)
+    if (bodies[0].role && bodies[0].role !== currentUser.role) { currentUser.role = bodies[0].role; return loadTraining(); }
+    if (isStaff()) { trnState.users = bodies[1].users || []; trnState.progress = bodies[2]; }
+    renderTraining();
+    status.textContent = ""; status.className = "status-line mt-4";
+  } catch (err) {
+    status.textContent = `Hata: ${err.message}`; status.className = "status-line error mt-4";
+  }
+}
+
+function renderTraining() {
+  const d = trnState.data;
+  const prog = d.my_progress || { completed: 0, total: 0 };
+  $("#trn-progress-done").textContent = prog.completed;
+  $("#trn-progress-total").textContent = prog.total;
+  $("#trn-progress-bar").style.width = prog.total ? (prog.completed / prog.total) * 100 + "%" : "0";
+  $("#trn-mine-count").textContent = prog.total ? `${prog.completed}/${prog.total} tamamlandı` : "";
+
+  // --- Derslerim ---
+  const list = $("#trn-mine-list");
+  list.innerHTML = d.my_lessons.length ? "" : `<div class="card card-pad text-sm text-secondary xl:col-span-2">Sana atanmış ders yok.</div>`;
+  d.my_lessons.forEach((l, i) => {
+    const card = document.createElement("article");
+    card.className = "card p-5 flex flex-col gap-3 min-w-0";
+    card.innerHTML = `
+      <div class="flex items-start justify-between gap-3">
+        <div class="min-w-0">
+          <div class="flex flex-wrap items-center gap-1.5"><span class="chip na">Ders ${i + 1}</span>${dueChip(l)}</div>
+          <h4 class="font-display font-semibold text-[17px] leading-snug mt-2 break-words">${esc(l.title)}</h4>
+        </div>
+        ${l.completed ? `<span class="chip ok shrink-0">Tamamlandı</span>` : `<span class="chip warn shrink-0">Bekliyor</span>`}
+      </div>
+      ${l.description ? `<p class="trn-desc text-[13.5px] text-on-surface-variant leading-relaxed">${esc(l.description)}</p>` : ""}
+      ${lessonVideoHtml(l)}
+      <div class="flex flex-wrap items-center justify-between gap-2 mt-auto pt-2 border-t border-hairline">
+        <span class="text-xs text-secondary">${l.completed ? `Tamamlanma: ${esc(fmtStamp(l.completed_at))}` : "Henüz tamamlanmadı"}</span>
+        <button type="button" class="trn-toggle btn ${l.completed ? "btn-outline" : "btn-primary"} btn-sm">
+          <span class="material-symbols-outlined">${l.completed ? "undo" : "task_alt"}</span>${l.completed ? "Geri al" : "Tamamladım"}</button>
+      </div>`;
+    const play = card.querySelector(".trn-play");
+    if (play) play.addEventListener("click", () => embedYouTube(play.parentElement, play.dataset.yt));
+    card.querySelector(".trn-toggle").addEventListener("click", async (e) => {
+      const btn = e.currentTarget; btn.disabled = true;
+      try {
+        const r = await apiFetch(`${API_BASE}/api/training/lessons/${encodeURIComponent(l.id)}/complete`, {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ completed: !l.completed }),
+        });
+        const b = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(apiErrorText(b, r.status));
+        await loadTraining();
+      } catch (err) {
+        btn.disabled = false;
+        $("#trn-status").textContent = `Hata: ${err.message}`; $("#trn-status").className = "status-line error mt-4";
+      }
+    });
+    list.appendChild(card);
+  });
+
+  if (!isStaff()) return;
+  renderLessonAdmin();
+  renderMatrix();
+  if (currentUser.role === "owner") renderRoles();
+}
+
+// --- Ders yönetimi (owner/admin) ---
+function renderUserPicker(selected = []) {
+  const box = $("#trn-f-users");
+  const sel = new Set(selected);
+  box.innerHTML = trnState.users.map(u => `
+    <label><input type="checkbox" value="${u.id}" ${sel.has(u.id) ? "checked" : ""}><span title="${esc(u.email)}">${esc(u.email)}</span>
+      <span class="chip na !text-[10px]">${esc(ROLE_LABEL[u.role] || u.role)}</span></label>`).join("") || `<span class="text-xs text-secondary">Kullanıcı yok.</span>`;
+}
+
+function resetLessonForm() {
+  trnState.editing = null;
+  $("#trn-f-id").value = ""; $("#trn-f-title").value = ""; $("#trn-f-desc").value = ""; $("#trn-f-url").value = "";
+  const maxOrder = Math.max(0, ...((trnState.data?.all_lessons) || []).map(l => l.sort_order || 0));
+  $("#trn-f-order").value = maxOrder + 1; $("#trn-f-due").value = "";
+  $$('input[name="trn-assign"]').forEach(r => { r.checked = r.value === "all"; });
+  $("#trn-f-users").style.display = "none";
+  renderUserPicker([]);
+  $("#trn-form-mode").textContent = "Yeni ders"; $("#trn-form-mode").className = "chip na";
+  $("#trn-f-cancel").style.display = "none";
+}
+
+function fillLessonForm(l) {
+  trnState.editing = l.id;
+  $("#trn-f-id").value = l.id; $("#trn-f-title").value = l.title; $("#trn-f-desc").value = l.description || "";
+  $("#trn-f-url").value = l.video_url || ""; $("#trn-f-order").value = l.sort_order ?? 0; $("#trn-f-due").value = l.due_date || "";
+  $$('input[name="trn-assign"]').forEach(r => { r.checked = r.value === (l.assign_all ? "all" : "some"); });
+  $("#trn-f-users").style.display = l.assign_all ? "none" : "grid";
+  renderUserPicker(l.assignee_ids || []);
+  $("#trn-form-mode").textContent = `Düzenleniyor: #${l.id}`; $("#trn-form-mode").className = "chip warn";
+  $("#trn-f-cancel").style.display = "";
+  $("#trn-form").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function renderLessonAdmin() {
+  if (trnState.editing == null) resetLessonForm();
+  else { const l = trnState.data.all_lessons.find(x => x.id === trnState.editing); l ? renderUserPicker(l.assignee_ids) : resetLessonForm(); }
+  const tbody = $("#trn-lessons-tbody");
+  const lessons = trnState.data.all_lessons || [];
+  tbody.innerHTML = lessons.length ? "" : `<tr><td colspan="6" class="muted !text-center !py-6">Henüz ders yok — yukarıdan ekleyin.</td></tr>`;
+  lessons.forEach(l => {
+    const tr = document.createElement("tr");
+    const video = l.youtube_id ? `<span class="chip ok">YouTube</span>` : safeHttpsUrl(l.video_url) ? `<span class="chip na">Link</span>` : `<span class="muted">—</span>`;
+    const assign = l.assign_all ? `<span class="chip ok">Herkes</span>` : `<span class="chip warn">${l.assignee_ids.length} kişi</span>`;
+    tr.innerHTML = `<td class="l tabular">${esc(l.sort_order)}</td>
+      <td class="l"><div class="font-semibold whitespace-normal break-words min-w-[160px]">${esc(l.title)}</div></td>
+      <td class="l">${video}</td><td class="l">${l.due_date ? esc(fmtDue(l.due_date)) : '<span class="muted">—</span>'}</td><td class="l">${assign}</td>
+      <td class="!text-center whitespace-nowrap"><button type="button" class="icon-btn trn-edit" title="Düzenle" aria-label="Düzenle"><span class="material-symbols-outlined">edit</span></button>
+        <button type="button" class="icon-btn trn-del !text-error" title="Sil" aria-label="Sil"><span class="material-symbols-outlined">delete</span></button></td>`;
+    tr.querySelector(".trn-edit").addEventListener("click", () => fillLessonForm(l));
+    tr.querySelector(".trn-del").addEventListener("click", async () => {
+      if (!confirm(`"${l.title}" dersi ve tüm tamamlama kayıtları silinsin mi?`)) return;
+      const r = await apiFetch(`${API_BASE}/api/training/lessons/${encodeURIComponent(l.id)}`, { method: "DELETE" });
+      const b = await r.json().catch(() => ({}));
+      if (!r.ok) { $("#trn-f-msg").textContent = `Hata: ${apiErrorText(b, r.status)}`; $("#trn-f-msg").className = "text-xs text-error"; return; }
+      if (trnState.editing === l.id) trnState.editing = null;
+      loadTraining();
+    });
+    tbody.appendChild(tr);
+  });
+}
+
+async function saveLesson(e) {
+  e.preventDefault();
+  const msg = $("#trn-f-msg");
+  const title = $("#trn-f-title").value.trim();
+  const url = $("#trn-f-url").value.trim();
+  const assignAll = $('input[name="trn-assign"]:checked').value === "all";
+  const assignees = $$('#trn-f-users input:checked').map(i => Number(i.value));
+  const fail = (t) => { msg.textContent = t; msg.className = "text-xs text-error"; };
+  if (!title) return fail("Başlık gerekli.");
+  if (url && !safeHttpsUrl(url)) return fail("Video linki https:// ile başlamalı.");
+  if (!assignAll && !assignees.length) return fail("En az bir kişi seçin ya da 'Herkese' atayın.");
+  const body = {
+    title, description: $("#trn-f-desc").value, video_url: url || null,
+    sort_order: Math.max(0, Math.round(Number($("#trn-f-order").value) || 0)),
+    due_date: $("#trn-f-due").value || null, assign_all: assignAll, assignee_ids: assignAll ? [] : assignees,
+  };
+  const id = trnState.editing;
+  $("#trn-f-save").disabled = true;
+  try {
+    const r = await apiFetch(`${API_BASE}/api/training/lessons${id ? "/" + encodeURIComponent(id) : ""}`, {
+      method: id ? "PUT" : "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    const b = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(apiErrorText(b, r.status));
+    trnState.editing = null;
+    msg.textContent = id ? "Ders güncellendi." : "Ders eklendi."; msg.className = "text-xs text-primary";
+    await loadTraining();
+  } catch (err) { fail(`Kaydedilemedi: ${err.message}`); }
+  finally { $("#trn-f-save").disabled = false; }
+}
+
+// --- Kişi × ders tablosu ---
+function renderMatrix() {
+  const pg = trnState.progress;
+  const table = $("#trn-matrix");
+  if (!pg || !pg.lessons.length) { table.innerHTML = `<tbody><tr><td class="muted !py-6">Henüz ders yok.</td></tr></tbody>`; return; }
+  const done = new Map(pg.completions.map(c => [`${c.lesson_id}:${c.user_id}`, c.completed_at]));
+  const t = todayISO();
+  const head = `<thead><tr><th>Kişi</th><th>İlerleme</th>${pg.lessons.map(l => `<th class="lesson" title="${esc(l.title)}">${esc(l.title.length > 40 ? l.title.slice(0, 40) + "…" : l.title)}</th>`).join("")}</tr></thead>`;
+  const rows = pg.users.map(u => {
+    const assigned = pg.lessons.filter(l => l.assignee_ids.includes(u.id));
+    const n = assigned.filter(l => done.has(`${l.id}:${u.id}`)).length;
+    const cells = pg.lessons.map(l => {
+      if (!l.assignee_ids.includes(u.id)) return `<td><span class="trn-cell na" title="Atanmadı">·</span></td>`;
+      const at = done.get(`${l.id}:${u.id}`);
+      if (at) return `<td><span class="trn-cell done" title="Tamamlandı: ${esc(fmtStamp(at))}">✓</span></td>`;
+      const late = l.due_date && l.due_date < t;
+      return `<td><span class="trn-cell ${late ? "late" : "todo"}" title="${late ? "Son tarih geçti" : "Atandı, tamamlanmadı"}">—</span></td>`;
+    }).join("");
+    return `<tr><td><div class="font-medium truncate max-w-[200px]" title="${esc(u.email)}">${esc(u.email)}</div><div class="text-[11px] text-secondary">${esc(ROLE_LABEL[u.role] || u.role)}</div></td>
+      <td class="tabular">${n}/${assigned.length}</td>${cells}</tr>`;
+  }).join("");
+  table.innerHTML = head + `<tbody>${rows}</tbody>`;
+}
+
+// --- Rol yönetimi (yalnızca owner) ---
+function renderRoles() {
+  const tbody = $("#trn-roles-tbody");
+  tbody.innerHTML = "";
+  trnState.users.forEach(u => {
+    const tr = document.createElement("tr");
+    const isOwner = u.role === "owner";
+    tr.innerHTML = `<td class="l"><div class="font-medium truncate max-w-[260px]" title="${esc(u.email)}">${esc(u.email)}</div></td>
+      <td class="l"><span class="chip ${isOwner ? "ok" : u.role === "admin" ? "warn" : "na"}">${esc(ROLE_LABEL[u.role] || u.role)}</span></td>
+      <td class="!text-center">${isOwner ? `<span class="text-xs text-secondary">değiştirilemez</span>`
+        : `<select class="field !h-8 text-xs trn-role-sel" aria-label="Rol"><option value="member" ${u.role === "member" ? "selected" : ""}>Üye</option><option value="admin" ${u.role === "admin" ? "selected" : ""}>Admin</option></select>`}</td>`;
+    const sel = tr.querySelector(".trn-role-sel");
+    if (sel) sel.addEventListener("change", async () => {
+      sel.disabled = true;
+      try {
+        const r = await apiFetch(`${API_BASE}/api/users/${encodeURIComponent(u.id)}/role`, {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ role: sel.value }),
+        });
+        const b = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(apiErrorText(b, r.status));
+        await loadTraining();
+      } catch (err) {
+        sel.disabled = false; sel.value = u.role;
+        $("#trn-status").textContent = `Hata: ${err.message}`; $("#trn-status").className = "status-line error mt-4";
+      }
+    });
+    tbody.appendChild(tr);
+  });
+}
+
+(function bindTrainingView() {
+  $("#trn-form").addEventListener("submit", saveLesson);
+  $("#trn-f-cancel").addEventListener("click", () => { trnState.editing = null; resetLessonForm(); $("#trn-f-msg").textContent = ""; });
+  $$('input[name="trn-assign"]').forEach(r => r.addEventListener("change", () => {
+    $("#trn-f-users").style.display = $('input[name="trn-assign"]:checked').value === "some" ? "grid" : "none";
+  }));
+  $("#trn-login").addEventListener("click", () => showLogin("", !authRequiredGlobal));
 })();

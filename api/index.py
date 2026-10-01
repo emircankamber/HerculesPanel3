@@ -106,6 +106,33 @@ async def require_auth(authorization: str | None = Header(default=None)) -> dict
     return {"email": session["email"], "user_id": session["user_id"]}
 
 
+async def require_user(user: dict = Depends(require_auth)) -> dict:
+    """
+    Gerçek (kayıtlı) bir kullanıcı + SUNUCU tarafında hesaplanan rolü.
+    Auth kapalıyken (hiç kullanıcı yok) eğitim/rol uçları kullanılamaz: atanacak
+    kimse yok ve tamamlama bir kişiye bağlanmak zorunda.
+    """
+    if user.get("auth_disabled") or not user.get("user_id"):
+        raise HTTPException(401, "Bu bölüm için kayıtlı bir hesapla giriş yapın")
+    role = await db.get_user_role(user["user_id"])
+    if not role:
+        raise HTTPException(401, "Kullanıcı bulunamadı — lütfen tekrar giriş yapın")
+    return {**user, "role": role}
+
+
+async def require_staff(user: dict = Depends(require_user)) -> dict:
+    """Owner veya admin."""
+    if user["role"] not in ("owner", "admin"):
+        raise HTTPException(403, "Bu işlem için yönetici yetkisi gerekli")
+    return user
+
+
+async def require_owner(user: dict = Depends(require_user)) -> dict:
+    if user["role"] != "owner":
+        raise HTTPException(403, "Bu işlemi yalnızca hesap sahibi (owner) yapabilir")
+    return user
+
+
 # ---------------------------------------------------------------------------
 # Yardımcı: SellerSprite yanıtlarından liste çıkar (gerçek veriyle doğrulandı)
 # ---------------------------------------------------------------------------
@@ -1172,11 +1199,14 @@ async def auth_status(authorization: str | None = Header(default=None)):
     count = await db.user_count()
     token = (authorization or "").replace("Bearer ", "").strip()
     session = await db.get_session(token) if token else None
+    role = await db.get_user_role(session["user_id"]) if session else None
     return {
         "auth_required": count > 0,
         "has_users": count > 0,
         "logged_in": bool(session),
         "email": session["email"] if session else None,
+        "user_id": session["user_id"] if session and role else None,
+        "role": role,  # "owner" | "admin" | "member" | None — yetki kontrolü yine sunucuda yapılır
         "storage": db.storage_info(),
     }
 
@@ -1453,3 +1483,192 @@ async def discovery_trending(req: TrendingRequest, user: dict = Depends(require_
         "total": raw.get("data", {}).get("total") if isinstance(raw.get("data"), dict) else None,
         "results": results,
     }
+
+
+
+# ---------------------------------------------------------------------------
+# ROLLER & EĞİTİM / GÖREVLER
+# Yetki kuralları SUNUCUDA: member yalnızca kendisine atanan dersleri görür ve
+# yalnızca KENDİ tamamlamasını değiştirir (user_id her zaman oturumdan gelir).
+# Owner/admin ders yönetir ve ilerlemeyi görür; rolleri yalnızca owner değiştirir;
+# owner'ın rolü değiştirilemez.
+# ---------------------------------------------------------------------------
+_YT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
+_YT_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "youtube-nocookie.com", "www.youtube-nocookie.com"}
+
+
+def _validate_video_url(url: str | None) -> str | None:
+    """Boş -> None. Aksi halde yalnızca https, host zorunlu, makul uzunluk."""
+    from urllib.parse import urlsplit
+    if url is None or not url.strip():
+        return None
+    url = url.strip()
+    if len(url) > 500:
+        raise HTTPException(422, "Video linki en fazla 500 karakter olabilir")
+    parts = urlsplit(url)
+    if parts.scheme != "https" or not parts.hostname:
+        raise HTTPException(422, "Video linki https:// ile başlamalı")
+    if any(c in url for c in ' "<>\\\n\r\t'):
+        raise HTTPException(422, "Video linki geçersiz karakter içeriyor")
+    return url
+
+
+def youtube_video_id(url: str | None) -> str | None:
+    """Yalnızca bilinen YouTube host'larında ve 11 karakterlik geçerli ID'de döner; aksi halde None."""
+    from urllib.parse import urlsplit, parse_qs
+    if not url:
+        return None
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return None
+    if parts.scheme != "https" or not parts.hostname:
+        return None
+    host = parts.hostname.lower()
+    vid = None
+    if host == "youtu.be":
+        vid = parts.path.lstrip("/").split("/")[0]
+    elif host in _YT_HOSTS:
+        if parts.path == "/watch":
+            vid = (parse_qs(parts.query).get("v") or [None])[0]
+        else:
+            m = re.match(r"^/(?:embed|shorts|live|v)/([^/]+)/?$", parts.path)
+            vid = m.group(1) if m else None
+    return vid if vid and _YT_ID_RE.match(vid) else None
+
+
+def _lesson_out(row: dict, completed_at: int | None = None, staff: bool = False) -> dict:
+    out = {
+        "id": row["id"], "title": row["title"], "description": row.get("description") or "",
+        "video_url": row.get("video_url"), "youtube_id": youtube_video_id(row.get("video_url")),
+        "sort_order": row.get("sort_order", 0), "due_date": row.get("due_date"),
+        "completed": completed_at is not None, "completed_at": completed_at,
+    }
+    if staff:
+        out["assign_all"] = bool(row.get("assign_all"))
+        out["assignee_ids"] = row.get("assignee_ids", [])
+        out["created_at"] = row.get("created_at")
+        out["updated_at"] = row.get("updated_at")
+    return out
+
+
+class LessonIn(BaseModel):
+    title: str = Field(..., min_length=1, max_length=200)
+    description: str = Field("", max_length=5000)
+    video_url: str | None = Field(None, max_length=500)
+    sort_order: int = Field(0, ge=0, le=10000)
+    due_date: str | None = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    assign_all: bool = True
+    assignee_ids: list[int] = Field(default_factory=list, max_length=500)
+
+
+async def _clean_lesson(req: LessonIn) -> dict:
+    data = req.model_dump()
+    data["title"] = data["title"].strip()
+    if not data["title"]:
+        raise HTTPException(422, "Başlık boş olamaz")
+    data["video_url"] = _validate_video_url(data.get("video_url"))
+    if data.get("due_date"):
+        try:
+            datetime.strptime(data["due_date"], "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(422, "Son tarih geçerli bir tarih olmalı (YYYY-AA-GG)")
+    else:
+        data["due_date"] = None
+    if not data["assign_all"]:
+        valid_ids = {u["id"] for u in await db.list_users()}
+        unknown = sorted(set(data["assignee_ids"]) - valid_ids)
+        if unknown:
+            raise HTTPException(422, f"Bilinmeyen kullanıcı id: {unknown}")
+        if not data["assignee_ids"]:
+            raise HTTPException(422, "Seçilen kişilere atama için en az bir kişi seçin")
+    else:
+        data["assignee_ids"] = []
+    return data
+
+
+@app.get("/api/training/lessons")
+async def training_lessons(user: dict = Depends(require_user)):
+    """Member: yalnızca kendisine atananlar. Owner/admin: tüm dersler + atama bilgisi. Hepsinde kendi tamamlaması."""
+    mine = await db.completions_for_user(user["user_id"])
+    staff = user["role"] in ("owner", "admin")
+    assigned = await db.list_lessons_for_user(user["user_id"])
+    my_lessons = [_lesson_out(r, mine.get(r["id"])) for r in assigned]
+    resp = {"role": user["role"], "my_lessons": my_lessons,
+            "my_progress": {"completed": sum(1 for l in my_lessons if l["completed"]), "total": len(my_lessons)}}
+    if staff:
+        resp["all_lessons"] = [_lesson_out(r, mine.get(r["id"]), staff=True) for r in await db.list_lessons_all()]
+    return resp
+
+
+@app.post("/api/training/lessons")
+async def training_create(req: LessonIn, user: dict = Depends(require_staff)):
+    data = await _clean_lesson(req)
+    lesson_id = await db.create_lesson(data, user["user_id"])
+    return {"ok": True, "id": lesson_id}
+
+
+@app.put("/api/training/lessons/{lesson_id}")
+async def training_update(lesson_id: int, req: LessonIn, user: dict = Depends(require_staff)):
+    if not await db.get_lesson(lesson_id):
+        raise HTTPException(404, "Ders bulunamadı")
+    await db.update_lesson(lesson_id, await _clean_lesson(req))
+    return {"ok": True, "id": lesson_id}
+
+
+@app.delete("/api/training/lessons/{lesson_id}")
+async def training_delete(lesson_id: int, user: dict = Depends(require_staff)):
+    if not await db.get_lesson(lesson_id):
+        raise HTTPException(404, "Ders bulunamadı")
+    await db.delete_lesson(lesson_id)
+    return {"ok": True}
+
+
+class CompletionIn(BaseModel):
+    completed: bool
+
+
+@app.post("/api/training/lessons/{lesson_id}/complete")
+async def training_complete(lesson_id: int, req: CompletionIn, user: dict = Depends(require_user)):
+    """Yalnızca kendi tamamlaması: gövdede user_id YOK, oturumdaki kullanıcı kullanılır."""
+    if not await db.is_lesson_assigned(lesson_id, user["user_id"]):
+        raise HTTPException(404, "Ders bulunamadı ya da size atanmamış")
+    await db.set_completion(lesson_id, user["user_id"], req.completed)
+    done = await db.completions_for_user(user["user_id"])
+    return {"ok": True, "completed": lesson_id in done, "completed_at": done.get(lesson_id)}
+
+
+@app.get("/api/training/progress")
+async def training_progress(user: dict = Depends(require_staff)):
+    """Kişi × ders tamamlama tablosu (yalnızca owner/admin)."""
+    users = await db.list_users()
+    lessons = await db.list_lessons_all()
+    all_ids = [u["id"] for u in users]
+    return {
+        "users": users,
+        "lessons": [{"id": l["id"], "title": l["title"], "sort_order": l["sort_order"], "due_date": l.get("due_date"),
+                     "assignee_ids": all_ids if l["assign_all"] else l["assignee_ids"]} for l in lessons],
+        "completions": await db.all_completions(),
+    }
+
+
+@app.get("/api/users")
+async def users_list(user: dict = Depends(require_staff)):
+    """Atama ve rol yönetimi için kullanıcı listesi (owner/admin)."""
+    return {"users": await db.list_users(), "me": user["user_id"], "my_role": user["role"]}
+
+
+class RoleIn(BaseModel):
+    role: str = Field(..., pattern=r"^(admin|member)$")
+
+
+@app.post("/api/users/{target_id}/role")
+async def users_set_role(target_id: int, req: RoleIn, user: dict = Depends(require_owner)):
+    """Yalnızca owner; hedef owner olamaz; 'owner' rolü atanamaz (desen yalnızca admin|member)."""
+    target_role = await db.get_user_role(target_id)
+    if not target_role:
+        raise HTTPException(404, "Kullanıcı bulunamadı")
+    if target_role == "owner":
+        raise HTTPException(403, "Owner'ın rolü değiştirilemez")
+    await db.set_user_role(target_id, req.role)
+    return {"ok": True, "id": target_id, "role": await db.get_user_role(target_id)}

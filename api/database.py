@@ -38,6 +38,18 @@ _SCHEMAS = [
     """CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL UNIQUE,
         password_hash TEXT NOT NULL, salt TEXT NOT NULL, created_at INTEGER NOT NULL)""",
+    # EĞİTİM & GÖREVLER — dersler, atamalar (assign_all=1 ise herkese), tamamlamalar
+    """CREATE TABLE IF NOT EXISTS training_lessons (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, description TEXT,
+        video_url TEXT, sort_order INTEGER NOT NULL DEFAULT 0, due_date TEXT,
+        assign_all INTEGER NOT NULL DEFAULT 1, created_by INTEGER,
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)""",
+    """CREATE TABLE IF NOT EXISTS training_assignments (
+        lesson_id INTEGER NOT NULL, user_id INTEGER NOT NULL,
+        PRIMARY KEY (lesson_id, user_id))""",
+    """CREATE TABLE IF NOT EXISTS training_completions (
+        lesson_id INTEGER NOT NULL, user_id INTEGER NOT NULL, completed_at INTEGER NOT NULL,
+        PRIMARY KEY (lesson_id, user_id))""",
     """CREATE TABLE IF NOT EXISTS sessions (
         id INTEGER PRIMARY KEY AUTOINCREMENT, token TEXT NOT NULL UNIQUE,
         user_id INTEGER NOT NULL, email TEXT NOT NULL, created_at INTEGER NOT NULL)""",
@@ -112,6 +124,13 @@ async def _add_column_if_missing(table: str, column: str, coltype: str):
 async def _migrate_schema():
     """Eski dağıtımlardan kalan eksik sütunları tamamlar (bkz. _add_column_if_missing)."""
     await _add_column_if_missing("market_decision", "user_id", "INTEGER")
+    # Roller: canlı Postgres'te users tablosu zaten var -> sütun migrasyonla eklenir.
+    # owner = en küçük id (her istekte hesaplanır, bkz. get_user_role); burada yalnızca
+    # görüntü tutarlılığı için doldurulur. Boş roller member olur.
+    await _add_column_if_missing("users", "role", "TEXT")
+    await execute("UPDATE users SET role = 'member' WHERE role IS NULL OR role NOT IN ('owner', 'admin', 'member')")
+    await execute("UPDATE users SET role = 'member' WHERE role = 'owner' AND id <> (SELECT MIN(id) FROM users)")
+    await execute("UPDATE users SET role = 'owner' WHERE id = (SELECT MIN(id) FROM users)")
 
 
 async def init_db():
@@ -138,9 +157,10 @@ async def create_user(email: str, password: str) -> dict:
         raise ValueError("Bu e-posta zaten kayıtlı")
     salt = secrets.token_hex(16)
     pw_hash = _hash_password(password, salt)
+    role = "owner" if await user_count() == 0 else "member"
     user_id = await execute_returning_id(
-        "INSERT INTO users (email, password_hash, salt, created_at) VALUES (?, ?, ?, ?)",
-        (email, pw_hash, salt, int(time.time())))
+        "INSERT INTO users (email, password_hash, salt, created_at, role) VALUES (?, ?, ?, ?, ?)",
+        (email, pw_hash, salt, int(time.time()), role))
     return {"id": user_id, "email": email}
 
 
@@ -500,3 +520,134 @@ async def save_user_thresholds(user_id: int, thresholds: dict):
 async def reset_user_thresholds(user_id: int):
     """Tüm özelleştirmeleri siler, kullanıcı DEFAULT_THRESHOLDS'a döner."""
     await execute("DELETE FROM user_thresholds WHERE user_id = ?", (user_id,))
+
+
+# ---------------------------------------------------------------------------
+# ROLLER (owner / admin / member)
+# GÜVENLİK: owner her zaman en küçük id'li kullanıcıdır ve HER İSTEKTE buradan
+# hesaplanır — role sütunundaki "owner" değerine güvenilmez. Owner'ın rolü
+# değiştirilemez; role sütunu yalnızca admin/member ayrımını taşır.
+# ---------------------------------------------------------------------------
+VALID_ROLES = ("owner", "admin", "member")
+
+
+async def get_user_role(user_id: int) -> str | None:
+    row = await fetch_one(
+        "SELECT id, role, (SELECT MIN(id) FROM users) AS owner_id FROM users WHERE id = ?", (user_id,))
+    if not row:
+        return None
+    if row["id"] == row["owner_id"]:
+        return "owner"
+    return "admin" if row.get("role") == "admin" else "member"
+
+
+async def list_users() -> list[dict]:
+    rows = await fetch_all(
+        "SELECT id, email, role, created_at, (SELECT MIN(id) FROM users) AS owner_id FROM users ORDER BY id")
+    return [{"id": r["id"], "email": r["email"], "created_at": r["created_at"],
+             "role": "owner" if r["id"] == r["owner_id"] else ("admin" if r.get("role") == "admin" else "member")}
+            for r in rows]
+
+
+async def set_user_role(user_id: int, role: str):
+    """Yalnızca admin <-> member. Owner hedefi ve 'owner' değeri çağıran tarafta reddedilir."""
+    if role not in ("admin", "member"):
+        raise ValueError("Geçersiz rol")
+    await execute("UPDATE users SET role = ? WHERE id = ?", (role, user_id))
+
+
+# ---------------------------------------------------------------------------
+# EĞİTİM & GÖREVLER
+# ---------------------------------------------------------------------------
+async def _lesson_assignees(lesson_ids: list[int]) -> dict[int, list[int]]:
+    if not lesson_ids:
+        return {}
+    marks = ", ".join("?" * len(lesson_ids))
+    rows = await fetch_all(f"SELECT lesson_id, user_id FROM training_assignments WHERE lesson_id IN ({marks})",
+                           tuple(lesson_ids))
+    out: dict[int, list[int]] = {i: [] for i in lesson_ids}
+    for r in rows:
+        out.setdefault(r["lesson_id"], []).append(r["user_id"])
+    return out
+
+
+async def list_lessons_all() -> list[dict]:
+    rows = await fetch_all("SELECT * FROM training_lessons ORDER BY sort_order, id")
+    assignees = await _lesson_assignees([r["id"] for r in rows])
+    for r in rows:
+        r["assign_all"] = bool(r["assign_all"])
+        r["assignee_ids"] = sorted(assignees.get(r["id"], []))
+    return rows
+
+
+async def list_lessons_for_user(user_id: int) -> list[dict]:
+    """Yalnızca kullanıcıya atanmış dersler (herkese atananlar + kişisel atamalar)."""
+    return await fetch_all(
+        """SELECT l.* FROM training_lessons l
+           WHERE l.assign_all = 1
+              OR EXISTS (SELECT 1 FROM training_assignments a WHERE a.lesson_id = l.id AND a.user_id = ?)
+           ORDER BY l.sort_order, l.id""", (user_id,))
+
+
+async def is_lesson_assigned(lesson_id: int, user_id: int) -> bool:
+    row = await fetch_one(
+        """SELECT 1 AS ok FROM training_lessons l
+           WHERE l.id = ? AND (l.assign_all = 1
+              OR EXISTS (SELECT 1 FROM training_assignments a WHERE a.lesson_id = l.id AND a.user_id = ?))""",
+        (lesson_id, user_id))
+    return bool(row)
+
+
+async def get_lesson(lesson_id: int) -> dict | None:
+    return await fetch_one("SELECT * FROM training_lessons WHERE id = ?", (lesson_id,))
+
+
+async def _replace_assignments(lesson_id: int, assignee_ids: list[int]):
+    await execute("DELETE FROM training_assignments WHERE lesson_id = ?", (lesson_id,))
+    for uid in sorted(set(assignee_ids)):
+        await execute("INSERT INTO training_assignments (lesson_id, user_id) VALUES (?, ?)", (lesson_id, uid))
+
+
+async def create_lesson(data: dict, created_by: int) -> int:
+    now = int(time.time())
+    lesson_id = await execute_returning_id(
+        """INSERT INTO training_lessons (title, description, video_url, sort_order, due_date, assign_all,
+           created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (data["title"], data.get("description") or "", data.get("video_url") or None, data.get("sort_order", 0),
+         data.get("due_date") or None, 1 if data.get("assign_all", True) else 0, created_by, now, now))
+    await _replace_assignments(lesson_id, [] if data.get("assign_all", True) else data.get("assignee_ids", []))
+    return lesson_id
+
+
+async def update_lesson(lesson_id: int, data: dict):
+    await execute(
+        """UPDATE training_lessons SET title = ?, description = ?, video_url = ?, sort_order = ?, due_date = ?,
+           assign_all = ?, updated_at = ? WHERE id = ?""",
+        (data["title"], data.get("description") or "", data.get("video_url") or None, data.get("sort_order", 0),
+         data.get("due_date") or None, 1 if data.get("assign_all", True) else 0, int(time.time()), lesson_id))
+    await _replace_assignments(lesson_id, [] if data.get("assign_all", True) else data.get("assignee_ids", []))
+
+
+async def delete_lesson(lesson_id: int):
+    await execute("DELETE FROM training_completions WHERE lesson_id = ?", (lesson_id,))
+    await execute("DELETE FROM training_assignments WHERE lesson_id = ?", (lesson_id,))
+    await execute("DELETE FROM training_lessons WHERE id = ?", (lesson_id,))
+
+
+async def set_completion(lesson_id: int, user_id: int, completed: bool):
+    """Yalnızca çağıranın KENDİ kaydı — user_id her zaman oturumdan gelir, istekten değil."""
+    if completed:
+        await execute(
+            "INSERT INTO training_completions (lesson_id, user_id, completed_at) VALUES (?, ?, ?) "
+            "ON CONFLICT (lesson_id, user_id) DO NOTHING", (lesson_id, user_id, int(time.time())))
+    else:
+        await execute("DELETE FROM training_completions WHERE lesson_id = ? AND user_id = ?", (lesson_id, user_id))
+
+
+async def completions_for_user(user_id: int) -> dict[int, int]:
+    rows = await fetch_all("SELECT lesson_id, completed_at FROM training_completions WHERE user_id = ?", (user_id,))
+    return {r["lesson_id"]: r["completed_at"] for r in rows}
+
+
+async def all_completions() -> list[dict]:
+    return await fetch_all("SELECT lesson_id, user_id, completed_at FROM training_completions")

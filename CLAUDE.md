@@ -247,3 +247,34 @@ Google arama trendini veriyor) ama henüz backend'e bağlanmadı —
 eklenmeli. **TikTok/sosyal medya viral katsayısı için hiçbir gerçek MCP
 kaynağı YOK** — Stitch tasarımındaki "Viral Dönüşüm Katsayısı" kartı bu
 yüzden backend'e hiç bağlanmamalı, sahte veri olur.
+
+
+## Roller & Eğitim / Görevler (owner / admin / member)
+
+- **Rol kaynağı:** `users.role` sütunu (`_migrate_schema` içinde `_add_column_if_missing`
+  ile eklenir — canlı Postgres'te users tablosu zaten vardı). **Owner = en küçük id'li
+  kullanıcı** ve `database.py::get_user_role()` bunu HER İSTEKTE hesaplar; sütundaki
+  "owner" değerine güvenilmez. Sütun yalnızca admin/member ayrımını taşır.
+- **Yetki SUNUCUDA:** `index.py` → `require_user` (gerçek hesap şart; auth kapalıyken
+  401), `require_staff` (owner/admin), `require_owner`. Arayüzde gizlemek yalnızca kolaylık.
+  - Member yalnızca kendisine atanan dersleri görür (`assign_all=1` ya da
+    `training_assignments`'ta kaydı olanlar) ve yalnızca KENDİ tamamlamasını değiştirir:
+    `/api/training/lessons/{id}/complete` gövdesinde user_id YOK, oturumdan alınır;
+    atanmamış derse 404.
+  - Rolü yalnızca owner değiştirir (`/api/users/{id}/role`, yalnızca admin|member);
+    owner'ın rolü değiştirilemez (403).
+- **Video linkleri:** yalnızca https. YouTube ID'si sunucuda (`youtube_video_id`) ve
+  istemcide (`YT_ID_RE`) 11 karakter `[A-Za-z0-9_-]` olarak doğrulanır, yalnızca bilinen
+  YouTube host'larında; gömme `youtube-nocookie.com/embed/{id}`. Diğer linkler yeni sekmede
+  (`rel="noopener noreferrer"`).
+- Tablolar: `training_lessons`, `training_assignments`, `training_completions`
+  (`completed_at` zaman damgası). Ders silinince atama/tamamlamalar da silinir.
+
+## Logo (`assets/hercullogo.svg`)
+
+Dosyayı DEĞİŞTİRME/optimize etme. Kırpma `#svgView(viewBox(...))` ile yapılıyor.
+**Tuzak:** "Inteligente" satırı `filterUnits="userSpaceOnUse"` ve bölgesi belirtilmemiş
+(varsayılan -%10/%120) bir gölge filtresi kullanıyor; viewBox ~361 birimden kısa ya da
+~819 birimden darsa satır HİÇ çizilmiyor. Kenar çubuğunda viewBox bu boyutta tutulup alt
+satır kapsayıcının `overflow:hidden`'ı ile gizleniyor. Favicon: `assets/hercul-icon.svg`
+(yalnızca ikon şekilleri, orijinal değerlerle).

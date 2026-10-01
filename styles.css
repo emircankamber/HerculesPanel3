@@ -307,3 +307,21 @@ select.field{padding-right:28px;}
 @media (max-width:900px){ .home-feed{grid-template-columns:1fr;} }
 .home-event{display:flex;gap:12px;padding:10px 4px;border-bottom:1px solid var(--hairline);}
 .home-event-dot{width:9px;height:9px;border-radius:50%;margin-top:5px;flex-shrink:0;}
+
+/* ---------- Eğitim & Görevler ---------- */
+.trn-desc{white-space:pre-line;word-break:break-word;}
+.trn-video{position:relative;width:100%;aspect-ratio:16/9;border-radius:12px;overflow:hidden;background:#0b1c30;}
+.trn-video iframe{position:absolute;inset:0;width:100%;height:100%;border:0;}
+.trn-userpick{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:6px;max-height:220px;overflow:auto;
+  padding:10px;border:1px solid var(--hairline);border-radius:10px;background:var(--surface-low);}
+.trn-userpick label{display:flex;align-items:center;gap:8px;font-size:13px;min-width:0;}
+.trn-userpick label span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.trn-cell{display:inline-grid;place-items:center;width:26px;height:26px;border-radius:7px;font-weight:700;font-size:13px;}
+.trn-cell.done{background:var(--primary-soft);color:var(--primary);}
+.trn-cell.todo{background:var(--tertiary-soft);color:var(--tertiary);}
+.trn-cell.late{background:var(--error-soft);color:var(--error);}
+.trn-cell.na{background:transparent;color:var(--outline-variant);}
+.trn-matrix th.lesson{min-width:110px;max-width:160px;white-space:normal;text-transform:none;letter-spacing:0;font-size:11.5px;text-align:center;}
+.trn-matrix td{text-align:center;}
+.trn-matrix th:first-child,.trn-matrix td:first-child{position:sticky;left:0;background:var(--surface-lowest);z-index:1;text-align:left;}
+.trn-matrix thead th:first-child{background:var(--surface-low);}
