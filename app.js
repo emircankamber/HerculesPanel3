@@ -2744,9 +2744,9 @@ function renderChecklistList() {
     b.innerHTML = `
       <div class="flex items-start justify-between gap-2">
         <div class="font-semibold text-sm leading-snug break-words min-w-0">${esc(l.title || l.analysis_key)}</div>
-        ${l.status === "locked" ? '<span class="chip ok shrink-0">Kilitli</span>' : '<span class="chip na shrink-0">Açık</span>'}
+        <span class="flex gap-1 shrink-0">${l.status === "locked" && l.overridden_count ? '<span class="chip warn" title="Geçmeyen/verisi olmayan otomatik madde gerekçeyle geçildi">gerekçeli</span>' : ""}${l.status === "locked" ? '<span class="chip ok">Kilitli</span>' : '<span class="chip na">Açık</span>'}</span>
       </div>
-      <div class="text-[11px] text-secondary mt-1 truncate">${esc(l.marketplace)} · ${esc(fmtAgo(l.updated_at))}${l.is_mine ? "" : ` · ${esc(l.owner_email || "")}`}</div>
+      <div class="text-[11px] text-secondary mt-1 truncate">${esc(l.marketplace)} · analiz ${esc(fmtStamp(l.analysis_fetched_at))}${l.is_mine ? "" : ` · ${esc(l.owner_email || "")}`}</div>
       <div class="flex items-center justify-between text-xs mt-2"><span class="tabular font-medium">${l.progress.done}/${l.progress.total} · %${pb.pct}</span>
         ${l.progress.critical_open ? `<span class="chip bad">${l.progress.critical_open} kritik</span>` : ""}</div>${pb.html}`;
     b.addEventListener("click", async () => {
@@ -2779,13 +2779,38 @@ function renderChecklistDetail() {
   const locked = c.status === "locked";
   const staff = isStaff();
   const remaining = c.progress.total - c.progress.done;
+  const reasonBox = (cls, ph) => `<textarea class="field ${cls} w-full !h-auto min-h-[76px] py-2 mt-2" maxlength="1000" rows="3" placeholder="${ph}"></textarea>
+      <div class="ck-reason-msg text-xs text-error mt-1"></div>`;
   let approval;
-  if (locked) approval = `<div class="flex items-center gap-2 text-sm"><span class="material-symbols-outlined text-primary">lock</span><span>Onaylandı ve kilitlendi</span></div>
-      <div class="text-xs text-secondary mt-1">${esc(c.locked_by || "")} · ${esc(fmtStamp(c.locked_at))}</div>`;
-  else if (c.can_lock) approval = `<button type="button" class="ck-lock btn btn-primary w-full"><span class="material-symbols-outlined">lock</span>Onayla &amp; Kilitle</button>
-      <div class="text-xs text-secondary mt-2">Kilitlendikten sonra liste değiştirilemez.</div>`;
-  else approval = `<button type="button" class="btn btn-primary w-full" disabled><span class="material-symbols-outlined">lock</span>Onayla &amp; Kilitle</button>
-      <div class="text-xs text-secondary mt-2">${!staff ? "Onay owner veya admin tarafından verilir." : ""}${remaining ? ` ${remaining} madde tamamlanmadı.` : ""}</div>`;
+  if (locked) {
+    approval = `<div class="flex items-center gap-2 text-sm"><span class="material-symbols-outlined text-primary">lock</span><span>Onaylandı ve kilitlendi</span></div>
+      <div class="text-xs text-secondary mt-1">${esc(c.locked_by || "")} · ${esc(fmtStamp(c.locked_at))}</div>
+      ${c.overridden_count ? `<div class="mt-3"><span class="chip warn">${c.overridden_count} otomatik madde gerekçeyle geçildi</span></div>` : ""}
+      ${c.approval_reason ? `<div class="text-xs mt-2"><span class="text-secondary">Onay gerekçesi:</span> <span class="italic break-words">"${esc(c.approval_reason)}"</span></div>` : ""}`;
+    if (c.can_unlock) approval += `<div class="border-t border-outline-variant/40 mt-4 pt-3">
+      <div class="text-xs font-semibold">Kilidi aç (yalnızca owner)</div>
+      ${reasonBox("ck-unlock-reason", "Kilidi neden açıyorsun? (zorunlu)")}
+      <button type="button" class="ck-unlock btn btn-outline w-full mt-1"><span class="material-symbols-outlined">lock_open</span>Kilidi Aç</button></div>`;
+  } else if (c.can_lock) {
+    approval = c.needs_reason ? `<div class="text-xs text-on-surface-variant">Şu otomatik maddeler geçmedi ya da verisi yok. Onaylamak için <b>gerekçe zorunlu</b>; bu maddeler "gerekçeyle geçildi" olarak işaretlenir:</div>
+      <ul class="text-xs mt-2 flex flex-col gap-1">${c.auto_unpassed.map(a => `<li class="flex flex-wrap gap-1.5 items-center"><span class="ck-badge ${esc(a.status)}">${esc(a.display)}</span><span class="break-words min-w-0">${esc(a.text)}</span></li>`).join("")}</ul>
+      ${reasonBox("ck-lock-reason", "Onay gerekçesi (zorunlu)")}` : "";
+    approval += `<button type="button" class="ck-lock btn btn-primary w-full ${c.needs_reason ? "mt-1" : ""}"><span class="material-symbols-outlined">lock</span>${c.needs_reason ? "Gerekçeyle Onayla &amp; Kilitle" : "Onayla &amp; Kilitle"}</button>
+      <div class="text-xs text-secondary mt-2">Kilitlendikten sonra liste değiştirilemez; kilidi yalnızca owner gerekçeyle açabilir.</div>`;
+  } else {
+    const mo = c.progress.manual_open;
+    approval = `<button type="button" class="btn btn-primary w-full" disabled><span class="material-symbols-outlined">lock</span>Onayla &amp; Kilitle</button>
+      <div class="text-xs text-secondary mt-2">${!staff ? "Onay owner veya admin tarafından verilir." : ""}${mo ? ` ${mo} manuel madde tamamlanmadı.` : ""}</div>`;
+  }
+  const evLabel = { lock: ["lock", "Onaylandı & kilitlendi"], unlock: ["lock_open", "Kilit açıldı"] };
+  const eventsHtml = (c.events || []).length ? `<div class="card card-pad"><h4 class="font-display font-semibold mb-3">Onay geçmişi</h4>
+      <ol class="flex flex-col gap-3">${c.events.slice().reverse().map(e => {
+        const [ico, label] = evLabel[e.kind] || ["history", e.kind];
+        return `<li class="text-xs"><div class="flex items-center gap-1.5 font-semibold"><span class="material-symbols-outlined !text-[16px] ${e.kind === "unlock" ? "text-tertiary" : "text-primary"}">${ico}</span>${esc(label)}</div>
+          <div class="text-secondary mt-0.5 break-words">${esc(e.by || "")} · ${esc(fmtStamp(e.at))}</div>
+          ${e.reason ? `<div class="italic mt-0.5 break-words">"${esc(e.reason)}"</div>` : ""}
+          ${(e.overridden || []).length ? `<div class="text-secondary mt-0.5 break-words">Gerekçeyle geçilen: ${e.overridden.map(o => esc(o.text)).join("; ")}</div>` : ""}</li>`;
+      }).join("")}</ol></div>` : "";
 
   const stagesHtml = (c.stages || []).map((st, si) => {
     const items = c.items.filter(i => i.stage_key === st.key);
@@ -2812,7 +2837,11 @@ function renderChecklistDetail() {
           <h2 class="font-display text-xl font-semibold mt-1 break-words">${esc(c.title || c.analysis_key)}</h2>
           <div class="flex flex-wrap gap-1.5 mt-2"><span class="chip mono">${esc(c.analysis_key)}</span><span class="chip na">${esc(c.marketplace)}</span>
             ${locked ? '<span class="chip ok">Kilitli</span>' : '<span class="chip na">Açık</span>'}${c.is_mine ? "" : `<span class="chip warn">${esc(c.owner_email || "")}</span>`}</div>
-          <div class="text-xs text-secondary mt-2">Analiz verisi anı: ${esc(fmtStamp(snap.fetched_at))} · liste: ${esc(fmtStamp(c.created_at))}${snap.category ? ` · ${esc(snap.category)}` : ""}</div>
+          <div class="ck-snap mt-3 inline-flex flex-wrap items-center gap-x-2 gap-y-0.5 rounded-lg bg-surface-container-low px-3 py-2 text-xs">
+            <span class="material-symbols-outlined !text-[16px] text-primary" aria-hidden="true">event</span>
+            <span class="font-semibold">Snapshot: analiz tarihi ${esc(fmtStamp(snap.fetched_at))}</span>
+            ${snap.fetched_at ? `<span class="text-secondary">(${esc(fmtAgo(snap.fetched_at))})</span>` : ""}</div>
+          <div class="text-xs text-secondary mt-2">Liste oluşturma: ${esc(fmtStamp(c.created_at))}${snap.category ? ` · ${esc(snap.category)}` : ""} · değerler bu analiz anından kopyalandı, sonradan değişmez.</div>
         </div>
         ${c.can_delete ? '<button type="button" class="ck-delete btn btn-danger shrink-0"><span class="material-symbols-outlined">delete</span>Listeyi sil</button>' : ""}
       </div>
@@ -2837,6 +2866,7 @@ function renderChecklistDetail() {
             <span class="ck-add-msg text-xs text-error"></span>
           </form></div>
         <div class="card card-pad"><h4 class="font-display font-semibold mb-3">Onay</h4>${approval}</div>
+        ${eventsHtml}
       </div>
     </div>`;
 
@@ -2859,8 +2889,29 @@ function renderChecklistDetail() {
     if (!text) { form.querySelector(".ck-add-msg").textContent = "Madde metni gerekli."; return; }
     ckMutate(`/api/checklists/${c.id}/items`, { method: "POST", body: JSON.stringify({ stage_key: form.querySelector(".ck-add-stage").value, text }) });
   });
+  // Gerekçe istemci tarafında da kontrol edilir; asıl kural sunucuda (422)
+  const readReason = (sel) => {
+    const ta = box.querySelector(sel);
+    if (!ta) return "";
+    const v = ta.value.trim();
+    const msg = ta.parentElement.querySelector(".ck-reason-msg");
+    if (v.length < 5) { if (msg) msg.textContent = "Gerekçe zorunlu (en az 5 karakter)."; ta.focus(); return null; }
+    if (msg) msg.textContent = "";
+    return v;
+  };
   box.querySelector(".ck-lock")?.addEventListener("click", () => {
-    if (confirm("Liste onaylanıp kilitlensin mi? Kilitlendikten sonra değiştirilemez.")) ckMutate(`/api/checklists/${c.id}/lock`, { method: "POST" });
+    const reason = c.needs_reason ? readReason(".ck-lock-reason") : "";
+    if (reason === null) return;
+    if (confirm("Liste onaylanıp kilitlensin mi? Kilitlendikten sonra değiştirilemez.")) {
+      ckMutate(`/api/checklists/${c.id}/lock`, { method: "POST", body: JSON.stringify(reason ? { reason } : {}) });
+    }
+  });
+  box.querySelector(".ck-unlock")?.addEventListener("click", () => {
+    const reason = readReason(".ck-unlock-reason");
+    if (reason === null) return;
+    if (confirm("Kilit açılsın mı? Liste yeniden düzenlenebilir olur; gerekçeyle geçilen maddeler sıfırlanır.")) {
+      ckMutate(`/api/checklists/${c.id}/unlock`, { method: "POST", body: JSON.stringify({ reason }) });
+    }
   });
   box.querySelector(".ck-delete")?.addEventListener("click", async () => {
     if (!confirm("Bu kontrol listesi silinsin mi?")) return;
@@ -2872,12 +2923,13 @@ function renderChecklistDetail() {
 function ckItemHtml(it, c) {
   if (it.kind === "auto") {
     const ico = { pass: ["check_circle", "text-primary"], fail: ["cancel", "text-error"], no_data: ["help", "text-outline"] }[it.auto_status] || ["help", "text-outline"];
-    return `<div class="ck-item ${it.auto_status === "pass" ? "done" : it.auto_status === "fail" ? "fail" : ""}" title="Analiz verisinden otomatik değerlendirildi; elle işaretlenemez">
+    const ov = it.auto_override;
+    return `<div class="ck-item ${it.auto_status === "pass" ? "done" : ov ? "override" : it.auto_status === "fail" ? "fail" : ""}" title="Analiz verisinden otomatik değerlendirildi; elle işaretlenemez">
       <span class="material-symbols-outlined ck-auto-ico ${ico[1]}" aria-hidden="true">${ico[0]}</span>
       <div class="min-w-0 flex-1">
-        <div class="flex flex-wrap items-center gap-2"><span class="ck-text text-[13.5px] font-medium">${esc(it.text)}</span><span class="chip na !text-[10px]">otomatik</span></div>
+        <div class="flex flex-wrap items-center gap-2"><span class="ck-text text-[13.5px] font-medium">${esc(it.text)}</span><span class="chip na !text-[10px]">otomatik</span>${ov ? '<span class="chip warn !text-[10px]">gerekçeyle geçildi</span>' : ""}</div>
         <div class="flex flex-wrap items-center gap-2 mt-1.5"><span class="ck-badge ${esc(it.auto_status)}">${esc(it.auto_display)}</span>
-          <span class="text-[11px] text-secondary">${it.auto_status === "no_data" ? "Analizde bu değer yok — geçti sayılmaz" : it.auto_status === "pass" ? "Eşik sağlandı" : "Eşik sağlanmadı"}</span></div>
+          <span class="text-[11px] text-secondary">${ov ? "Onayda gerekçeyle geçildi (bkz. onay gerekçesi)" : it.auto_status === "no_data" ? "Analizde bu değer yok — geçti sayılmaz" : it.auto_status === "pass" ? "Eşik sağlandı" : "Eşik sağlanmadı"}</span></div>
       </div></div>`;
   }
   const edit = c.can_edit;

@@ -333,6 +333,7 @@ select.field{padding-right:28px;}
 .ck-item{display:flex;gap:12px;align-items:flex-start;padding:12px;border-radius:10px;background:var(--surface-low);}
 .ck-item.done{background:#f3faf8;}
 .ck-item.fail{background:#fff6f5;}
+.ck-item.override{background:#fff8ef;}
 .ck-item input[type=checkbox]{width:18px;height:18px;margin-top:2px;accent-color:var(--primary);flex-shrink:0;}
 .ck-auto-ico{width:20px;height:20px;flex-shrink:0;font-size:20px !important;width:20px;min-width:20px;}
 .ck-text{word-break:break-word;}

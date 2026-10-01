@@ -296,9 +296,21 @@ satır kapsayıcının `overflow:hidden`'ı ile gizleniyor. Favicon: `assets/her
   ilk 10 rakip ciro toplamı > $500.000, ort. yorum < 800, yeni marka ≥ 3
   (pre_assessment'taki "Güçlü Yeni Marka" değeri), ilk 3 marka payı < %65,
   ort. fiyat $25–$70 (iki uç dahil). Veri yoksa `no_data` → "Veri yok", geçti sayılmaz.
-- **Kilit:** owner/admin, yalnızca TÜM maddeler (otomatikler dahil) tamamsa kilitler.
+- **Onay & kilit:** owner/admin kilitler; manuel/özel maddelerin HEPSİ işaretli olmalı (409).
+  Geçmeyen ya da "Veri yok" olan otomatik madde varsa `POST /lock {reason}` ile **gerekçe
+  zorunlu** (boşluklar temizlendikten sonra ≥5 karakter, yoksa 422). Gerekçe, onaylayan ve
+  zaman `checklists.approval_reason/locked_by/locked_at`'a, geçilen maddeler
+  `overridden_json`'a yazılır; bu maddeler `auto_override=true` ("gerekçeyle geçildi") olarak
+  döner, `auto_status` gerçek değerini (fail/no_data) korur. (ASIN listelerinde arama hacmi
+  maddesi hep "Veri yok" — gerekçesiz onay hiç mümkün olmazdı.)
   Kilitli listede her değişiklik 423 (owner dahil); kural her UPDATE/DELETE'in içinde
   (`AND status='open'`). Görünürlük: member yalnızca kendi listeleri (başkasınınkine 404).
+- **Kilit açma:** `POST /api/checklists/{id}/unlock {reason}` — YALNIZCA owner (`require_owner`,
+  admin/member 403), gerekçe zorunlu (422), kilitli olmayan liste 409. Açılınca override'lar
+  sıfırlanır (tekrar onayda yeniden gerekçe gerekir). Geçmiş `checklist_events` tablosunda
+  (kind lock|unlock, by_email, at, reason, details_json — unlock olayı önceki onayın
+  kişi/zaman/gerekçesini de saklar); kilit açılsa da kayıtlar silinmez, detayda `events` olarak döner.
+  `approval_reason`/`overridden_json` sütunları `_migrate_schema`'da eklenir.
 - **Şablon:** tek kayıt (`checklist_template`, yoksa `DEFAULT_TEMPLATE`), yalnızca owner
   düzenler. 5 aşama ve otomatik maddeler sabit; başlıklar, manuel maddeler ve eşikler
   değişir. "Patent, Marka & Hukuk" (`legal`) aşamasındaki açık maddeler kritik sayılır.

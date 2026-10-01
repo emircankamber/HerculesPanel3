@@ -62,6 +62,10 @@ _SCHEMAS = [
         item_order INTEGER NOT NULL DEFAULT 0, kind TEXT NOT NULL, auto_key TEXT, text TEXT NOT NULL,
         checked INTEGER NOT NULL DEFAULT 0, checked_by TEXT, checked_at INTEGER, note TEXT,
         created_by TEXT, created_at INTEGER NOT NULL)""",
+    # Onay / kilit açma geçmişi: kim, ne zaman, neden (kilit açılsa da kayıt silinmez).
+    """CREATE TABLE IF NOT EXISTS checklist_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, checklist_id INTEGER NOT NULL, kind TEXT NOT NULL,
+        by_email TEXT, at INTEGER NOT NULL, reason TEXT, details_json TEXT)""",
     """CREATE TABLE IF NOT EXISTS training_completions (
         lesson_id INTEGER NOT NULL, user_id INTEGER NOT NULL, completed_at INTEGER NOT NULL,
         PRIMARY KEY (lesson_id, user_id))""",
@@ -145,6 +149,9 @@ async def _migrate_schema():
     # yalnızca HİÇ owner yoksa en küçük id'li kullanıcı owner yapılır — mevcut
     # owner'lara (ve ek owner'lara) asla dokunulmaz.
     await _add_column_if_missing("users", "role", "TEXT")
+    # Kontrol listesi gerekçeli onay: canlıda checklists tablosu bu sütunlar olmadan kurulmuş olabilir.
+    await _add_column_if_missing("checklists", "approval_reason", "TEXT")
+    await _add_column_if_missing("checklists", "overridden_json", "TEXT")
     await execute("UPDATE users SET role = 'member' WHERE role IS NULL OR role NOT IN ('owner', 'admin', 'member')")
     await execute(
         "UPDATE users SET role = 'owner' WHERE id = (SELECT MIN(id) FROM users) "
@@ -753,6 +760,7 @@ def _checklist_row(r: dict) -> dict:
     r = dict(r)
     for k in ("snapshot_json", "stages_json", "thresholds_json"):
         r[k[:-5]] = json.loads(r.pop(k) or "null")
+    r["overridden"] = json.loads(r.pop("overridden_json", None) or "null") or []
     return r
 
 
@@ -840,17 +848,64 @@ async def delete_custom_item(cid: int, item_id: int) -> bool:
     return True
 
 
-async def lock_checklist(cid: int, by: str) -> bool:
+async def _add_checklist_event(cid: int, kind: str, by: str, at: int, reason: str | None, details: dict | None = None):
+    await execute("INSERT INTO checklist_events (checklist_id, kind, by_email, at, reason, details_json) "
+                  "VALUES (?, ?, ?, ?, ?, ?)",
+                  (cid, kind, by, at, reason, json.dumps(details, ensure_ascii=False) if details else None))
+
+
+async def checklist_events(cid: int) -> list[dict]:
+    rows = await fetch_all("SELECT * FROM checklist_events WHERE checklist_id = ? ORDER BY at, id", (cid,))
+    out = []
+    for r in rows:
+        r = dict(r)
+        r["details"] = json.loads(r.pop("details_json") or "null")
+        out.append(r)
+    return out
+
+
+async def lock_checklist(cid: int, by: str, reason: str | None = None, overridden: list | None = None) -> int | None:
+    """Koşullu kilit (yalnızca status='open'). Başarılıysa kilit zaman damgasını döner."""
     now = int(time.time())
-    await execute("UPDATE checklists SET status = 'locked', locked_by = ?, locked_at = ?, updated_at = ? "
-                  "WHERE id = ? AND status = 'open'", (by, now, now, cid))
-    row = await fetch_one("SELECT status, locked_at FROM checklists WHERE id = ?", (cid,))
-    return bool(row and row["status"] == "locked" and row["locked_at"] == now)
+    ov = json.dumps(overridden, ensure_ascii=False) if overridden else None
+    await execute("UPDATE checklists SET status = 'locked', locked_by = ?, locked_at = ?, updated_at = ?, "
+                  "approval_reason = ?, overridden_json = ? WHERE id = ? AND status = 'open'",
+                  (by, now, now, reason, ov, cid))
+    row = await fetch_one("SELECT status, locked_by, locked_at FROM checklists WHERE id = ?", (cid,))
+    if not (row and row["status"] == "locked" and row["locked_at"] == now and row["locked_by"] == by):
+        return None
+    return now
 
 
-async def unlock_checklist(cid: int):
-    """Yalnızca kilitleme sonrası yarış kontrolü başarısız olursa geri almak için."""
-    await execute("UPDATE checklists SET status = 'open', locked_by = NULL, locked_at = NULL WHERE id = ?", (cid,))
+async def record_lock_event(cid: int, by: str, at: int, reason: str | None, overridden: list | None):
+    await _add_checklist_event(cid, "lock", by, at, reason, {"overridden": overridden or []})
+
+
+async def revert_lock(cid: int, locked_at: int):
+    """Kilitleme sonrası yarış kontrolü başarısız olursa YALNIZCA bu kilidi geri alır."""
+    await execute("UPDATE checklists SET status = 'open', locked_by = NULL, locked_at = NULL, "
+                  "approval_reason = NULL, overridden_json = NULL WHERE id = ? AND status = 'locked' AND locked_at = ?",
+                  (cid, locked_at))
+
+
+async def unlock_checklist(cid: int, by: str, reason: str) -> bool:
+    """Owner'ın gerekçeli kilit açması. Önceki onayın bilgisi olaya kopyalanır, sonra liste açılır."""
+    row = await fetch_one("SELECT status, locked_by, locked_at, approval_reason, overridden_json "
+                          "FROM checklists WHERE id = ?", (cid,))
+    if not row or row["status"] != "locked":
+        return False
+    now = int(time.time())
+    await execute("UPDATE checklists SET status = 'open', locked_by = NULL, locked_at = NULL, "
+                  "approval_reason = NULL, overridden_json = NULL, updated_at = ? "
+                  "WHERE id = ? AND status = 'locked' AND locked_at = ?", (now, cid, row["locked_at"]))
+    after = await fetch_one("SELECT status, locked_at FROM checklists WHERE id = ?", (cid,))
+    if not after or after["status"] != "open":
+        return False
+    await _add_checklist_event(cid, "unlock", by, now, reason, {
+        "previous_locked_by": row["locked_by"], "previous_locked_at": row["locked_at"],
+        "previous_approval_reason": row["approval_reason"],
+        "previous_overridden": json.loads(row["overridden_json"] or "null") or []})
+    return True
 
 
 async def delete_checklist(cid: int) -> bool:
@@ -862,5 +917,7 @@ async def delete_checklist(cid: int) -> bool:
     if await fetch_one("SELECT id FROM checklists WHERE id = ?", (cid,)):
         return False
     await execute("DELETE FROM checklist_items WHERE checklist_id = ? "
+                  "AND NOT EXISTS (SELECT 1 FROM checklists WHERE id = ?)", (cid, cid))
+    await execute("DELETE FROM checklist_events WHERE checklist_id = ? "
                   "AND NOT EXISTS (SELECT 1 FROM checklists WHERE id = ?)", (cid, cid))
     return True

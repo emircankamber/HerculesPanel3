@@ -1708,43 +1708,65 @@ def _template_out(tpl: dict, rec: dict | None) -> dict:
             "threshold_limits": {k: {"min": lo, "max": hi, "integer": is_int} for k, (lo, hi, is_int) in ckl.THRESHOLD_LIMITS.items()}}
 
 
-def _checklist_out(cl: dict, items: list[dict], user: dict, detail: bool = True) -> dict:
+def _checklist_out(cl: dict, items: list[dict], user: dict, detail: bool = True, events: list | None = None) -> dict:
     staff = user["role"] in ("owner", "admin")
+    is_open = cl["status"] == "open"
     values = (cl.get("snapshot") or {}).get("values") or {}
     th = cl.get("thresholds") or ckl.DEFAULT_THRESHOLDS
     critical_stages = {s["key"] for s in cl.get("stages") or [] if s.get("critical")}
-    out_items, done, critical_open = [], 0, 0
+    # Gerekçeyle geçilen otomatik maddeler yalnızca KİLİTLİ listede geçerli (kilit açılınca sıfırlanır)
+    overridden = set() if is_open else {o.get("item_id") for o in cl.get("overridden") or []}
+    out_items, done, critical_open, manual_open, auto_unpassed = [], 0, 0, 0, []
     for it in items:
         o = {"id": it["id"], "stage_key": it["stage_key"], "kind": it["kind"], "text": it["text"],
              "checked_by": it.get("checked_by"), "checked_at": it.get("checked_at"), "note": it.get("note") or "",
              "created_by": it.get("created_by")}
         if it["kind"] == "auto":
             ev = ckl.evaluate_auto(it.get("auto_key"), values, th)
+            ov = ev["status"] != "pass" and it["id"] in overridden
             o.update({"auto_key": it.get("auto_key"), "auto_status": ev["status"], "auto_display": ev["display"],
-                      "auto_value": ev["value"], "checked": ev["status"] == "pass", "checked_by": None, "checked_at": None})
+                      "auto_value": ev["value"], "auto_override": ov,
+                      "checked": ev["status"] == "pass" or ov, "checked_by": None, "checked_at": None})
+            if ev["status"] != "pass":
+                auto_unpassed.append({"item_id": it["id"], "auto_key": it.get("auto_key"), "text": it["text"],
+                                      "status": ev["status"], "display": ev["display"]})
         else:
             o["checked"] = bool(it.get("checked"))
+            manual_open += not o["checked"]
         done += o["checked"]
         if not o["checked"] and it["stage_key"] in critical_stages:
             critical_open += 1
         out_items.append(o)
     total = len(out_items)
     complete = total > 0 and done == total
-    is_open = cl["status"] == "open"
+    manual_complete = total > 0 and manual_open == 0
     can_edit = is_open and (staff or cl["user_id"] == user["user_id"])
     out = {
         "id": cl["id"], "title": cl.get("title"), "analysis_key": cl["analysis_key"], "marketplace": cl["marketplace"],
         "owner_email": cl.get("user_email"), "is_mine": cl["user_id"] == user["user_id"],
         "status": cl["status"], "locked_by": cl.get("locked_by"), "locked_at": cl.get("locked_at"),
+        "approval_reason": None if is_open else cl.get("approval_reason"),
+        "overridden_count": 0 if is_open else len(cl.get("overridden") or []),
+        "analysis_fetched_at": (cl.get("snapshot") or {}).get("fetched_at"),
         "created_at": cl["created_at"], "updated_at": cl["updated_at"],
-        "progress": {"done": done, "total": total, "critical_open": critical_open, "complete": complete},
-        "can_edit": can_edit, "can_lock": staff and is_open and complete, "can_delete": can_edit,
+        "progress": {"done": done, "total": total, "critical_open": critical_open, "complete": complete,
+                     "manual_open": manual_open, "manual_complete": manual_complete},
+        "can_edit": can_edit, "can_delete": can_edit,
+        # Manuel/özel maddeler tamamsa onaylanabilir; geçmeyen/veri olmayan otomatik madde varsa gerekçe zorunlu
+        "can_lock": staff and is_open and manual_complete,
+        "needs_reason": is_open and bool(auto_unpassed),
+        "auto_unpassed": auto_unpassed if is_open else [],
+        "can_unlock": user["role"] == "owner" and not is_open,
     }
     if detail:
         snap = cl.get("snapshot") or {}
         out.update({"stages": cl.get("stages") or [], "thresholds": th, "items": out_items,
                     "snapshot": {k: snap.get(k) for k in ("keyword", "marketplace", "analysis_mode", "fetched_at", "category")}
-                    | {"values": values}})
+                    | {"values": values},
+                    "events": [{"kind": e["kind"], "by": e.get("by_email"), "at": e["at"], "reason": e.get("reason"),
+                                "overridden": [{"text": x.get("text"), "status": x.get("status"), "display": x.get("display")}
+                                               for x in ((e.get("details") or {}).get("overridden") or [])]}
+                               for e in events or []]})
     return out
 
 
@@ -1816,8 +1838,7 @@ async def checklist_create(req: ChecklistCreate, user: dict = Depends(require_us
     stages = [{k: s[k] for k in ("key", "title", "subtitle", "critical")} for s in tpl["stages"]]
     cid = await db.create_checklist(user["user_id"], user["email"], req.analysis_key, req.marketplace, title,
                                     snapshot, stages, th, items)
-    cl = await db.get_checklist(cid)
-    return _checklist_out(cl, await db.checklist_items(cid), user)
+    return await _checklist_detail(cid, user)
 
 
 @app.get("/api/checklists")
@@ -1830,8 +1851,8 @@ async def checklist_list(user: dict = Depends(require_user)):
 
 @app.get("/api/checklists/{cid}")
 async def checklist_get(cid: int, user: dict = Depends(require_user)):
-    cl = await _get_checklist_for(cid, user)
-    return _checklist_out(cl, await db.checklist_items(cid), user)
+    await _get_checklist_for(cid, user)
+    return await _checklist_detail(cid, user)
 
 
 class ChecklistItemUpdate(BaseModel):
@@ -1852,7 +1873,7 @@ async def checklist_item_update(cid: int, item_id: int, req: ChecklistItemUpdate
     note = (req.note or "").strip() or None
     if not await db.set_item_state(cid, item_id, req.checked, note, user["email"]):
         raise HTTPException(423, "Liste onaylanıp kilitlendi — değiştirilemez")
-    return _checklist_out(await db.get_checklist(cid), await db.checklist_items(cid), user)
+    return await _checklist_detail(cid, user)
 
 
 class ChecklistCustomItem(BaseModel):
@@ -1868,7 +1889,7 @@ async def checklist_item_add(cid: int, req: ChecklistCustomItem, user: dict = De
         raise HTTPException(422, "Madde metni boş olamaz")
     if await db.add_custom_item(cid, req.stage_key, text, user["email"]) is None:
         raise HTTPException(423, "Liste onaylanıp kilitlendi — değiştirilemez")
-    return _checklist_out(await db.get_checklist(cid), await db.checklist_items(cid), user)
+    return await _checklist_detail(cid, user)
 
 
 @app.delete("/api/checklists/{cid}/items/{item_id}")
@@ -1882,25 +1903,63 @@ async def checklist_item_delete(cid: int, item_id: int, user: dict = Depends(req
         raise HTTPException(400, "Yalnızca özel eklenen maddeler silinebilir")
     if not await db.delete_custom_item(cid, item_id):
         raise HTTPException(423, "Liste onaylanıp kilitlendi — değiştirilemez")
-    return _checklist_out(await db.get_checklist(cid), await db.checklist_items(cid), user)
+    return await _checklist_detail(cid, user)
+
+
+class ChecklistReasonIn(BaseModel):
+    reason: str | None = Field(None, max_length=1000)
+
+
+CK_REASON_MIN = 5
+
+
+def _clean_reason(reason: str | None) -> str:
+    return " ".join((reason or "").split())
+
+
+async def _checklist_detail(cid: int, user: dict) -> dict:
+    return _checklist_out(await db.get_checklist(cid), await db.checklist_items(cid), user,
+                          events=await db.checklist_events(cid))
 
 
 @app.post("/api/checklists/{cid}/lock")
-async def checklist_lock(cid: int, user: dict = Depends(require_staff)):
-    """Owner/admin onaylayıp kilitler — yalnızca tüm maddeler (otomatikler dahil) tamamsa."""
+async def checklist_lock(cid: int, body: ChecklistReasonIn | None = None, user: dict = Depends(require_staff)):
+    """Owner/admin onaylayıp kilitler. Manuel/özel maddelerin hepsi işaretli olmalı. Geçmeyen ya da
+    "Veri yok" olan otomatik madde varsa gerekçe ZORUNLU; gerekçe, onaylayan ve zaman saklanır."""
     cl = await _get_editable(cid, user)
     out = _checklist_out(cl, await db.checklist_items(cid), user)
-    if not out["progress"]["complete"]:
-        p = out["progress"]
-        raise HTTPException(409, f"Tüm maddeler tamamlanmadan onaylanamaz ({p['done']}/{p['total']})")
-    if not await db.lock_checklist(cid, user["email"]):
+    p = out["progress"]
+    if not p["manual_complete"]:
+        raise HTTPException(409, f"Manuel maddeler tamamlanmadan onaylanamaz ({p['manual_open']} açık madde)")
+    reason = _clean_reason(body.reason if body else None)
+    if out["needs_reason"] and len(reason) < CK_REASON_MIN:
+        raise HTTPException(422, f"{len(out['auto_unpassed'])} otomatik madde geçmedi ya da veri yok — "
+                                 f"onay için gerekçe zorunlu (en az {CK_REASON_MIN} karakter)")
+    overridden = out["auto_unpassed"]
+    locked_at = await db.lock_checklist(cid, user["email"], reason or None, overridden)
+    if not locked_at:
         raise HTTPException(423, "Liste zaten kilitli")
-    # Yarış kontrolü: kilitleme anında bir madde geri alındıysa kilidi kaldır
+    # Yarış kontrolü: kilitleme anında bir manuel madde geri alındıysa / madde eklendiyse kilidi kaldır
     after = _checklist_out(await db.get_checklist(cid), await db.checklist_items(cid), user)
     if not after["progress"]["complete"]:
-        await db.unlock_checklist(cid)
+        await db.revert_lock(cid, locked_at)
         raise HTTPException(409, "Kilitleme sırasında bir madde değişti — tekrar deneyin")
-    return after
+    await db.record_lock_event(cid, user["email"], locked_at, reason or None, overridden)
+    return await _checklist_detail(cid, user)
+
+
+@app.post("/api/checklists/{cid}/unlock")
+async def checklist_unlock(cid: int, body: ChecklistReasonIn | None = None, user: dict = Depends(require_owner)):
+    """Yalnızca owner, gerekçe yazarak kilitli listeyi açar. Kim/ne zaman/neden ve önceki onay olaya yazılır."""
+    cl = await _get_checklist_for(cid, user)
+    if cl["status"] != "locked":
+        raise HTTPException(409, "Liste kilitli değil")
+    reason = _clean_reason(body.reason if body else None)
+    if len(reason) < CK_REASON_MIN:
+        raise HTTPException(422, f"Kilidi açmak için gerekçe zorunlu (en az {CK_REASON_MIN} karakter)")
+    if not await db.unlock_checklist(cid, user["email"], reason):
+        raise HTTPException(409, "Liste aynı anda değişti — tekrar deneyin")
+    return await _checklist_detail(cid, user)
 
 
 @app.delete("/api/checklists/{cid}")
