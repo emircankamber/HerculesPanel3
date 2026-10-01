@@ -63,6 +63,7 @@
       <button data-view="home" class="nav-btn active"><span class="material-symbols-outlined">space_dashboard</span>Ana Sayfa</button>
       <button data-view="search" class="nav-btn"><span class="material-symbols-outlined">monitoring</span>Ürün Analizi</button>
       <button data-view="checklists" class="nav-btn"><span class="material-symbols-outlined">checklist</span>Kontrol Listesi</button>
+      <button data-view="launch" class="nav-btn"><span class="material-symbols-outlined">rocket_launch</span>Lansman Raporu</button>
       <button data-view="keywords" class="nav-btn"><span class="material-symbols-outlined">manage_search</span>Keyword Araştırma</button>
       <button data-view="competitors" class="nav-btn"><span class="material-symbols-outlined">compare_arrows</span>Rakip Analizi</button>
       <button data-view="trends" class="nav-btn"><span class="material-symbols-outlined">trending_up</span>Trendler &amp; Fırsatlar</button>
@@ -233,6 +234,119 @@
 
       <!-- ===================== ARAŞTIRMA KONTROL LİSTESİ ===================== -->
       <!-- Otomatik maddeler sunucudaki analiz snapshot'ından değerlendirilir; kilit ve görünürlük sunucuda. -->
+      <section id="view-launch" class="view">
+        <div class="card card-pad hero-bg">
+          <div class="max-w-2xl">
+            <div class="flex flex-wrap items-center gap-2"><span class="chip chip-dot ok">Yapılacaklar + Bütçe</span><span class="text-xs text-secondary">tek rapor · PDF olarak kaydedilir</span></div>
+            <h1 class="font-display text-[26px] sm:text-[32px] font-semibold tracking-tight leading-tight mt-3">Lansman Raporu</h1>
+            <p class="text-sm text-on-surface-variant mt-2 leading-relaxed">İlk sevkiyat maliyet/kâr tablosu, Amazon Vine, Creator Connections ve SP+SD+SB reklam bütçesi. Reklam ve Vine tek varyasyonda açılır; diğerleri organik büyür. Bu işlem MCP çağrısı yapmaz — rapor yalnızca bu formdaki değerlerle hesaplanır.</p>
+          </div>
+        </div>
+        <div id="lr-prefill" class="status-line mt-4"></div>
+        <form id="lr-form" class="flex flex-col gap-4 mt-4" novalidate>
+          <div class="card card-pad">
+            <h3 class="font-display text-lg font-semibold">Ürün</h3>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+              <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Ürün adı (rapor başlığı)</span><input id="lr-product" class="field w-full mt-1" type="text" maxlength="120" required placeholder="örn. Manyetik Bambu Kesme Tahtası"></label>
+              <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Ana keyword</span><input id="lr-keyword" class="field w-full mt-1" type="text" maxlength="200" required placeholder="örn. bamboo cutting board"></label>
+            </div>
+          </div>
+
+          <div class="card card-pad">
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              <div><h3 class="font-display text-lg font-semibold">Varyasyonlar</h3>
+                <p class="text-xs text-secondary mt-0.5">1–4 varyasyon. Reklam ve Vine yalnızca işaretlenen varyasyonda açılır. Sepet ağırlığı boşsa sevkiyat adetlerinin payı kullanılır.</p></div>
+              <button type="button" id="lr-var-add" class="btn btn-outline btn-sm"><span class="material-symbols-outlined">add</span>Varyasyon ekle</button>
+            </div>
+            <div id="lr-vars" class="flex flex-col gap-3 mt-4"></div>
+          </div>
+
+          <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <div class="card card-pad">
+              <h3 class="font-display text-lg font-semibold">Ücretler &amp; İade</h3>
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mt-4">
+                <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Referral oranı (%)</span><input id="lr-referral" class="field w-full mt-1" type="number" min="0" max="99" step="0.1" value="15"></label>
+                <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">İade oranı (%)</span><input id="lr-return" class="field w-full mt-1" type="number" min="0" max="99" step="0.01" value="5"></label>
+                <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Vine kayıt ücreti ($)</span><input id="lr-vine-fee" class="field w-full mt-1" type="number" min="0" step="1" value="200"></label>
+              </div>
+              <p class="text-[11px] text-secondary mt-2">Vine kayıt ücreti standart $200 (parent-level); fiyat $100'ın altındaysa Amazon'un düşük tier kurallarını kontrol edin.</p>
+            </div>
+            <div class="card card-pad">
+              <h3 class="font-display text-lg font-semibold">Reklam Bütçesi</h3>
+              <div class="flex flex-wrap gap-4 mt-3 text-sm">
+                <label class="flex items-center gap-2"><input type="radio" name="lr-budget" value="acos" checked> Hedef ACOS</label>
+                <label class="flex items-center gap-2"><input type="radio" name="lr-budget" value="daily"> Günlük bütçe ($)</label>
+              </div>
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-3">
+                <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Hedef ACOS (%)</span><input id="lr-acos" class="field w-full mt-1" type="number" min="0.1" max="100" step="0.1" value="11"></label>
+                <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Günlük toplam bütçe ($)</span><input id="lr-daily" class="field w-full mt-1" type="number" min="1" step="1" placeholder="örn. 300" disabled></label>
+              </div>
+              <p class="text-[11px] text-secondary mt-2">Kanal dağılımı SP : SD : SB = 1 : 0,35 : 0,40.</p>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <div class="card card-pad">
+              <h3 class="font-display text-lg font-semibold">Amazon Vine</h3>
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-4">
+                <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">ABD Vine adedi</span><input id="lr-us-vine" class="field w-full mt-1" type="number" min="1" step="1" value="30"></label>
+              </div>
+              <label class="flex items-center gap-2 text-sm mt-4"><input type="checkbox" id="lr-sv-on"> İkinci Vine pazarı (yalnızca Vine, satış yok)</label>
+              <div id="lr-sv" class="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-3" style="display:none;">
+                <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Pazar adı</span><input id="lr-sv-name" class="field w-full mt-1" type="text" maxlength="60" value="Kanada (CA)"></label>
+                <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Stok kaynağı</span>
+                  <select id="lr-sv-src" class="field w-full mt-1"><option value="extra">Ek / ayrı sevkiyat</option><option value="main">Ana partiden ayrılır</option></select></label>
+                <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Gönderilen adet</span><input id="lr-sv-total" class="field w-full mt-1" type="number" min="1" step="1" value="40"></label>
+                <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Vine'a kaydedilen adet</span><input id="lr-sv-enrolled" class="field w-full mt-1" type="number" min="1" step="1" placeholder="boşsa gönderilen adet"></label>
+              </div>
+            </div>
+            <div class="card card-pad">
+              <h3 class="font-display text-lg font-semibold">Creator Connections</h3>
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-4">
+                <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Komisyon oranı (%)</span><input id="lr-cc" class="field w-full mt-1" type="number" min="0" max="99" step="0.1" value="15"></label>
+              </div>
+              <div class="flex flex-wrap gap-4 mt-3 text-sm">
+                <label class="flex items-center gap-2"><input type="radio" name="lr-ccmode" value="scenarios" checked> Düşük / Orta senaryo</label>
+                <label class="flex items-center gap-2"><input type="radio" name="lr-ccmode" value="expected"> Tek beklenen adet</label>
+              </div>
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mt-3">
+                <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Düşük (aylık adet)</span><input id="lr-cc-low" class="field w-full mt-1" type="number" min="0" step="1" value="30"></label>
+                <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Orta (aylık adet)</span><input id="lr-cc-mid" class="field w-full mt-1" type="number" min="0" step="1" value="80"></label>
+                <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Beklenen (aylık adet)</span><input id="lr-cc-exp" class="field w-full mt-1" type="number" min="0" step="1" placeholder="örn. 50" disabled></label>
+              </div>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <div class="card card-pad">
+              <h3 class="font-display text-lg font-semibold">Ana Keyword Verisi <span class="chip na !text-[10px] align-middle">aylık</span></h3>
+              <p class="text-xs text-secondary mt-0.5">SellerSprite verisi aylıktır. Önerilen ACOS = Bid ÷ (Dönüşüm × reklam varyasyonunun fiyatı) — panelin pazar ortalamalı ACOS'u kullanılmaz.</p>
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-4">
+                <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Aylık satış</span><input id="lr-kw-purch" class="field w-full mt-1" type="number" min="0" step="1"></label>
+                <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Aylık tıklama</span><input id="lr-kw-clicks" class="field w-full mt-1" type="number" min="0" step="1"></label>
+                <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Ortalama PPC bid ($)</span><input id="lr-kw-bid" class="field w-full mt-1" type="number" min="0" step="0.01"></label>
+                <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Ortalama piyasa fiyatı ($)</span><input id="lr-kw-price" class="field w-full mt-1" type="number" min="0" step="0.01"></label>
+              </div>
+            </div>
+            <div class="card card-pad">
+              <h3 class="font-display text-lg font-semibold">Kampanya</h3>
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-4">
+                <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Kampanya günü</span><input id="lr-days" class="field w-full mt-1" type="number" min="1" max="365" step="1" value="60"></label>
+              </div>
+              <p class="text-[11px] text-secondary mt-2">İlk parti stokunun tükenme süresi. Yalnızca reklam ve Creator Connections toplamlarının hesabında kullanılır; rapor metninde görünmez.</p>
+            </div>
+          </div>
+
+          <div class="set-actionbar card">
+            <div class="min-w-0">
+              <div class="font-semibold text-sm">Raporu oluştur</div>
+              <div id="lr-status" class="text-xs text-secondary mt-0.5">Rapor yeni sekmede açılır; oradan “PDF olarak kaydet”.</div>
+            </div>
+            <button type="submit" id="lr-submit" class="btn btn-primary"><span class="material-symbols-outlined">picture_as_pdf</span>Raporu Oluştur</button>
+          </div>
+        </form>
+      </section>
+
       <section id="view-checklists" class="view">
         <div class="card card-pad hero-bg">
           <div class="flex flex-col md:flex-row md:items-end justify-between gap-4">
@@ -833,6 +947,7 @@
         <div class="flex flex-wrap gap-2 shrink-0">
           <button class="export-report-btn btn btn-outline" title="Tam raporu Excel olarak indir"><span class="material-symbols-outlined">description</span>Rapor İndir</button>
           <button class="export-keywords-btn btn btn-outline" title="Sadece keyword tablosunu Excel olarak indir"><span class="material-symbols-outlined">table_view</span>Keyword Tablosu İndir</button>
+          <button class="lr-start-btn btn btn-outline" title="Bu analizin ana keyword verisi ve iade oranıyla lansman raporu formunu aç (MCP çağrısı yapmaz)"><span class="material-symbols-outlined">rocket_launch</span>Lansman Raporu</button>
           <button class="ck-start-btn btn btn-primary" title="Bu analizin anlık kopyasıyla araştırma kontrol listesi oluştur (MCP çağrısı yapmaz)"><span class="material-symbols-outlined">checklist</span>Kontrol Listesi Başlat</button>
         </div>
       </div>

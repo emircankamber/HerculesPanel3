@@ -267,6 +267,12 @@ yüzden backend'e hiç bağlanmamalı, sahte veri olur.
     başka bir owner'ı ve kendini düşürebilir). **Kilitlenme koruması:** son kalan owner
     düşürülemez → 409 (`set_user_role` → `LastOwnerError`; koşul UPDATE içinde de var ve
     sonrasında 0 owner kalırsa değişiklik geri alınır).
+- **Kalıcı owner (`OWNER_EMAILS`):** Vercel ortam değişkeni, virgülle ayrılmış e-postalar
+  (küçük harfe çevrilip boşlukları temizlenir; istek anında okunur — `database.permanent_owner_emails`).
+  E-postaları KODA YAZMA (repo herkese açık). Listedekiler `_migrate_schema`'da owner yapılır, bu
+  e-postayla yeni kayıt doğrudan owner olur, `get_user_role` onları DB'deki değerden bağımsız owner
+  sayar. Kimse (kendileri dahil) düşüremez → 409 (`PermanentOwnerError`); `/api/users` `permanent`
+  bayrağı döner, rol ekranında seçim kilitli + "kalıcı owner" etiketi. Değişken yoksa hiçbir şey değişmez.
 - **Video linkleri:** yalnızca https. YouTube ID'si sunucuda (`youtube_video_id`) ve
   istemcide (`YT_ID_RE`) 11 karakter `[A-Za-z0-9_-]` olarak doğrulanır, yalnızca bilinen
   YouTube host'larında; gömme `youtube-nocookie.com/embed/{id}`. Diğer linkler yeni sekmede
@@ -314,3 +320,29 @@ satır kapsayıcının `overflow:hidden`'ı ile gizleniyor. Favicon: `assets/her
 - **Şablon:** tek kayıt (`checklist_template`, yoksa `DEFAULT_TEMPLATE`), yalnızca owner
   düzenler. 5 aşama ve otomatik maddeler sabit; başlıklar, manuel maddeler ve eşikler
   değişir. "Patent, Marka & Hukuk" (`legal`) aşamasındaki açık maddeler kritik sayılır.
+
+## Lansman Raporu (`api/launch_report.py` + `POST /api/launch-report`)
+
+- Kaynak: kullanıcının `amazon-urun-lansman-raporu` skill'i. Hesaplama metodolojisi BİREBİR
+  (formüller ve işlem sırası dahil) — skill'in orijinal Python kodu test oracle'ı olarak çalıştırılıp
+  her rakam `==` ile karşılaştırıldı (1/2 varyasyon orijinalle, 4 varyasyon orijinalle doğrulanmış
+  N-varyasyonlu transliterasyonla). Formülü "sadeleştirmek" ya da işlem sırasını değiştirmek
+  kuruşluk farklar çıkarır — değiştirirsen oracle testini yeniden çalıştır.
+- Saf modül, MCP çağrısı YOK, endpoint `require_auth`. weasyprint YOK (Vercel'de sistem
+  kütüphaneleri yok): sunucu HTML döner, panel Blob URL ile yeni sekmede açar, tarayıcıdan
+  "PDF olarak kaydet". Sayfa numarası `@page @bottom-center` (Chromium 131+ destekler).
+  Rapor sayfası kendi CSP'sini taşır (yalnızca nonce'lu tek script: yazdır butonu); tüm form
+  metinleri `esc()`, @page içeriği `css_str()` ile kaçırılır.
+- Kurallar (skill): TOPLAM MALİYET yalnızca COGS; Vine ek gideri (FBA+kayıt), Reklam, CC ayrı
+  gider satırları; ACOS = kampanya reklamı / Bölüm 4 brüt gelir; kampanya günü yalnızca iç hesapta
+  (metinde YOK — "~60 gün sonra" cümlesi Amazon'un komisyon ödeme süresidir, kampanya günü değil);
+  "optimal"/"%100" yok; bölüm sırası 1-10; reklam ve Vine TEK varyasyonda.
+- Veri farkları: SellerSprite keyword verisi AYLIK → Bölüm 2 "Aylık Satış". "Önerilen ACOS" =
+  Bid ÷ (purchases/clicks × reklam varyasyonunun KENDİ fiyatı) — panelin pazar-ortalama-fiyatlı
+  ACOS'u kopyalanmaz. Ürün Analizi'nden açılınca exact keyword satırı (purchases, clicks, bid,
+  avgPrice) ve `market_return_rate` önceden dolar.
+- Şablondan bilinçli sapmalar (rakamları etkilemez): tek senaryolu CC tablosunda başlık/sütun
+  sayısı düzeltildi; tam sayı olmayan oranlar ondalıkla yazılır (%6.4, şablon %6 derdi); Bölüm 2'ye
+  "türetilmiştir" dipnotu (skill metni bunu istiyor); 1 varyasyonda sepet ağırlığı satırı yok;
+  sepet ağırlığı girilmezse sevkiyat adedi payı kullanılır.
+

@@ -3,6 +3,7 @@ Veritabanı katmanı — db_adapter üzerinden Postgres (paylaşımlı/kalıcı)
 SQLite (yerel test) ile çalışır. Bkz. db_adapter.py docstring.
 """
 import json
+import os
 import time
 import hashlib
 import secrets
@@ -153,6 +154,12 @@ async def _migrate_schema():
     await _add_column_if_missing("checklists", "approval_reason", "TEXT")
     await _add_column_if_missing("checklists", "overridden_json", "TEXT")
     await execute("UPDATE users SET role = 'member' WHERE role IS NULL OR role NOT IN ('owner', 'admin', 'member')")
+    # Kalıcı owner'lar (OWNER_EMAILS): listede olan mevcut kullanıcılar owner yapılır.
+    # Değişken yoksa küme boş -> hiçbir şey yapılmaz.
+    perm = sorted(permanent_owner_emails())
+    if perm:
+        marks = ",".join("?" for _ in perm)
+        await execute(f"UPDATE users SET role = 'owner' WHERE LOWER(email) IN ({marks})", tuple(perm))
     await execute(
         "UPDATE users SET role = 'owner' WHERE id = (SELECT MIN(id) FROM users) "
         "AND NOT EXISTS (SELECT 1 FROM users WHERE role = 'owner')")
@@ -182,7 +189,7 @@ async def create_user(email: str, password: str) -> dict:
         raise ValueError("Bu e-posta zaten kayıtlı")
     salt = secrets.token_hex(16)
     pw_hash = _hash_password(password, salt)
-    role = "owner" if await user_count() == 0 else "member"
+    role = "owner" if email in permanent_owner_emails() or await user_count() == 0 else "member"
     user_id = await execute_returning_id(
         "INSERT INTO users (email, password_hash, salt, created_at, role) VALUES (?, ?, ?, ?, ?)",
         (email, pw_hash, salt, int(time.time()), role))
@@ -559,13 +566,33 @@ class LastOwnerError(Exception):
     """Son kalan owner'ı düşürme girişimi."""
 
 
+class PermanentOwnerError(Exception):
+    """OWNER_EMAILS'teki kalıcı owner'ı düşürme girişimi."""
+
+
+def permanent_owner_emails() -> frozenset[str]:
+    """
+    Kalıcı owner'lar Vercel ortam değişkeni OWNER_EMAILS'ten okunur (virgülle ayrılmış).
+    E-postalar koda YAZILMAZ (repo herkese açık). İstek anında okunur; yoksa boş küme
+    -> hiçbir davranış değişmez.
+    """
+    raw = os.environ.get("OWNER_EMAILS") or ""
+    return frozenset(e.strip().lower() for e in raw.split(",") if e.strip())
+
+
+def _is_permanent(email) -> bool:
+    return bool(email) and str(email).strip().lower() in permanent_owner_emails()
+
+
 def _norm_role(role) -> str:
     return role if role in VALID_ROLES else "member"
 
 
 async def get_user_role(user_id: int) -> str | None:
-    row = await fetch_one("SELECT role FROM users WHERE id = ?", (user_id,))
-    return _norm_role(row.get("role")) if row else None
+    row = await fetch_one("SELECT role, email FROM users WHERE id = ?", (user_id,))
+    if not row:
+        return None
+    return "owner" if _is_permanent(row.get("email")) else _norm_role(row.get("role"))
 
 
 async def owner_count() -> int:
@@ -575,8 +602,9 @@ async def owner_count() -> int:
 
 async def list_users() -> list[dict]:
     rows = await fetch_all("SELECT id, email, role, created_at FROM users ORDER BY id")
-    return [{"id": r["id"], "email": r["email"], "created_at": r["created_at"], "role": _norm_role(r.get("role"))}
-            for r in rows]
+    return [{"id": r["id"], "email": r["email"], "created_at": r["created_at"],
+             "role": "owner" if _is_permanent(r["email"]) else _norm_role(r.get("role")),
+             "permanent": _is_permanent(r["email"])} for r in rows]
 
 
 async def set_user_role(user_id: int, role: str):
@@ -591,6 +619,10 @@ async def set_user_role(user_id: int, role: str):
     current = await get_user_role(user_id)
     if current is None:
         raise ValueError("Kullanıcı bulunamadı")
+    if role != "owner":
+        row = await fetch_one("SELECT email FROM users WHERE id = ?", (user_id,))
+        if row and _is_permanent(row["email"]):
+            raise PermanentOwnerError("Bu kullanıcı kalıcı owner (OWNER_EMAILS) — rolü düşürülemez")
     if current == "owner" and role != "owner":
         if await owner_count() <= 1:
             raise LastOwnerError("Son kalan owner düşürülemez — önce başka birini owner yapın")

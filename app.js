@@ -156,6 +156,7 @@ function showView(view) {
   if (view === "settings") loadSettings();
   if (view === "training") loadTraining();
   if (view === "checklists") loadChecklists();
+  if (view === "launch") lrEnsureVars();
   if (view === "trends") updateTrendsStale();
   // Chart.js gizli (display:none) kapsayıcıda 0 boyutla çizer — veri
   // görünümleri yalnızca görünür olduklarında (yeniden) render edilir.
@@ -806,6 +807,7 @@ function renderPanel(data) {
 
   // --- Kontrol listesi başlat (sunucu, kayıtlı analizin ANLIK KOPYASINI alır; MCP çağrısı yok) ---
   root.querySelector(".ck-start-btn").addEventListener("click", (e) => startChecklist(data, e.currentTarget));
+  root.querySelector(".lr-start-btn").addEventListener("click", () => openLaunchReport(data));
 
   const container = $("#result-container");
   container.innerHTML = "";
@@ -2626,13 +2628,17 @@ function renderRoles() {
   trnState.users.forEach(u => {
     const tr = document.createElement("tr");
     const lastOwner = u.role === "owner" && owners <= 1;
+    const perm = !!u.permanent;  // OWNER_EMAILS — sunucu düşürmeyi reddeder (409)
+    const locked = perm || lastOwner;
+    const lockMsg = perm ? "Kalıcı owner — düşürülemez" : lastOwner ? "Son owner — düşürülemez" : "";
     const isMe = u.id === currentUser.user_id;
     const opts = ["owner", "admin", "member"].map(r => `<option value="${r}" ${u.role === r ? "selected" : ""}>${ROLE_LABEL[r]}</option>`).join("");
-    tr.innerHTML = `<td class="l"><div class="font-medium truncate max-w-[150px] sm:max-w-[260px]" title="${esc(u.email)}">${esc(u.email)}${isMe ? ' <span class="chip na !text-[10px]">sen</span>' : ""}</div></td>
+    tr.innerHTML = `<td class="l"><div class="font-medium truncate max-w-[150px] sm:max-w-[260px]" title="${esc(u.email)}">${esc(u.email)}${isMe ? ' <span class="chip na !text-[10px]">sen</span>' : ""}</div>
+        ${perm ? '<div class="mt-0.5"><span class="chip ok !text-[10px] trn-perm" title="OWNER_EMAILS ortam değişkeninde tanımlı"><span class="material-symbols-outlined !text-[12px]" aria-hidden="true">lock</span>kalıcı owner</span></div>' : ""}</td>
       <td class="l hidden sm:table-cell"><span class="chip ${u.role === "owner" ? "ok" : u.role === "admin" ? "warn" : "na"}">${esc(ROLE_LABEL[u.role] || u.role)}</span></td>
       <td class="!text-center">
-        <select class="field !h-8 text-xs trn-role-sel" aria-label="Rol" ${lastOwner ? 'disabled title="Son kalan owner düşürülemez"' : ""}>${opts}</select>
-        <div class="trn-role-msg whitespace-normal leading-tight max-w-[150px] mx-auto text-[11px] mt-1 ${lastOwner ? "text-secondary" : "text-error"}">${lastOwner ? "Son owner — düşürülemez" : ""}</div>
+        <select class="field !h-8 text-xs trn-role-sel" aria-label="Rol" ${locked ? `disabled title="${esc(lockMsg)}"` : ""}>${opts}</select>
+        <div class="trn-role-msg whitespace-normal leading-tight max-w-[150px] mx-auto text-[11px] mt-1 ${locked ? "text-secondary" : "text-error"}">${esc(lockMsg)}</div>
       </td>`;
     const sel = tr.querySelector(".trn-role-sel");
     const msg = tr.querySelector(".trn-role-msg");
@@ -3028,3 +3034,149 @@ function renderTemplateEditor() {
     } catch (err) { msg.textContent = `Hata: ${err.message}`; msg.className = "text-xs text-error"; }
   });
 })();
+
+// ===========================================================================
+// LANSMAN RAPORU — hesaplama SUNUCUDA (api/launch_report.py); burada yalnızca form.
+// MCP çağrısı yok. Rapor HTML olarak döner, Blob URL ile yeni sekmede açılır.
+// ===========================================================================
+const LR_MAX_VARS = 4;
+const lrVal = (id) => { const v = $(`#${id}`).value.trim(); return v === "" ? null : Number(v); };
+
+function lrVarRow(v = {}) {
+  const row = document.createElement("div");
+  row.className = "lr-var rounded-xl border border-hairline p-3";
+  const f = (cls, label, attrs, val) => `<label class="block min-w-0"><span class="text-[11px] font-medium text-on-surface-variant">${label}</span>
+    <input class="field w-full mt-1 ${cls}" ${attrs} value="${val == null ? "" : esc(val)}"></label>`;
+  row.innerHTML = `
+    <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
+      <label class="flex items-center gap-2 text-sm font-medium"><input type="radio" name="lr-ads" class="lr-ads"> Reklam &amp; Vine bu varyasyonda</label>
+      <button type="button" class="lr-var-del icon-btn !text-error" title="Varyasyonu kaldır" aria-label="Varyasyonu kaldır"><span class="material-symbols-outlined">delete</span></button>
+    </div>
+    <div class="grid grid-cols-2 md:grid-cols-6 gap-3">
+      <div class="col-span-2 md:col-span-1">${f("lr-v-name", "İsim", 'type="text" maxlength="80" placeholder="örn. Tekli"', v.name)}</div>
+      ${f("lr-v-price", "Satış fiyatı ($)", 'type="number" min="0" step="0.01"', v.price)}
+      ${f("lr-v-cogs", "COGS ($)", 'type="number" min="0" step="0.01"', v.cogs)}
+      ${f("lr-v-fba", "FBA ücreti ($)", 'type="number" min="0" step="0.01"', v.fba)}
+      ${f("lr-v-units", "Sevkiyat adedi", 'type="number" min="0" step="1"', v.units)}
+      ${f("lr-v-share", "Sepet ağırlığı (%)", 'type="number" min="0" max="100" step="1" placeholder="otomatik"', v.share)}
+    </div>`;
+  row.querySelector(".lr-var-del").addEventListener("click", () => { row.remove(); lrSyncVars(); });
+  return row;
+}
+
+function lrSyncVars() {
+  const rows = $$("#lr-vars .lr-var");
+  rows.forEach(r => { r.querySelector(".lr-var-del").style.visibility = rows.length > 1 ? "visible" : "hidden"; });
+  if (rows.length && !rows.some(r => r.querySelector(".lr-ads").checked)) rows[0].querySelector(".lr-ads").checked = true;
+  $("#lr-var-add").disabled = rows.length >= LR_MAX_VARS;
+}
+
+function lrEnsureVars() {
+  if (!$$("#lr-vars .lr-var").length) { $("#lr-vars").appendChild(lrVarRow()); lrSyncVars(); }
+}
+
+/** Ürün Analizi'nden: ana keyword (exact satır) verisi + pazar iade oranı önceden dolar; hepsi düzenlenebilir. */
+function openLaunchReport(data) {
+  showView("launch");
+  const isAsin = data.analysis_mode === "asin";
+  const main = isAsin ? null : (data.keyword_rows || []).find(r => (r.keyword || "").toLowerCase() === (data.keyword || "").toLowerCase());
+  const set = (id, v) => { if (v != null && v !== "" && Number.isFinite(Number(v))) $(`#${id}`).value = v; };
+  if (!isAsin) $("#lr-keyword").value = data.keyword || "";
+  if (main) {
+    set("lr-kw-purch", main.purchases); set("lr-kw-clicks", main.clicks);
+    set("lr-kw-bid", main.bid != null ? Number(main.bid).toFixed(2) : null);
+    set("lr-kw-price", main.avgPrice != null ? Number(main.avgPrice).toFixed(2) : null);
+  }
+  if (data.market_return_rate != null) set("lr-return", (data.market_return_rate * 100).toFixed(2));
+  const src = [];
+  if (main) src.push(`"${data.keyword}" keyword verisi (aylık)`);
+  if (data.market_return_rate != null) src.push("iade oranı: pazar ortalaması");
+  const note = $("#lr-prefill");
+  note.textContent = src.length ? `✓ Ürün Analizi'nden dolduruldu — ${src.join(" · ")}. Tüm alanlar düzenlenebilir.`
+    : "Ürün Analizi'nde ana keyword satırı bulunamadı — keyword verisini elle girin.";
+  note.className = "status-line mt-4";
+}
+
+function lrPayload() {
+  const vars = $$("#lr-vars .lr-var").map(r => {
+    const g = (c) => r.querySelector(c).value.trim();
+    const num = (c) => g(c) === "" ? null : Number(g(c));
+    return { name: g(".lr-v-name"), price: num(".lr-v-price"), cogs: num(".lr-v-cogs"), fba: num(".lr-v-fba"),
+             units: num(".lr-v-units"), share: num(".lr-v-share"), _ads: r.querySelector(".lr-ads").checked };
+  });
+  const budget = document.querySelector('input[name="lr-budget"]:checked').value;
+  const ccmode = document.querySelector('input[name="lr-ccmode"]:checked').value;
+  const p = {
+    product_name: $("#lr-product").value.trim(), main_keyword: $("#lr-keyword").value.trim(),
+    variations: vars.map(({ _ads, ...v }) => v), ads_index: Math.max(0, vars.findIndex(v => v._ads)),
+    referral_pct: lrVal("lr-referral"), return_pct: lrVal("lr-return"), vine_fee: lrVal("lr-vine-fee"),
+    budget_mode: budget, target_acos_pct: budget === "acos" ? lrVal("lr-acos") : null, daily_budget: budget === "daily" ? lrVal("lr-daily") : null,
+    us_vine_units: lrVal("lr-us-vine"),
+    second_vine: $("#lr-sv-on").checked ? { name: $("#lr-sv-name").value.trim() || "Kanada (CA)", total: lrVal("lr-sv-total"),
+      enrolled: lrVal("lr-sv-enrolled"), from_main_batch: $("#lr-sv-src").value === "main" } : null,
+    cc_pct: lrVal("lr-cc"), cc_mode: ccmode, cc_low: lrVal("lr-cc-low"), cc_mid: lrVal("lr-cc-mid"),
+    cc_expected: ccmode === "expected" ? lrVal("lr-cc-exp") : null, campaign_days: lrVal("lr-days"),
+    keyword: { monthly_purchases: lrVal("lr-kw-purch"), monthly_clicks: lrVal("lr-kw-clicks"), bid: lrVal("lr-kw-bid"), market_avg_price: lrVal("lr-kw-price") },
+  };
+  // Boş bırakılan varsayılanlı alanları sunucu varsayılanına bırak
+  for (const k of ["referral_pct", "return_pct", "vine_fee", "cc_pct", "cc_low", "cc_mid", "campaign_days"]) if (p[k] == null) delete p[k];
+  return p;
+}
+
+function lrClientCheck(p) {
+  if (!p.product_name) return "Ürün adı gerekli.";
+  if (!p.main_keyword) return "Ana keyword gerekli.";
+  for (const [i, v] of p.variations.entries()) {
+    if (!v.name || v.price == null || v.cogs == null || v.fba == null || v.units == null) return `${i + 1}. varyasyonda isim, fiyat, COGS, FBA ve adet gerekli.`;
+  }
+  const shares = p.variations.map(v => v.share);
+  if (shares.some(x => x != null) && shares.some(x => x == null)) return "Sepet ağırlığını ya tüm varyasyonlara girin ya da hepsini boş bırakın.";
+  if (p.budget_mode === "daily" && !p.daily_budget) return "Günlük reklam bütçesini girin.";
+  if (p.us_vine_units == null) return "ABD Vine adedini girin.";
+  if (p.cc_mode === "expected" && p.cc_expected == null) return "Beklenen aylık influencer satışını girin.";
+  return "";
+}
+
+async function submitLaunchReport(e) {
+  e.preventDefault();
+  const status = $("#lr-status"), btn = $("#lr-submit");
+  const p = lrPayload();
+  const problem = lrClientCheck(p);
+  if (problem) { status.textContent = problem; status.className = "text-xs text-error mt-0.5"; return; }
+  // Pencere tıklama anında açılır (açılır pencere engelleyicisi), rapor gelince Blob URL'ye yönlenir.
+  const w = window.open("", "_blank");
+  if (w) { try { w.document.title = "Lansman raporu hazırlanıyor…"; w.document.body.textContent = "Lansman raporu hazırlanıyor…"; } catch (_) {} }
+  btn.disabled = true; status.textContent = "rapor hazırlanıyor…"; status.className = "text-xs text-secondary mt-0.5";
+  try {
+    const r = await apiFetch(`${API_BASE}/api/launch-report`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(p) });
+    if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(apiErrorText(b, r.status)); }
+    const url = URL.createObjectURL(new Blob([await r.text()], { type: "text/html;charset=utf-8" }));
+    setTimeout(() => URL.revokeObjectURL(url), 120000);
+    if (w && !w.closed) { w.opener = null; w.location.href = url; status.textContent = "Rapor yeni sekmede açıldı — “PDF olarak kaydet” ile indirin."; }
+    else {
+      status.innerHTML = `Açılır pencere engellendi. <a class="underline font-semibold" href="${url}" target="_blank" rel="noopener">Raporu aç</a>`;
+    }
+    status.className = "text-xs text-primary mt-0.5";
+  } catch (err) {
+    if (w && !w.closed) w.close();
+    status.textContent = `Hata: ${err.message}`; status.className = "text-xs text-error mt-0.5";
+  } finally { btn.disabled = false; }
+}
+
+(function initLaunchReport() {
+  const form = $("#lr-form");
+  if (!form) return;
+  $("#lr-var-add").addEventListener("click", () => { if ($$("#lr-vars .lr-var").length < LR_MAX_VARS) { $("#lr-vars").appendChild(lrVarRow()); lrSyncVars(); } });
+  $$('input[name="lr-budget"]').forEach(r => r.addEventListener("change", () => {
+    const daily = document.querySelector('input[name="lr-budget"]:checked').value === "daily";
+    $("#lr-daily").disabled = !daily; $("#lr-acos").disabled = daily;
+  }));
+  $$('input[name="lr-ccmode"]').forEach(r => r.addEventListener("change", () => {
+    const exp = document.querySelector('input[name="lr-ccmode"]:checked').value === "expected";
+    $("#lr-cc-exp").disabled = !exp; $("#lr-cc-low").disabled = exp; $("#lr-cc-mid").disabled = exp;
+  }));
+  $("#lr-sv-on").addEventListener("change", (e) => { $("#lr-sv").style.display = e.target.checked ? "grid" : "none"; });
+  form.addEventListener("submit", submitLaunchReport);
+  lrEnsureVars();
+})();
+

@@ -55,6 +55,7 @@ except ImportError:
     PORTFOLIO_AVAILABLE = False
 import database as db
 import checklist as ckl
+import launch_report as lr
 import excel_export
 import supplier_scoring as sup
 import launch_control as lc
@@ -1668,12 +1669,14 @@ async def users_set_role(target_id: int, req: RoleIn, user: dict = Depends(requi
     """
     Yalnızca owner'lar (rol her istekte DB'den okunur). Herkesi owner/admin/member
     yapabilir, başka bir owner'ı (ve kendini) düşürebilir — ama son kalan owner
-    düşürülemez (409).
+    ve OWNER_EMAILS'teki kalıcı owner'lar düşürülemez (409).
     """
     if await db.get_user_role(target_id) is None:
         raise HTTPException(404, "Kullanıcı bulunamadı")
     try:
         await db.set_user_role(target_id, req.role)
+    except db.PermanentOwnerError as e:
+        raise HTTPException(409, str(e))
     except db.LastOwnerError as e:
         raise HTTPException(409, str(e))
     return {"ok": True, "id": target_id, "role": await db.get_user_role(target_id),
@@ -1968,3 +1971,64 @@ async def checklist_delete(cid: int, user: dict = Depends(require_user)):
     if not await db.delete_checklist(cid):
         raise HTTPException(423, "Liste onaylanıp kilitlendi — silinemez")
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# LANSMAN RAPORU (amazon-urun-lansman-raporu skill metodolojisi — api/launch_report.py)
+# MCP çağrısı YOK; tüm girdiler formdan gelir. Rapor HTML döner, panel yeni sekmede
+# açar ve tarayıcıdan "PDF olarak kaydet" ile yazdırılır (weasyprint Vercel'de yok).
+# ---------------------------------------------------------------------------
+class LRVariation(BaseModel):
+    name: str = Field(..., min_length=1, max_length=80)
+    price: float = Field(..., gt=0, le=100000)
+    cogs: float = Field(..., ge=0, le=100000)
+    fba: float = Field(..., ge=0, le=10000)
+    units: int = Field(..., ge=0, le=1_000_000)
+    share: float | None = Field(None, ge=0, le=100)   # sepet ağırlığı (%); boşsa sevkiyat payı
+
+
+class LRSecondVine(BaseModel):
+    name: str = Field("Kanada (CA)", min_length=1, max_length=60)
+    total: int = Field(..., ge=1, le=100_000)
+    enrolled: int | None = Field(None, ge=1, le=100_000)
+    from_main_batch: bool = False
+
+
+class LRKeyword(BaseModel):
+    monthly_purchases: float | None = Field(None, ge=0)
+    monthly_clicks: float | None = Field(None, ge=0)
+    bid: float | None = Field(None, ge=0, le=1000)
+    market_avg_price: float | None = Field(None, ge=0, le=100000)
+
+
+class LaunchReportIn(BaseModel):
+    product_name: str = Field(..., min_length=1, max_length=120)
+    main_keyword: str = Field(..., min_length=1, max_length=200)
+    variations: list[LRVariation] = Field(..., min_length=1, max_length=lr.MAX_VARIATIONS)
+    ads_index: int = Field(0, ge=0, lt=lr.MAX_VARIATIONS)
+    referral_pct: float = Field(15, ge=0, lt=100)
+    budget_mode: str = Field("acos", pattern=r"^(daily|acos)$")
+    daily_budget: float | None = Field(None, gt=0, le=1_000_000)
+    target_acos_pct: float | None = Field(11, gt=0, le=100)
+    us_vine_units: int = Field(..., ge=1, le=100_000)
+    second_vine: LRSecondVine | None = None
+    vine_fee: float = Field(200, ge=0, le=100_000)
+    return_pct: float = Field(5, ge=0, lt=100)
+    cc_pct: float = Field(15, ge=0, lt=100)
+    cc_mode: str = Field("scenarios", pattern=r"^(expected|scenarios)$")
+    cc_expected: int | None = Field(None, ge=0, le=1_000_000)
+    cc_low: int = Field(30, ge=0, le=1_000_000)
+    cc_mid: int = Field(80, ge=0, le=1_000_000)
+    campaign_days: int = Field(60, ge=1, le=365)
+    keyword: LRKeyword = Field(default_factory=LRKeyword)
+
+
+@app.post("/api/launch-report")
+async def launch_report(req: LaunchReportIn, user: dict = Depends(require_auth)):
+    try:
+        html, _, _ = lr.generate(req.model_dump())
+    except lr.ReportError as e:
+        raise HTTPException(422, str(e))
+    return Response(content=html, media_type="text/html; charset=utf-8",
+                    headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+
