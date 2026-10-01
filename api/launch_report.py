@@ -260,7 +260,8 @@ def pct(x) -> str:
 
 
 def rate(x) -> str:
-    """Oran etiketi: tam sayıysa skill şablonuyla aynı (%15), değilse ondalığı korur (%6.4 -> %6 gibi yanıltmaz)."""
+    """Kullanıcının girdiği oranlar (referral, CC, iade) için: tam sayıysa şablonla aynı (%15), değilse ondalık (%6.4).
+    ACOS değerleri (Bölüm 7) bunu KULLANMAZ — skill kuralı gereği tam sayıya yuvarlanır."""
     v = x * 100
     if abs(v - round(v)) < 1e-9:
         return f"{v:.0f}"
@@ -430,7 +431,7 @@ def build_html(cfg: dict, r: dict, nonce: str | None = None) -> str:
     else:
         b7 = f"Bütçenin tamamı {ads_name}'e ayrılır."
     if cfg["target_daily_total"] is None:
-        b7 += f" Bütçe, kampanya dönemi genelinde %{rate(cfg['target_acos'])} hedef ACOS baz alınarak hesaplanmıştır."
+        b7 += f" Bütçe, kampanya dönemi genelinde %{cfg['target_acos']*100:.0f} hedef ACOS baz alınarak hesaplanmıştır."
 
     # Bölüm 9
     stock_line = " + ".join(f'{v["units"]:,} {esc(v["name"])}' for v in V) + " (ABD)"

@@ -342,7 +342,7 @@ satır kapsayıcının `overflow:hidden`'ı ile gizleniyor. Favicon: `assets/her
   ACOS'u kopyalanmaz. Ürün Analizi'nden açılınca exact keyword satırı (purchases, clicks, bid,
   avgPrice) ve `market_return_rate` önceden dolar.
 - Şablondan bilinçli sapmalar (rakamları etkilemez): tek senaryolu CC tablosunda başlık/sütun
-  sayısı düzeltildi; tam sayı olmayan oranlar ondalıkla yazılır (%6.4, şablon %6 derdi); Bölüm 2'ye
+  sayısı düzeltildi; kullanıcının girdiği oranlar (referral, CC, iade) tam sayı değilse ondalıkla yazılır (%6.4, şablon %6 derdi) — Bölüm 7 ACOS değerleri ve hedef ACOS cümlesi şablondaki gibi TAM SAYI; Bölüm 2'ye
   "türetilmiştir" dipnotu (skill metni bunu istiyor); 1 varyasyonda sepet ağırlığı satırı yok;
   sepet ağırlığı girilmezse sevkiyat adedi payı kullanılır.
 
