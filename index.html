@@ -62,6 +62,7 @@
     <nav class="flex lg:flex-col gap-1 px-3 pb-3 lg:pb-0 overflow-x-auto">
       <button data-view="home" class="nav-btn active"><span class="material-symbols-outlined">space_dashboard</span>Ana Sayfa</button>
       <button data-view="search" class="nav-btn"><span class="material-symbols-outlined">monitoring</span>Ürün Analizi</button>
+      <button data-view="checklists" class="nav-btn"><span class="material-symbols-outlined">checklist</span>Kontrol Listesi</button>
       <button data-view="keywords" class="nav-btn"><span class="material-symbols-outlined">manage_search</span>Keyword Araştırma</button>
       <button data-view="competitors" class="nav-btn"><span class="material-symbols-outlined">compare_arrows</span>Rakip Analizi</button>
       <button data-view="trends" class="nav-btn"><span class="material-symbols-outlined">trending_up</span>Trendler &amp; Fırsatlar</button>
@@ -228,6 +229,56 @@
         </div>
 
         <div id="result-container" class="mt-8"></div>
+      </section>
+
+      <!-- ===================== ARAŞTIRMA KONTROL LİSTESİ ===================== -->
+      <!-- Otomatik maddeler sunucudaki analiz snapshot'ından değerlendirilir; kilit ve görünürlük sunucuda. -->
+      <section id="view-checklists" class="view">
+        <div class="card card-pad hero-bg">
+          <div class="flex flex-col md:flex-row md:items-end justify-between gap-4">
+            <div class="max-w-2xl">
+              <div class="flex flex-wrap items-center gap-2"><span class="chip chip-dot ok">PL metodoloji</span><span class="text-xs text-secondary">5 aşama · ürün doğrulama protokolü</span></div>
+              <h1 class="font-display text-[26px] sm:text-[32px] font-semibold tracking-tight leading-tight mt-3">Private Label Araştırma Kontrol Listesi</h1>
+              <p class="text-sm text-on-surface-variant mt-2 leading-relaxed">Bir ürünü pazara sürmeden önce tamamlanması gereken kontroller. İlk iki aşamadaki 6 madde, liste başlatıldığı andaki analiz verisinden <b>otomatik</b> değerlendirilir.</p>
+            </div>
+            <div class="flex flex-wrap gap-2 shrink-0">
+              <button type="button" id="ck-tpl-open" class="btn btn-outline" style="display:none;"><span class="material-symbols-outlined">tune</span>Şablonu Düzenle</button>
+              <button type="button" class="btn btn-primary" data-goto="search"><span class="material-symbols-outlined">add_circle</span>Yeni Ürün Listesi</button>
+            </div>
+          </div>
+        </div>
+        <div id="ck-status" class="status-line mt-4"></div>
+
+        <div id="ck-guest" class="card card-pad mt-6 text-center py-12" style="display:none;">
+          <span class="material-symbols-outlined text-outline" style="font-size:36px">lock</span>
+          <div class="font-display text-lg font-semibold mt-2">Bu bölüm için giriş yapın</div>
+          <p class="text-sm text-secondary mt-1">Kontrol listeleri kişiye bağlıdır; kayıtlı bir hesapla giriş yapmalısın.</p>
+        </div>
+
+        <!-- Şablon editörü (yalnızca owner) -->
+        <section id="ck-tpl" class="card card-pad mt-6" style="display:none;">
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <div><div class="eyebrow">Yalnızca owner'lar</div><h3 class="font-display text-lg font-semibold mt-1">Şablon &amp; Eşikler</h3>
+              <p class="text-xs text-secondary mt-1">Değişiklikler yalnızca bundan sonra başlatılan listelere uygulanır; mevcut listeler kendi kopyalarını korur. Aşamalar ve otomatik maddeler sabittir.</p></div>
+            <span id="ck-tpl-meta" class="chip na"></span>
+          </div>
+          <div id="ck-tpl-th" class="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4"></div>
+          <div id="ck-tpl-stages" class="flex flex-col gap-4 mt-5"></div>
+          <div class="flex flex-wrap items-center gap-2 mt-5">
+            <button type="button" id="ck-tpl-save" class="btn btn-primary"><span class="material-symbols-outlined">save</span>Şablonu Kaydet</button>
+            <button type="button" id="ck-tpl-reset" class="btn btn-outline"><span class="material-symbols-outlined">restart_alt</span>Varsayılana Dön</button>
+            <button type="button" id="ck-tpl-close" class="btn btn-outline">Kapat</button>
+            <span id="ck-tpl-msg" class="text-xs"></span>
+          </div>
+        </section>
+
+        <div id="ck-body" class="grid grid-cols-1 xl:grid-cols-[300px_minmax(0,1fr)] gap-6 mt-6" style="display:none;">
+          <aside class="min-w-0">
+            <div class="flex items-baseline justify-between mb-3"><h3 class="font-display text-base font-semibold">Listeler</h3><span id="ck-list-count" class="text-xs text-secondary"></span></div>
+            <div id="ck-list" class="flex xl:flex-col gap-3 overflow-x-auto xl:overflow-visible pb-1"></div>
+          </aside>
+          <div id="ck-detail" class="min-w-0"></div>
+        </div>
       </section>
 
       <!-- ===================== KEYWORD ARAŞTIRMA ===================== -->
@@ -782,6 +833,7 @@
         <div class="flex flex-wrap gap-2 shrink-0">
           <button class="export-report-btn btn btn-outline" title="Tam raporu Excel olarak indir"><span class="material-symbols-outlined">description</span>Rapor İndir</button>
           <button class="export-keywords-btn btn btn-outline" title="Sadece keyword tablosunu Excel olarak indir"><span class="material-symbols-outlined">table_view</span>Keyword Tablosu İndir</button>
+          <button class="ck-start-btn btn btn-primary" title="Bu analizin anlık kopyasıyla araştırma kontrol listesi oluştur (MCP çağrısı yapmaz)"><span class="material-symbols-outlined">checklist</span>Kontrol Listesi Başlat</button>
         </div>
       </div>
 

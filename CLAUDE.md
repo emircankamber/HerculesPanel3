@@ -282,3 +282,23 @@ Dosyayı DEĞİŞTİRME/optimize etme. Kırpma `#svgView(viewBox(...))` ile yap�
 ~819 birimden darsa satır HİÇ çizilmiyor. Kenar çubuğunda viewBox bu boyutta tutulup alt
 satır kapsayıcının `overflow:hidden`'ı ile gizleniyor. Favicon: `assets/hercul-icon.svg`
 (yalnızca ikon şekilleri, orijinal değerlerle).
+
+## Araştırma Kontrol Listesi (`api/checklist.py` + `/api/checklists*`)
+
+- **Snapshot SUNUCUDA alınır:** `POST /api/checklists {analysis_key, marketplace}` →
+  `keyword_analysis` log kaydındaki son payload okunur (keyword modunda anahtar =
+  `req.keyword`, ASIN modunda `ASIN:{asin}`). MCP çağrısı YOK; istemci değer
+  göndermez (member otomatik maddeleri sahte değerle geçiremesin diye). Liste,
+  oluşturulduğu andaki snapshot + şablon + eşiklerin KOPYASINI taşır; analiz ya da
+  şablon sonradan değişse de mevcut liste değişmez.
+- **6 otomatik madde** (`checklist.evaluate_auto`, elle işaretlenemez — 400):
+  arama > 40.000 (yalnızca ana keyword'ün exact satırı; ASIN modunda "Veri yok"),
+  ilk 10 rakip ciro toplamı > $500.000, ort. yorum < 800, yeni marka ≥ 3
+  (pre_assessment'taki "Güçlü Yeni Marka" değeri), ilk 3 marka payı < %65,
+  ort. fiyat $25–$70 (iki uç dahil). Veri yoksa `no_data` → "Veri yok", geçti sayılmaz.
+- **Kilit:** owner/admin, yalnızca TÜM maddeler (otomatikler dahil) tamamsa kilitler.
+  Kilitli listede her değişiklik 423 (owner dahil); kural her UPDATE/DELETE'in içinde
+  (`AND status='open'`). Görünürlük: member yalnızca kendi listeleri (başkasınınkine 404).
+- **Şablon:** tek kayıt (`checklist_template`, yoksa `DEFAULT_TEMPLATE`), yalnızca owner
+  düzenler. 5 aşama ve otomatik maddeler sabit; başlıklar, manuel maddeler ve eşikler
+  değişir. "Patent, Marka & Hukuk" (`legal`) aşamasındaki açık maddeler kritik sayılır.

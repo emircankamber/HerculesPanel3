@@ -325,3 +325,19 @@ select.field{padding-right:28px;}
 .trn-matrix td{text-align:center;}
 .trn-matrix th:first-child,.trn-matrix td:first-child{position:sticky;left:0;background:var(--surface-lowest);z-index:1;text-align:left;}
 .trn-matrix thead th:first-child{background:var(--surface-low);}
+
+/* ---------- Araştırma Kontrol Listesi ---------- */
+.ck-card{min-width:240px;text-align:left;cursor:pointer;font:inherit;color:inherit;}
+.ck-card.active{border-color:var(--primary);box-shadow:0 0 0 2px rgba(0,92,85,.15);}
+.ck-stage.critical{border-left:4px solid var(--error);}
+.ck-item{display:flex;gap:12px;align-items:flex-start;padding:12px;border-radius:10px;background:var(--surface-low);}
+.ck-item.done{background:#f3faf8;}
+.ck-item.fail{background:#fff6f5;}
+.ck-item input[type=checkbox]{width:18px;height:18px;margin-top:2px;accent-color:var(--primary);flex-shrink:0;}
+.ck-auto-ico{width:20px;height:20px;flex-shrink:0;font-size:20px !important;width:20px;min-width:20px;}
+.ck-text{word-break:break-word;}
+.ck-badge{display:inline-flex;align-items:center;padding:2px 8px;border-radius:6px;font-size:11.5px;font-weight:600;font-variant-numeric:tabular-nums;}
+.ck-badge.pass{background:var(--primary-soft);color:var(--primary);}
+.ck-badge.fail{background:var(--error-soft);color:var(--error);}
+.ck-badge.no_data{background:var(--secondary-container);color:var(--secondary);}
+.ck-note{height:30px;font-size:12px;}

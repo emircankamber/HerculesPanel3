@@ -155,6 +155,7 @@ function showView(view) {
   if (view === "home") loadHome();
   if (view === "settings") loadSettings();
   if (view === "training") loadTraining();
+  if (view === "checklists") loadChecklists();
   if (view === "trends") updateTrendsStale();
   // Chart.js gizli (display:none) kapsayıcıda 0 boyutla çizer — veri
   // görünümleri yalnızca görünür olduklarında (yeniden) render edilir.
@@ -802,6 +803,9 @@ function renderPanel(data) {
       btn.innerHTML = originalHtml;
     }
   });
+
+  // --- Kontrol listesi başlat (sunucu, kayıtlı analizin ANLIK KOPYASINI alır; MCP çağrısı yok) ---
+  root.querySelector(".ck-start-btn").addEventListener("click", (e) => startChecklist(data, e.currentTarget));
 
   const container = $("#result-container");
   container.innerHTML = "";
@@ -2663,4 +2667,312 @@ function renderRoles() {
     $("#trn-f-users").style.display = $('input[name="trn-assign"]:checked').value === "some" ? "grid" : "none";
   }));
   $("#trn-login").addEventListener("click", () => showLogin("", !authRequiredGlobal));
+})();
+
+
+// ---------------------------------------------------------------------------
+// Araştırma Kontrol Listesi
+// POST /api/checklists {analysis_key, marketplace} — sunucu keyword_analysis kaydından
+// snapshot alır (istemci değer göndermez). Otomatik maddeler sunucuda hesaplanır;
+// görünürlük (member yalnızca kendi listeleri) ve kilit (423) sunucuda uygulanır.
+// ---------------------------------------------------------------------------
+const CK_STAGE_ICON = { market: "trending_up", competition: "shield", defects: "psychology", legal: "gavel", costs: "calculate" };
+const ckState = { lists: [], current: null, template: null, tplDraft: null };
+
+function ckAnalysisKey(data) {
+  return data.analysis_mode === "asin" && data.asin ? `ASIN:${data.asin}` : data.keyword;
+}
+
+async function startChecklist(data, btn) {
+  if (!currentUser.role) { showLogin("Kontrol listesi için kayıtlı bir hesapla giriş yapın.", !authRequiredGlobal); return; }
+  const original = btn.innerHTML; btn.disabled = true; btn.textContent = "oluşturuluyor…";
+  try {
+    const r = await apiFetch(`${API_BASE}/api/checklists`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ analysis_key: ckAnalysisKey(data), marketplace: data.marketplace }),
+    });
+    const b = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(apiErrorText(b, r.status));
+    ckState.current = b;
+    showView("checklists");
+  } catch (err) {
+    alert(`Kontrol listesi oluşturulamadı: ${err.message}`);
+  } finally { btn.disabled = false; btn.innerHTML = original; }
+}
+
+async function ckApi(url, opts = {}) {
+  const r = await apiFetch(`${API_BASE}${url}`, { headers: { "Content-Type": "application/json" }, ...opts });
+  const b = await r.json().catch(() => ({}));
+  if (!r.ok) { const e = new Error(apiErrorText(b, r.status)); e.status = r.status; throw e; }
+  return b;
+}
+
+function ckSetStatus(text, cls = "") { const el = $("#ck-status"); el.textContent = text; el.className = `status-line mt-4 ${cls}`.trim(); }
+
+async function loadChecklists() {
+  const guest = !currentUser.role;
+  $("#ck-guest").style.display = guest ? "block" : "none";
+  $("#ck-body").style.display = guest ? "none" : "grid";
+  $("#ck-tpl-open").style.display = currentUser.role === "owner" ? "" : "none";
+  if (guest) { $("#ck-tpl").style.display = "none"; ckSetStatus(""); return; }
+  ckSetStatus("yükleniyor…", "loading");
+  try {
+    const b = await ckApi("/api/checklists");
+    ckState.lists = b.checklists || [];
+    const wanted = ckState.current?.id ?? ckState.lists[0]?.id;
+    if (wanted != null && (!ckState.current || ckState.current.id !== wanted || !ckState.current.items)) {
+      ckState.current = await ckApi(`/api/checklists/${encodeURIComponent(wanted)}`);
+    } else if (wanted == null) ckState.current = null;
+    renderChecklistList(); renderChecklistDetail(); ckSetStatus("");
+  } catch (err) { ckSetStatus(`Hata: ${err.message}`, "error"); }
+}
+
+function ckProgressBar(p) {
+  const pct = p.total ? Math.round((p.done / p.total) * 100) : 0;
+  return { pct, html: `<div class="crit-track !mt-2"><div class="crit-fill" style="width:${pct}%"></div></div>` };
+}
+
+function renderChecklistList() {
+  const box = $("#ck-list");
+  $("#ck-list-count").textContent = ckState.lists.length ? `${ckState.lists.length} liste` : "";
+  box.innerHTML = ckState.lists.length ? "" : `<div class="card card-pad text-sm text-secondary w-full">Henüz liste yok. Ürün Analizi ekranındaki <b>Kontrol Listesi Başlat</b> butonuyla oluştur.</div>`;
+  ckState.lists.forEach(l => {
+    const pb = ckProgressBar(l.progress);
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = `card ck-card p-4 ${ckState.current?.id === l.id ? "active" : ""}`;
+    b.innerHTML = `
+      <div class="flex items-start justify-between gap-2">
+        <div class="font-semibold text-sm leading-snug break-words min-w-0">${esc(l.title || l.analysis_key)}</div>
+        ${l.status === "locked" ? '<span class="chip ok shrink-0">Kilitli</span>' : '<span class="chip na shrink-0">Açık</span>'}
+      </div>
+      <div class="text-[11px] text-secondary mt-1 truncate">${esc(l.marketplace)} · ${esc(fmtAgo(l.updated_at))}${l.is_mine ? "" : ` · ${esc(l.owner_email || "")}`}</div>
+      <div class="flex items-center justify-between text-xs mt-2"><span class="tabular font-medium">${l.progress.done}/${l.progress.total} · %${pb.pct}</span>
+        ${l.progress.critical_open ? `<span class="chip bad">${l.progress.critical_open} kritik</span>` : ""}</div>${pb.html}`;
+    b.addEventListener("click", async () => {
+      try { ckState.current = await ckApi(`/api/checklists/${encodeURIComponent(l.id)}`); renderChecklistList(); renderChecklistDetail(); }
+      catch (err) { ckSetStatus(`Hata: ${err.message}`, "error"); }
+    });
+    box.appendChild(b);
+  });
+}
+
+/** Mutasyon sonrası sunucunun döndürdüğü güncel listeyi uygula (423 = kilitlendi -> yeniden yükle) */
+async function ckMutate(url, opts) {
+  try {
+    ckState.current = await ckApi(url, opts);
+    const i = ckState.lists.findIndex(x => x.id === ckState.current.id);
+    if (i >= 0) ckState.lists[i] = { ...ckState.lists[i], ...ckState.current };
+    renderChecklistList(); renderChecklistDetail(); ckSetStatus("");
+  } catch (err) {
+    ckSetStatus(`Hata: ${err.message}`, "error");
+    if (err.status === 423 || err.status === 404) loadChecklists();
+  }
+}
+
+function renderChecklistDetail() {
+  const box = $("#ck-detail");
+  const c = ckState.current;
+  if (!c || !c.items) { box.innerHTML = ""; return; }
+  const pb = ckProgressBar(c.progress);
+  const snap = c.snapshot || {};
+  const locked = c.status === "locked";
+  const staff = isStaff();
+  const remaining = c.progress.total - c.progress.done;
+  let approval;
+  if (locked) approval = `<div class="flex items-center gap-2 text-sm"><span class="material-symbols-outlined text-primary">lock</span><span>Onaylandı ve kilitlendi</span></div>
+      <div class="text-xs text-secondary mt-1">${esc(c.locked_by || "")} · ${esc(fmtStamp(c.locked_at))}</div>`;
+  else if (c.can_lock) approval = `<button type="button" class="ck-lock btn btn-primary w-full"><span class="material-symbols-outlined">lock</span>Onayla &amp; Kilitle</button>
+      <div class="text-xs text-secondary mt-2">Kilitlendikten sonra liste değiştirilemez.</div>`;
+  else approval = `<button type="button" class="btn btn-primary w-full" disabled><span class="material-symbols-outlined">lock</span>Onayla &amp; Kilitle</button>
+      <div class="text-xs text-secondary mt-2">${!staff ? "Onay owner veya admin tarafından verilir." : ""}${remaining ? ` ${remaining} madde tamamlanmadı.` : ""}</div>`;
+
+  const stagesHtml = (c.stages || []).map((st, si) => {
+    const items = c.items.filter(i => i.stage_key === st.key);
+    const done = items.filter(i => i.checked).length;
+    const rows = items.map(it => ckItemHtml(it, c)).join("");
+    return `<section class="card card-pad ck-stage ${st.critical ? "critical" : ""}">
+      <div class="flex flex-wrap items-start justify-between gap-2">
+        <div class="flex gap-3 min-w-0">
+          <span class="w-9 h-9 shrink-0 rounded-lg ${st.critical ? "bg-error-container text-error" : "bg-surface-container-low text-primary"} grid place-items-center font-display font-semibold text-sm">${String(si + 1).padStart(2, "0")}</span>
+          <div class="min-w-0"><h4 class="font-display font-semibold text-[16px] leading-snug break-words">${esc(st.title)}</h4>
+            <p class="text-xs ${st.critical ? "text-error" : "text-secondary"} mt-0.5 break-words">${st.critical ? "Kritik aşama · " : ""}${esc(st.subtitle || "")}</p></div>
+        </div>
+        <span class="chip ${done === items.length && items.length ? "ok" : st.critical && done < items.length ? "bad" : "na"} shrink-0">${done} / ${items.length} tamamlandı</span>
+      </div>
+      <div class="flex flex-col gap-2 mt-4">${rows || '<div class="text-xs text-secondary">Bu aşamada madde yok.</div>'}</div>
+    </section>`;
+  }).join("");
+
+  box.innerHTML = `
+    <div class="card card-pad">
+      <div class="flex flex-wrap items-start justify-between gap-3">
+        <div class="min-w-0">
+          <div class="eyebrow">Aktif odak</div>
+          <h2 class="font-display text-xl font-semibold mt-1 break-words">${esc(c.title || c.analysis_key)}</h2>
+          <div class="flex flex-wrap gap-1.5 mt-2"><span class="chip mono">${esc(c.analysis_key)}</span><span class="chip na">${esc(c.marketplace)}</span>
+            ${locked ? '<span class="chip ok">Kilitli</span>' : '<span class="chip na">Açık</span>'}${c.is_mine ? "" : `<span class="chip warn">${esc(c.owner_email || "")}</span>`}</div>
+          <div class="text-xs text-secondary mt-2">Analiz verisi anı: ${esc(fmtStamp(snap.fetched_at))} · liste: ${esc(fmtStamp(c.created_at))}${snap.category ? ` · ${esc(snap.category)}` : ""}</div>
+        </div>
+        ${c.can_delete ? '<button type="button" class="ck-delete btn btn-danger shrink-0"><span class="material-symbols-outlined">delete</span>Listeyi sil</button>' : ""}
+      </div>
+    </div>
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+      <div class="card p-5"><div class="eyebrow">Protokol ilerlemesi</div>
+        <div class="mt-2 flex items-baseline gap-2"><span class="font-display text-[34px] font-medium tracking-tight tabular">%${pb.pct}</span>
+          <span class="text-sm text-secondary tabular">${c.progress.done} / ${c.progress.total} doğrulandı · ${remaining} kalan</span></div>${pb.html}</div>
+      <div class="card p-5 ${c.progress.critical_open ? "!bg-error-container/40" : ""}"><div class="eyebrow">Risk durumu</div>
+        <div class="mt-2 font-display text-xl font-semibold ${c.progress.critical_open ? "text-error" : "text-primary"}">${c.progress.critical_open ? `${c.progress.critical_open} kritik kontrol açık` : "Kritik açık madde yok"}</div>
+        <div class="text-xs text-secondary mt-1">Patent, marka &amp; hukuk aşamasındaki tamamlanmamış maddeler kritik sayılır.</div></div>
+    </div>
+    <div class="grid grid-cols-1 2xl:grid-cols-[minmax(0,1fr)_280px] gap-4 mt-4">
+      <div class="flex flex-col gap-4 min-w-0">${stagesHtml}</div>
+      <div class="flex flex-col gap-4 min-w-0">
+        <div class="card card-pad"><h4 class="font-display font-semibold">Özel Kontrol Maddesi Ekle</h4>
+          <p class="text-xs text-secondary mt-1">Bu ürüne özgü bir kontrol adımı ekle.</p>
+          <form class="ck-add flex flex-col gap-2 mt-3">
+            <input type="text" class="field ck-add-text" maxlength="300" placeholder="örn. FCC belgesi kontrolü" ${c.can_edit ? "" : "disabled"}>
+            <select class="field ck-add-stage" ${c.can_edit ? "" : "disabled"}>${(c.stages || []).map((st, i) => `<option value="${esc(st.key)}">Aşama ${String(i + 1).padStart(2, "0")}: ${esc(st.title)}</option>`).join("")}</select>
+            <button type="submit" class="btn btn-outline" ${c.can_edit ? "" : "disabled"}><span class="material-symbols-outlined">add_task</span>Ekle</button>
+            <span class="ck-add-msg text-xs text-error"></span>
+          </form></div>
+        <div class="card card-pad"><h4 class="font-display font-semibold mb-3">Onay</h4>${approval}</div>
+      </div>
+    </div>`;
+
+  // --- olaylar ---
+  box.querySelectorAll(".ck-item[data-id]").forEach(row => {
+    const id = Number(row.dataset.id);
+    const it = c.items.find(x => x.id === id);
+    const cb = row.querySelector("input[type=checkbox]");
+    const note = row.querySelector(".ck-note");
+    if (cb) cb.addEventListener("change", () => ckMutate(`/api/checklists/${c.id}/items/${id}`, { method: "POST", body: JSON.stringify({ checked: cb.checked, note: note ? note.value : it.note }) }));
+    const save = row.querySelector(".ck-note-save");
+    if (save) save.addEventListener("click", () => ckMutate(`/api/checklists/${c.id}/items/${id}`, { method: "POST", body: JSON.stringify({ checked: it.checked, note: note.value }) }));
+    const del = row.querySelector(".ck-del");
+    if (del) del.addEventListener("click", () => { if (confirm("Bu özel madde silinsin mi?")) ckMutate(`/api/checklists/${c.id}/items/${id}`, { method: "DELETE" }); });
+  });
+  const form = box.querySelector(".ck-add");
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const text = form.querySelector(".ck-add-text").value.trim();
+    if (!text) { form.querySelector(".ck-add-msg").textContent = "Madde metni gerekli."; return; }
+    ckMutate(`/api/checklists/${c.id}/items`, { method: "POST", body: JSON.stringify({ stage_key: form.querySelector(".ck-add-stage").value, text }) });
+  });
+  box.querySelector(".ck-lock")?.addEventListener("click", () => {
+    if (confirm("Liste onaylanıp kilitlensin mi? Kilitlendikten sonra değiştirilemez.")) ckMutate(`/api/checklists/${c.id}/lock`, { method: "POST" });
+  });
+  box.querySelector(".ck-delete")?.addEventListener("click", async () => {
+    if (!confirm("Bu kontrol listesi silinsin mi?")) return;
+    try { await ckApi(`/api/checklists/${c.id}`, { method: "DELETE" }); ckState.current = null; loadChecklists(); }
+    catch (err) { ckSetStatus(`Hata: ${err.message}`, "error"); if (err.status === 423) loadChecklists(); }
+  });
+}
+
+function ckItemHtml(it, c) {
+  if (it.kind === "auto") {
+    const ico = { pass: ["check_circle", "text-primary"], fail: ["cancel", "text-error"], no_data: ["help", "text-outline"] }[it.auto_status] || ["help", "text-outline"];
+    return `<div class="ck-item ${it.auto_status === "pass" ? "done" : it.auto_status === "fail" ? "fail" : ""}" title="Analiz verisinden otomatik değerlendirildi; elle işaretlenemez">
+      <span class="material-symbols-outlined ck-auto-ico ${ico[1]}" aria-hidden="true">${ico[0]}</span>
+      <div class="min-w-0 flex-1">
+        <div class="flex flex-wrap items-center gap-2"><span class="ck-text text-[13.5px] font-medium">${esc(it.text)}</span><span class="chip na !text-[10px]">otomatik</span></div>
+        <div class="flex flex-wrap items-center gap-2 mt-1.5"><span class="ck-badge ${esc(it.auto_status)}">${esc(it.auto_display)}</span>
+          <span class="text-[11px] text-secondary">${it.auto_status === "no_data" ? "Analizde bu değer yok — geçti sayılmaz" : it.auto_status === "pass" ? "Eşik sağlandı" : "Eşik sağlanmadı"}</span></div>
+      </div></div>`;
+  }
+  const edit = c.can_edit;
+  return `<div class="ck-item ${it.checked ? "done" : ""}" data-id="${it.id}">
+    <input type="checkbox" ${it.checked ? "checked" : ""} ${edit ? "" : "disabled"} aria-label="Tamamlandı olarak işaretle">
+    <div class="min-w-0 flex-1">
+      <div class="flex flex-wrap items-center gap-2"><span class="ck-text text-[13.5px] ${it.checked ? "text-secondary" : "font-medium"}">${esc(it.text)}</span>
+        ${it.kind === "custom" ? '<span class="chip warn !text-[10px]">özel</span>' : ""}</div>
+      ${it.checked ? `<div class="text-[11px] text-primary mt-1">✓ ${esc(it.checked_by || "")} · ${esc(fmtStamp(it.checked_at))}</div>` : ""}
+      ${edit ? `<div class="flex gap-2 mt-2"><input type="text" class="field ck-note flex-1 min-w-0" maxlength="1000" placeholder="not (opsiyonel)" value="${esc(it.note || "")}">
+          <button type="button" class="ck-note-save btn btn-outline btn-sm !h-[30px]">Notu kaydet</button></div>`
+        : it.note ? `<div class="text-xs text-on-surface-variant italic mt-1 break-words">"${esc(it.note)}"</div>` : ""}
+    </div>
+    ${edit && it.kind === "custom" ? '<button type="button" class="ck-del icon-btn !text-error shrink-0" title="Özel maddeyi sil" aria-label="Özel maddeyi sil"><span class="material-symbols-outlined">delete</span></button>' : ""}
+  </div>`;
+}
+
+// --- Şablon editörü (yalnızca owner; sunucu PUT'ta require_owner) ---
+const CK_TH_LABEL = {
+  searches_min: ["Ana keyword arama >", ""], top10_revenue_min: ["İlk 10 ciro > ($)", ""], reviews_max: ["Ort. yorum <", ""],
+  new_brands_min: ["Yeni marka ≥", ""], top3_share_max: ["İlk 3 pay < (%)", "pct"], price_min: ["Fiyat min ($)", ""], price_max: ["Fiyat max ($)", ""],
+};
+
+async function openTemplateEditor() {
+  try {
+    const b = await ckApi("/api/checklists/template");
+    ckState.template = b;
+    ckState.tplDraft = JSON.parse(JSON.stringify(b.template));
+    renderTemplateEditor();
+    $("#ck-tpl").style.display = "block";
+    $("#ck-tpl").scrollIntoView({ behavior: "smooth", block: "start" });
+  } catch (err) { ckSetStatus(`Hata: ${err.message}`, "error"); }
+}
+
+function renderTemplateEditor() {
+  const t = ckState.tplDraft, meta = ckState.template;
+  $("#ck-tpl-meta").textContent = meta.is_default ? "Varsayılan şablon" : `Son değişiklik: ${meta.updated_by || ""} · ${fmtStamp(meta.updated_at)}`;
+  $("#ck-tpl-th").innerHTML = Object.entries(CK_TH_LABEL).map(([k, [label, unit]]) => {
+    const lim = meta.threshold_limits[k];
+    const v = unit === "pct" ? +(t.thresholds[k] * 100).toFixed(2) : t.thresholds[k];
+    return `<label class="flex flex-col gap-1.5"><span class="eyebrow">${esc(label)}</span>
+      <input type="number" class="field ck-th" data-k="${k}" data-unit="${unit}" step="${lim.integer ? 1 : "any"}" min="${unit === "pct" ? 0 : lim.min}" max="${unit === "pct" ? 100 : lim.max}" value="${esc(v)}"></label>`;
+  }).join("");
+  $("#ck-tpl-stages").innerHTML = t.stages.map((st, si) => `
+    <div class="rounded-xl border border-hairline p-4 ${st.critical ? "ck-stage critical" : ""}" data-si="${si}">
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
+        <label class="flex flex-col gap-1"><span class="eyebrow">Aşama ${si + 1} başlığı${st.critical ? " · kritik" : ""}</span><input type="text" class="field ck-st-title" maxlength="120" value="${esc(st.title)}"></label>
+        <label class="flex flex-col gap-1"><span class="eyebrow">Alt başlık</span><input type="text" class="field ck-st-sub" maxlength="300" value="${esc(st.subtitle || "")}"></label>
+      </div>
+      <div class="flex flex-col gap-2 mt-3">
+        ${st.items.map((it, ii) => it.auto
+          ? `<div class="flex items-center gap-2 text-[13px] text-secondary"><span class="chip na !text-[10px]">otomatik</span><span class="break-words">${esc(it.text || "")}</span></div>`
+          : `<div class="flex gap-2"><input type="text" class="field ck-it flex-1 min-w-0" data-ii="${ii}" maxlength="300" value="${esc(it.text)}">
+              <button type="button" class="icon-btn !text-error ck-it-del shrink-0" data-ii="${ii}" title="Maddeyi sil" aria-label="Maddeyi sil"><span class="material-symbols-outlined">delete</span></button></div>`).join("")}
+        <button type="button" class="btn btn-outline btn-sm self-start ck-it-add"><span class="material-symbols-outlined">add</span>Manuel madde ekle</button>
+      </div>
+    </div>`).join("");
+  // Taslağa geri yaz (yeniden render öncesi değerleri korumak için)
+  const sync = () => {
+    $$("#ck-tpl-th .ck-th").forEach(i => { const n = Number(i.value); t.thresholds[i.dataset.k] = i.dataset.unit === "pct" ? n / 100 : n; });
+    $$("#ck-tpl-stages [data-si]").forEach(box => {
+      const st = t.stages[Number(box.dataset.si)];
+      st.title = box.querySelector(".ck-st-title").value; st.subtitle = box.querySelector(".ck-st-sub").value;
+      box.querySelectorAll(".ck-it").forEach(i => { st.items[Number(i.dataset.ii)].text = i.value; });
+    });
+  };
+  ckState.tplSync = sync;
+  $$("#ck-tpl-stages [data-si]").forEach(box => {
+    const st = t.stages[Number(box.dataset.si)];
+    box.querySelector(".ck-it-add").addEventListener("click", () => { sync(); st.items.push({ text: "" }); renderTemplateEditor(); });
+    box.querySelectorAll(".ck-it-del").forEach(b => b.addEventListener("click", () => { sync(); st.items.splice(Number(b.dataset.ii), 1); renderTemplateEditor(); }));
+  });
+}
+
+(function bindChecklistView() {
+  $("#ck-tpl-open").addEventListener("click", openTemplateEditor);
+  $("#ck-tpl-close").addEventListener("click", () => { $("#ck-tpl").style.display = "none"; $("#ck-tpl-msg").textContent = ""; });
+  $("#ck-tpl-save").addEventListener("click", async () => {
+    const msg = $("#ck-tpl-msg");
+    ckState.tplSync();
+    const t = ckState.tplDraft;
+    if (t.stages.some(st => st.items.some(it => !it.auto && !String(it.text || "").trim()))) { msg.textContent = "Boş madde metni var."; msg.className = "text-xs text-error"; return; }
+    try {
+      const b = await ckApi("/api/checklists/template", { method: "PUT", body: JSON.stringify({ template: t }) });
+      ckState.template = b; ckState.tplDraft = JSON.parse(JSON.stringify(b.template)); renderTemplateEditor();
+      msg.textContent = "Şablon kaydedildi — yeni listelere uygulanacak."; msg.className = "text-xs text-primary";
+    } catch (err) { msg.textContent = `Kaydedilemedi: ${err.message}`; msg.className = "text-xs text-error"; }
+  });
+  $("#ck-tpl-reset").addEventListener("click", async () => {
+    if (!confirm("Şablon varsayılana dönsün mü? (Mevcut listeler etkilenmez)")) return;
+    const msg = $("#ck-tpl-msg");
+    try {
+      const b = await ckApi("/api/checklists/template/reset", { method: "POST" });
+      ckState.template = b; ckState.tplDraft = JSON.parse(JSON.stringify(b.template)); renderTemplateEditor();
+      msg.textContent = "Varsayılan şablona dönüldü."; msg.className = "text-xs text-primary";
+    } catch (err) { msg.textContent = `Hata: ${err.message}`; msg.className = "text-xs text-error"; }
+  });
 })();

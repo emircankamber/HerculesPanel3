@@ -54,6 +54,7 @@ try:
 except ImportError:
     PORTFOLIO_AVAILABLE = False
 import database as db
+import checklist as ckl
 import excel_export
 import supplier_scoring as sup
 import launch_control as lc
@@ -1677,3 +1678,234 @@ async def users_set_role(target_id: int, req: RoleIn, user: dict = Depends(requi
         raise HTTPException(409, str(e))
     return {"ok": True, "id": target_id, "role": await db.get_user_role(target_id),
             "self_changed": target_id == user["user_id"]}
+
+
+
+# ---------------------------------------------------------------------------
+# ARAŞTIRMA KONTROL LİSTESİ
+# - Liste, son kaydedilen analizin (keyword_analysis log kaydı) ANLIK KOPYASIYLA
+#   oluşturulur; sonradan MCP çağrısı yapılmaz. İstemcinin gönderdiği değerlere
+#   güvenilmez: otomatik maddeler sunucudaki snapshot'tan değerlendirilir.
+# - Görünürlük: member yalnızca kendi listeleri (başkasınınkine 404), owner/admin tümü.
+# - Kilitli liste sunucuda değiştirilemez (423). Kilitleme: owner/admin, tüm maddeler tamamsa.
+# ---------------------------------------------------------------------------
+async def _effective_template() -> tuple[dict, dict | None]:
+    rec = await db.get_checklist_template()
+    if rec:
+        try:
+            return ckl.validate_template(rec["template"]), rec
+        except ckl.TemplateError:
+            pass  # bozuk kayıt -> varsayılana düş
+    return ckl.default_template(), None
+
+
+def _template_out(tpl: dict, rec: dict | None) -> dict:
+    th = tpl["thresholds"]
+    stages = [{**s, "items": [{**it, "text": ckl.auto_text(it["auto"], th)} if it.get("auto") else it for it in s["items"]]}
+              for s in tpl["stages"]]
+    return {"template": {**tpl, "stages": stages}, "is_default": rec is None,
+            "updated_at": rec["updated_at"] if rec else None, "updated_by": rec["updated_by"] if rec else None,
+            "threshold_limits": {k: {"min": lo, "max": hi, "integer": is_int} for k, (lo, hi, is_int) in ckl.THRESHOLD_LIMITS.items()}}
+
+
+def _checklist_out(cl: dict, items: list[dict], user: dict, detail: bool = True) -> dict:
+    staff = user["role"] in ("owner", "admin")
+    values = (cl.get("snapshot") or {}).get("values") or {}
+    th = cl.get("thresholds") or ckl.DEFAULT_THRESHOLDS
+    critical_stages = {s["key"] for s in cl.get("stages") or [] if s.get("critical")}
+    out_items, done, critical_open = [], 0, 0
+    for it in items:
+        o = {"id": it["id"], "stage_key": it["stage_key"], "kind": it["kind"], "text": it["text"],
+             "checked_by": it.get("checked_by"), "checked_at": it.get("checked_at"), "note": it.get("note") or "",
+             "created_by": it.get("created_by")}
+        if it["kind"] == "auto":
+            ev = ckl.evaluate_auto(it.get("auto_key"), values, th)
+            o.update({"auto_key": it.get("auto_key"), "auto_status": ev["status"], "auto_display": ev["display"],
+                      "auto_value": ev["value"], "checked": ev["status"] == "pass", "checked_by": None, "checked_at": None})
+        else:
+            o["checked"] = bool(it.get("checked"))
+        done += o["checked"]
+        if not o["checked"] and it["stage_key"] in critical_stages:
+            critical_open += 1
+        out_items.append(o)
+    total = len(out_items)
+    complete = total > 0 and done == total
+    is_open = cl["status"] == "open"
+    can_edit = is_open and (staff or cl["user_id"] == user["user_id"])
+    out = {
+        "id": cl["id"], "title": cl.get("title"), "analysis_key": cl["analysis_key"], "marketplace": cl["marketplace"],
+        "owner_email": cl.get("user_email"), "is_mine": cl["user_id"] == user["user_id"],
+        "status": cl["status"], "locked_by": cl.get("locked_by"), "locked_at": cl.get("locked_at"),
+        "created_at": cl["created_at"], "updated_at": cl["updated_at"],
+        "progress": {"done": done, "total": total, "critical_open": critical_open, "complete": complete},
+        "can_edit": can_edit, "can_lock": staff and is_open and complete, "can_delete": can_edit,
+    }
+    if detail:
+        snap = cl.get("snapshot") or {}
+        out.update({"stages": cl.get("stages") or [], "thresholds": th, "items": out_items,
+                    "snapshot": {k: snap.get(k) for k in ("keyword", "marketplace", "analysis_mode", "fetched_at", "category")}
+                    | {"values": values}})
+    return out
+
+
+async def _get_checklist_for(cid: int, user: dict) -> dict:
+    cl = await db.get_checklist(cid)
+    if not cl or (user["role"] not in ("owner", "admin") and cl["user_id"] != user["user_id"]):
+        raise HTTPException(404, "Kontrol listesi bulunamadı")  # member başkasının listesinin varlığını bile göremez
+    return cl
+
+
+async def _get_editable(cid: int, user: dict) -> dict:
+    cl = await _get_checklist_for(cid, user)
+    if cl["status"] != "open":
+        raise HTTPException(423, "Liste onaylanıp kilitlendi — değiştirilemez")
+    return cl
+
+
+@app.get("/api/checklists/template")
+async def checklist_template_get(user: dict = Depends(require_user)):
+    tpl, rec = await _effective_template()
+    return _template_out(tpl, rec)
+
+
+@app.put("/api/checklists/template")
+async def checklist_template_put(payload: dict, user: dict = Depends(require_owner)):
+    """Yalnızca owner. Aşamalar ve otomatik maddeler sabit; başlıklar, manuel maddeler ve eşikler düzenlenir.
+    Mevcut listeler etkilenmez (her liste oluşturulduğu andaki şablonun kopyasını taşır)."""
+    try:
+        tpl = ckl.validate_template(payload.get("template") if isinstance(payload, dict) else None)
+    except ckl.TemplateError as e:
+        raise HTTPException(422, str(e))
+    await db.save_checklist_template(tpl, user["email"])
+    tpl, rec = await _effective_template()
+    return _template_out(tpl, rec)
+
+
+@app.post("/api/checklists/template/reset")
+async def checklist_template_reset(user: dict = Depends(require_owner)):
+    await db.reset_checklist_template()
+    tpl, rec = await _effective_template()
+    return _template_out(tpl, rec)
+
+
+class ChecklistCreate(BaseModel):
+    analysis_key: str = Field(..., min_length=1, max_length=300)
+    marketplace: str = Field(..., pattern=r"^[A-Z]{2}$")
+
+
+@app.post("/api/checklists")
+async def checklist_create(req: ChecklistCreate, user: dict = Depends(require_user)):
+    rec = await db.get_analysis_record(req.analysis_key, req.marketplace)
+    if not rec:
+        raise HTTPException(404, "Bu ürün için kayıtlı analiz bulunamadı — önce Ürün Analizi'ni çalıştırın")
+    payload = {**rec["payload"], "_analysis_key": req.analysis_key}
+    snapshot = ckl.extract_snapshot(payload, rec["fetched_at"])
+    tpl, _ = await _effective_template()
+    th = tpl["thresholds"]
+    asin_title = ((payload.get("asin_info") or {}).get("title") or "") if payload.get("analysis_mode") == "asin" else ""
+    title = (asin_title or str(payload.get("keyword") or req.analysis_key)).strip()[:200]
+    items, order = [], 0
+    for st in tpl["stages"]:
+        for it in st["items"]:
+            order += 1
+            if it.get("auto"):
+                items.append({"stage_key": st["key"], "item_order": order, "kind": "auto", "auto_key": it["auto"],
+                              "text": ckl.auto_text(it["auto"], th)})
+            else:
+                items.append({"stage_key": st["key"], "item_order": order, "kind": "manual", "text": it["text"]})
+    stages = [{k: s[k] for k in ("key", "title", "subtitle", "critical")} for s in tpl["stages"]]
+    cid = await db.create_checklist(user["user_id"], user["email"], req.analysis_key, req.marketplace, title,
+                                    snapshot, stages, th, items)
+    cl = await db.get_checklist(cid)
+    return _checklist_out(cl, await db.checklist_items(cid), user)
+
+
+@app.get("/api/checklists")
+async def checklist_list(user: dict = Depends(require_user)):
+    staff = user["role"] in ("owner", "admin")
+    lists = await db.list_checklists(None if staff else user["user_id"])
+    items = await db.items_for_checklists([c["id"] for c in lists])
+    return {"role": user["role"], "checklists": [_checklist_out(c, items.get(c["id"], []), user, detail=False) for c in lists]}
+
+
+@app.get("/api/checklists/{cid}")
+async def checklist_get(cid: int, user: dict = Depends(require_user)):
+    cl = await _get_checklist_for(cid, user)
+    return _checklist_out(cl, await db.checklist_items(cid), user)
+
+
+class ChecklistItemUpdate(BaseModel):
+    checked: bool
+    note: str | None = Field(None, max_length=1000)
+
+
+@app.post("/api/checklists/{cid}/items/{item_id}")
+async def checklist_item_update(cid: int, item_id: int, req: ChecklistItemUpdate, user: dict = Depends(require_user)):
+    """Yalnızca manuel/özel maddeler; otomatik maddeler snapshot'tan hesaplanır, elle işaretlenemez."""
+    await _get_editable(cid, user)
+    items = {i["id"]: i for i in await db.checklist_items(cid)}
+    it = items.get(item_id)
+    if not it:
+        raise HTTPException(404, "Madde bulunamadı")
+    if it["kind"] == "auto":
+        raise HTTPException(400, "Otomatik maddeler analiz verisinden hesaplanır, elle işaretlenemez")
+    note = (req.note or "").strip() or None
+    if not await db.set_item_state(cid, item_id, req.checked, note, user["email"]):
+        raise HTTPException(423, "Liste onaylanıp kilitlendi — değiştirilemez")
+    return _checklist_out(await db.get_checklist(cid), await db.checklist_items(cid), user)
+
+
+class ChecklistCustomItem(BaseModel):
+    stage_key: str = Field(..., pattern=r"^(market|competition|defects|legal|costs)$")
+    text: str = Field(..., min_length=1, max_length=300)
+
+
+@app.post("/api/checklists/{cid}/items")
+async def checklist_item_add(cid: int, req: ChecklistCustomItem, user: dict = Depends(require_user)):
+    await _get_editable(cid, user)
+    text = req.text.strip()
+    if not text:
+        raise HTTPException(422, "Madde metni boş olamaz")
+    if await db.add_custom_item(cid, req.stage_key, text, user["email"]) is None:
+        raise HTTPException(423, "Liste onaylanıp kilitlendi — değiştirilemez")
+    return _checklist_out(await db.get_checklist(cid), await db.checklist_items(cid), user)
+
+
+@app.delete("/api/checklists/{cid}/items/{item_id}")
+async def checklist_item_delete(cid: int, item_id: int, user: dict = Depends(require_user)):
+    """Yalnızca özel (kullanıcının eklediği) maddeler silinebilir."""
+    await _get_editable(cid, user)
+    it = next((i for i in await db.checklist_items(cid) if i["id"] == item_id), None)
+    if not it:
+        raise HTTPException(404, "Madde bulunamadı")
+    if it["kind"] != "custom":
+        raise HTTPException(400, "Yalnızca özel eklenen maddeler silinebilir")
+    if not await db.delete_custom_item(cid, item_id):
+        raise HTTPException(423, "Liste onaylanıp kilitlendi — değiştirilemez")
+    return _checklist_out(await db.get_checklist(cid), await db.checklist_items(cid), user)
+
+
+@app.post("/api/checklists/{cid}/lock")
+async def checklist_lock(cid: int, user: dict = Depends(require_staff)):
+    """Owner/admin onaylayıp kilitler — yalnızca tüm maddeler (otomatikler dahil) tamamsa."""
+    cl = await _get_editable(cid, user)
+    out = _checklist_out(cl, await db.checklist_items(cid), user)
+    if not out["progress"]["complete"]:
+        p = out["progress"]
+        raise HTTPException(409, f"Tüm maddeler tamamlanmadan onaylanamaz ({p['done']}/{p['total']})")
+    if not await db.lock_checklist(cid, user["email"]):
+        raise HTTPException(423, "Liste zaten kilitli")
+    # Yarış kontrolü: kilitleme anında bir madde geri alındıysa kilidi kaldır
+    after = _checklist_out(await db.get_checklist(cid), await db.checklist_items(cid), user)
+    if not after["progress"]["complete"]:
+        await db.unlock_checklist(cid)
+        raise HTTPException(409, "Kilitleme sırasında bir madde değişti — tekrar deneyin")
+    return after
+
+
+@app.delete("/api/checklists/{cid}")
+async def checklist_delete(cid: int, user: dict = Depends(require_user)):
+    await _get_editable(cid, user)
+    if not await db.delete_checklist(cid):
+        raise HTTPException(423, "Liste onaylanıp kilitlendi — silinemez")
+    return {"ok": True}
