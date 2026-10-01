@@ -129,7 +129,7 @@ async def require_staff(user: dict = Depends(require_user)) -> dict:
 
 async def require_owner(user: dict = Depends(require_user)) -> dict:
     if user["role"] != "owner":
-        raise HTTPException(403, "Bu işlemi yalnızca hesap sahibi (owner) yapabilir")
+        raise HTTPException(403, "Bu işlemi yalnızca owner yapabilir")
     return user
 
 
@@ -1490,8 +1490,8 @@ async def discovery_trending(req: TrendingRequest, user: dict = Depends(require_
 # ROLLER & EĞİTİM / GÖREVLER
 # Yetki kuralları SUNUCUDA: member yalnızca kendisine atanan dersleri görür ve
 # yalnızca KENDİ tamamlamasını değiştirir (user_id her zaman oturumdan gelir).
-# Owner/admin ders yönetir ve ilerlemeyi görür; rolleri yalnızca owner değiştirir;
-# owner'ın rolü değiştirilemez.
+# Owner/admin ders yönetir ve ilerlemeyi görür; rolleri yalnızca owner'lar değiştirir
+# (birden fazla owner olabilir); son kalan owner düşürülemez (409).
 # ---------------------------------------------------------------------------
 _YT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 _YT_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "youtube-nocookie.com", "www.youtube-nocookie.com"}
@@ -1659,16 +1659,21 @@ async def users_list(user: dict = Depends(require_staff)):
 
 
 class RoleIn(BaseModel):
-    role: str = Field(..., pattern=r"^(admin|member)$")
+    role: str = Field(..., pattern=r"^(owner|admin|member)$")
 
 
 @app.post("/api/users/{target_id}/role")
 async def users_set_role(target_id: int, req: RoleIn, user: dict = Depends(require_owner)):
-    """Yalnızca owner; hedef owner olamaz; 'owner' rolü atanamaz (desen yalnızca admin|member)."""
-    target_role = await db.get_user_role(target_id)
-    if not target_role:
+    """
+    Yalnızca owner'lar (rol her istekte DB'den okunur). Herkesi owner/admin/member
+    yapabilir, başka bir owner'ı (ve kendini) düşürebilir — ama son kalan owner
+    düşürülemez (409).
+    """
+    if await db.get_user_role(target_id) is None:
         raise HTTPException(404, "Kullanıcı bulunamadı")
-    if target_role == "owner":
-        raise HTTPException(403, "Owner'ın rolü değiştirilemez")
-    await db.set_user_role(target_id, req.role)
-    return {"ok": True, "id": target_id, "role": await db.get_user_role(target_id)}
+    try:
+        await db.set_user_role(target_id, req.role)
+    except db.LastOwnerError as e:
+        raise HTTPException(409, str(e))
+    return {"ok": True, "id": target_id, "role": await db.get_user_role(target_id),
+            "self_changed": target_id == user["user_id"]}

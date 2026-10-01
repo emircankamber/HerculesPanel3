@@ -2613,30 +2613,43 @@ function renderMatrix() {
   table.innerHTML = head + `<tbody>${rows}</tbody>`;
 }
 
-// --- Rol yönetimi (yalnızca owner) ---
+// --- Rol yönetimi (yalnızca owner'lar) ---
+// Birden fazla owner olabilir. Son kalan owner'ın seçimi kilitli; sunucu da reddeder (409).
 function renderRoles() {
   const tbody = $("#trn-roles-tbody");
   tbody.innerHTML = "";
+  const owners = trnState.users.filter(u => u.role === "owner").length;
   trnState.users.forEach(u => {
     const tr = document.createElement("tr");
-    const isOwner = u.role === "owner";
-    tr.innerHTML = `<td class="l"><div class="font-medium truncate max-w-[260px]" title="${esc(u.email)}">${esc(u.email)}</div></td>
-      <td class="l"><span class="chip ${isOwner ? "ok" : u.role === "admin" ? "warn" : "na"}">${esc(ROLE_LABEL[u.role] || u.role)}</span></td>
-      <td class="!text-center">${isOwner ? `<span class="text-xs text-secondary">değiştirilemez</span>`
-        : `<select class="field !h-8 text-xs trn-role-sel" aria-label="Rol"><option value="member" ${u.role === "member" ? "selected" : ""}>Üye</option><option value="admin" ${u.role === "admin" ? "selected" : ""}>Admin</option></select>`}</td>`;
+    const lastOwner = u.role === "owner" && owners <= 1;
+    const isMe = u.id === currentUser.user_id;
+    const opts = ["owner", "admin", "member"].map(r => `<option value="${r}" ${u.role === r ? "selected" : ""}>${ROLE_LABEL[r]}</option>`).join("");
+    tr.innerHTML = `<td class="l"><div class="font-medium truncate max-w-[150px] sm:max-w-[260px]" title="${esc(u.email)}">${esc(u.email)}${isMe ? ' <span class="chip na !text-[10px]">sen</span>' : ""}</div></td>
+      <td class="l hidden sm:table-cell"><span class="chip ${u.role === "owner" ? "ok" : u.role === "admin" ? "warn" : "na"}">${esc(ROLE_LABEL[u.role] || u.role)}</span></td>
+      <td class="!text-center">
+        <select class="field !h-8 text-xs trn-role-sel" aria-label="Rol" ${lastOwner ? 'disabled title="Son kalan owner düşürülemez"' : ""}>${opts}</select>
+        <div class="trn-role-msg whitespace-normal leading-tight max-w-[150px] mx-auto text-[11px] mt-1 ${lastOwner ? "text-secondary" : "text-error"}">${lastOwner ? "Son owner — düşürülemez" : ""}</div>
+      </td>`;
     const sel = tr.querySelector(".trn-role-sel");
-    if (sel) sel.addEventListener("change", async () => {
-      sel.disabled = true;
+    const msg = tr.querySelector(".trn-role-msg");
+    sel.addEventListener("change", async () => {
+      const next = sel.value;
+      if (isMe && u.role === "owner" && next !== "owner" &&
+          !confirm("Kendi owner yetkini kaldırıyorsun; rol yönetimine erişimin kalmayacak. Devam edilsin mi?")) { sel.value = u.role; return; }
+      if (next === "owner" && u.role !== "owner" &&
+          !confirm(`${u.email} owner yapılsın mı? Owner'lar tüm rolleri değiştirebilir.`)) { sel.value = u.role; return; }
+      sel.disabled = true; msg.textContent = "kaydediliyor…"; msg.className = "trn-role-msg whitespace-normal leading-tight max-w-[150px] mx-auto text-[11px] mt-1 text-secondary";
       try {
         const r = await apiFetch(`${API_BASE}/api/users/${encodeURIComponent(u.id)}/role`, {
-          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ role: sel.value }),
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ role: next }),
         });
         const b = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(apiErrorText(b, r.status));
+        if (b.self_changed) await checkAuthStatus();  // kendi rolün değiştiyse görünümü sunucudaki role göre yenile
         await loadTraining();
       } catch (err) {
         sel.disabled = false; sel.value = u.role;
-        $("#trn-status").textContent = `Hata: ${err.message}`; $("#trn-status").className = "status-line error mt-4";
+        msg.textContent = err.message; msg.className = "trn-role-msg whitespace-normal leading-tight max-w-[150px] mx-auto text-[11px] mt-1 text-error";
       }
     });
     tbody.appendChild(tr);

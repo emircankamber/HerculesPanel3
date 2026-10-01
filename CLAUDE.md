@@ -252,17 +252,21 @@ yüzden backend'e hiç bağlanmamalı, sahte veri olur.
 ## Roller & Eğitim / Görevler (owner / admin / member)
 
 - **Rol kaynağı:** `users.role` sütunu (`_migrate_schema` içinde `_add_column_if_missing`
-  ile eklenir — canlı Postgres'te users tablosu zaten vardı). **Owner = en küçük id'li
-  kullanıcı** ve `database.py::get_user_role()` bunu HER İSTEKTE hesaplar; sütundaki
-  "owner" değerine güvenilmez. Sütun yalnızca admin/member ayrımını taşır.
+  ile eklenir — canlı Postgres'te users tablosu zaten vardı). Owner **atanabilir** bir
+  roldür, birden fazla owner olabilir; yetki her istekte bu sütundan okunur
+  (`database.py::get_user_role`). Migrasyon idempotent: boş/geçersiz rol → member;
+  yalnızca HİÇ owner yoksa en küçük id'li kullanıcı owner yapılır (mevcut owner'lara
+  dokunmaz). Hiç kullanıcı yokken ilk kayıt olan owner olur.
 - **Yetki SUNUCUDA:** `index.py` → `require_user` (gerçek hesap şart; auth kapalıyken
   401), `require_staff` (owner/admin), `require_owner`. Arayüzde gizlemek yalnızca kolaylık.
   - Member yalnızca kendisine atanan dersleri görür (`assign_all=1` ya da
     `training_assignments`'ta kaydı olanlar) ve yalnızca KENDİ tamamlamasını değiştirir:
     `/api/training/lessons/{id}/complete` gövdesinde user_id YOK, oturumdan alınır;
     atanmamış derse 404.
-  - Rolü yalnızca owner değiştirir (`/api/users/{id}/role`, yalnızca admin|member);
-    owner'ın rolü değiştirilemez (403).
+  - Rolleri yalnızca owner'lar değiştirir (`/api/users/{id}/role`: owner|admin|member;
+    başka bir owner'ı ve kendini düşürebilir). **Kilitlenme koruması:** son kalan owner
+    düşürülemez → 409 (`set_user_role` → `LastOwnerError`; koşul UPDATE içinde de var ve
+    sonrasında 0 owner kalırsa değişiklik geri alınır).
 - **Video linkleri:** yalnızca https. YouTube ID'si sunucuda (`youtube_video_id`) ve
   istemcide (`YT_ID_RE`) 11 karakter `[A-Za-z0-9_-]` olarak doğrulanır, yalnızca bilinen
   YouTube host'larında; gömme `youtube-nocookie.com/embed/{id}`. Diğer linkler yeni sekmede

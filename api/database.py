@@ -125,12 +125,15 @@ async def _migrate_schema():
     """Eski dağıtımlardan kalan eksik sütunları tamamlar (bkz. _add_column_if_missing)."""
     await _add_column_if_missing("market_decision", "user_id", "INTEGER")
     # Roller: canlı Postgres'te users tablosu zaten var -> sütun migrasyonla eklenir.
-    # owner = en küçük id (her istekte hesaplanır, bkz. get_user_role); burada yalnızca
-    # görüntü tutarlılığı için doldurulur. Boş roller member olur.
+    # Owner ATANABİLİR bir roldür (birden fazla olabilir); yetki her istekte bu
+    # sütundan okunur. Migrasyon idempotent: boş/geçersiz roller member olur;
+    # yalnızca HİÇ owner yoksa en küçük id'li kullanıcı owner yapılır — mevcut
+    # owner'lara (ve ek owner'lara) asla dokunulmaz.
     await _add_column_if_missing("users", "role", "TEXT")
     await execute("UPDATE users SET role = 'member' WHERE role IS NULL OR role NOT IN ('owner', 'admin', 'member')")
-    await execute("UPDATE users SET role = 'member' WHERE role = 'owner' AND id <> (SELECT MIN(id) FROM users)")
-    await execute("UPDATE users SET role = 'owner' WHERE id = (SELECT MIN(id) FROM users)")
+    await execute(
+        "UPDATE users SET role = 'owner' WHERE id = (SELECT MIN(id) FROM users) "
+        "AND NOT EXISTS (SELECT 1 FROM users WHERE role = 'owner')")
 
 
 async def init_db():
@@ -524,36 +527,61 @@ async def reset_user_thresholds(user_id: int):
 
 # ---------------------------------------------------------------------------
 # ROLLER (owner / admin / member)
-# GÜVENLİK: owner her zaman en küçük id'li kullanıcıdır ve HER İSTEKTE buradan
-# hesaplanır — role sütunundaki "owner" değerine güvenilmez. Owner'ın rolü
-# değiştirilemez; role sütunu yalnızca admin/member ayrımını taşır.
+# Owner atanabilir bir roldür, birden fazla owner olabilir. Yetki HER İSTEKTE
+# users.role sütunundan okunur. Kilitlenme koruması: son kalan owner düşürülemez.
 # ---------------------------------------------------------------------------
 VALID_ROLES = ("owner", "admin", "member")
 
 
+class LastOwnerError(Exception):
+    """Son kalan owner'ı düşürme girişimi."""
+
+
+def _norm_role(role) -> str:
+    return role if role in VALID_ROLES else "member"
+
+
 async def get_user_role(user_id: int) -> str | None:
-    row = await fetch_one(
-        "SELECT id, role, (SELECT MIN(id) FROM users) AS owner_id FROM users WHERE id = ?", (user_id,))
-    if not row:
-        return None
-    if row["id"] == row["owner_id"]:
-        return "owner"
-    return "admin" if row.get("role") == "admin" else "member"
+    row = await fetch_one("SELECT role FROM users WHERE id = ?", (user_id,))
+    return _norm_role(row.get("role")) if row else None
+
+
+async def owner_count() -> int:
+    row = await fetch_one("SELECT COUNT(*) AS c FROM users WHERE role = 'owner'")
+    return (row or {}).get("c", 0) or 0
 
 
 async def list_users() -> list[dict]:
-    rows = await fetch_all(
-        "SELECT id, email, role, created_at, (SELECT MIN(id) FROM users) AS owner_id FROM users ORDER BY id")
-    return [{"id": r["id"], "email": r["email"], "created_at": r["created_at"],
-             "role": "owner" if r["id"] == r["owner_id"] else ("admin" if r.get("role") == "admin" else "member")}
+    rows = await fetch_all("SELECT id, email, role, created_at FROM users ORDER BY id")
+    return [{"id": r["id"], "email": r["email"], "created_at": r["created_at"], "role": _norm_role(r.get("role"))}
             for r in rows]
 
 
 async def set_user_role(user_id: int, role: str):
-    """Yalnızca admin <-> member. Owner hedefi ve 'owner' değeri çağıran tarafta reddedilir."""
-    if role not in ("admin", "member"):
+    """
+    Rol değiştirir. Owner'ı düşürürken (owner -> admin/member) başka en az bir
+    owner kalmalı; aksi halde LastOwnerError. Koşul tek UPDATE içinde de
+    uygulanır; ardından owner sayısı kontrol edilir ve (eşzamanlı iki düşürme
+    gibi) beklenmedik bir durumda 0 owner kalırsa değişiklik geri alınır.
+    """
+    if role not in VALID_ROLES:
         raise ValueError("Geçersiz rol")
-    await execute("UPDATE users SET role = ? WHERE id = ?", (role, user_id))
+    current = await get_user_role(user_id)
+    if current is None:
+        raise ValueError("Kullanıcı bulunamadı")
+    if current == "owner" and role != "owner":
+        if await owner_count() <= 1:
+            raise LastOwnerError("Son kalan owner düşürülemez — önce başka birini owner yapın")
+        await execute(
+            "UPDATE users SET role = ? WHERE id = ? AND "
+            "(SELECT COUNT(*) FROM users WHERE role = 'owner') > 1", (role, user_id))
+        if await owner_count() == 0:
+            await execute("UPDATE users SET role = 'owner' WHERE id = ?", (user_id,))
+            raise LastOwnerError("Son kalan owner düşürülemez — önce başka birini owner yapın")
+        if await get_user_role(user_id) == "owner":
+            raise LastOwnerError("Son kalan owner düşürülemez — önce başka birini owner yapın")
+    else:
+        await execute("UPDATE users SET role = ? WHERE id = ?", (role, user_id))
 
 
 # ---------------------------------------------------------------------------
