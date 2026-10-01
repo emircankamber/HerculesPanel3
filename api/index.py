@@ -1433,7 +1433,7 @@ async def discovery_trending(req: TrendingRequest, user: dict = Depends(require_
         "departments": it.get("departments", []),
         "searches": it.get("searches"),
         "search_rank": it.get("searchRank"),
-        "growth_rate": it.get("searchRankGrowthRate"),  # 0-1 oran, ör. 0.91 = %91 büyüme
+        "growth_rate": it.get("searchRankGrowthRate"),  # 0-1 oran: arama SIRALAMASI yükselme oranı (0.909 = 11. sıradan 1. sıraya), hacim büyümesi DEĞİL
         "growth_4w": it.get("w4RankGrowthRate"),
         "growth_12w": it.get("w12RankGrowthRate"),
         "purchases": it.get("purchases"),
