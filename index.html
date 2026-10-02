@@ -3,267 +3,1171 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Private Label Pazar Analiz Paneli</title>
+<title>Hercul — Pazar Paneli</title>
+<link rel="icon" type="image/svg+xml" href="assets/hercul-icon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Manrope:wght@500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&display=swap" rel="stylesheet">
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  // "Editorial Intelligence" tasarım token'ları (stitch referans tasarımıyla aynı)
+  tailwind.config = {
+    theme: { extend: {
+      colors: {
+        "primary": "#005c55", "primary-container": "#0f766e", "primary-fixed": "#9cf2e8",
+        "on-primary": "#ffffff", "secondary": "#565e74", "secondary-container": "#dae2fd",
+        "tertiary": "#7d4200", "tertiary-container": "#a15600",
+        "error": "#ba1a1a", "error-container": "#ffdad6",
+        "surface": "#f8f9ff", "surface-container-lowest": "#ffffff", "surface-container-low": "#eff4ff",
+        "surface-container": "#e5eeff", "surface-container-high": "#dce9ff",
+        "on-surface": "#0b1c30", "on-surface-variant": "#3e4947",
+        "outline": "#6e7977", "outline-variant": "#bdc9c6", "hairline": "#e3e9f2",
+      },
+      fontFamily: { display: ["Manrope", "Inter", "sans-serif"], sans: ["Inter", "system-ui", "sans-serif"] },
+    } },
+  };
+</script>
 <link rel="stylesheet" href="styles.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 </head>
-<body>
+<body class="bg-surface text-on-surface">
 
 <div id="login-overlay" class="login-overlay" style="display:none;">
   <div class="login-card">
-    <div class="login-brand">◆ PL Pazar Paneli</div>
-    <div class="login-sub">Devam etmek için giriş yapın</div>
-    <input type="text" id="login-email" placeholder="e-posta veya kullanıcı adı" autocomplete="username">
-    <input type="password" id="login-password" placeholder="şifre" autocomplete="current-password">
+    <img src="assets/hercullogo.svg#svgView(viewBox(44,136,1136,361))" alt="Hercul — Private Label Market Intelligence" class="h-20 w-auto max-w-full self-start" width="252" height="80">
+    <div class="text-sm text-secondary mb-2">Devam etmek için giriş yapın</div>
+    <input type="text" id="login-email" class="field" placeholder="e-posta veya kullanıcı adı" autocomplete="username">
+    <input type="password" id="login-password" class="field" placeholder="şifre" autocomplete="current-password">
     <div class="login-error" id="login-error"></div>
-    <button id="login-btn">Giriş Yap</button>
-    <button id="register-btn" class="secondary">Yeni Hesap Oluştur</button>
+    <button id="login-btn" class="btn btn-primary">Giriş Yap</button>
+    <button id="register-btn" class="btn btn-outline">Yeni Hesap Oluştur</button>
     <div class="login-note">Kararlarınız ve geçmişiniz size özeldir. Aynı kelimeyi başkası da arayabilir. İlk kullanıcı kaydolduğunda panel kilitlenir.</div>
-    <button id="dismiss-login-btn" class="secondary" style="display:none;">Vazgeç, girişsiz devam et</button>
+    <button id="dismiss-login-btn" class="btn btn-outline" style="display:none;">Vazgeç, girişsiz devam et</button>
   </div>
 </div>
 
 <div id="storage-warning" class="storage-warning" style="display:none;"></div>
 
-<header class="topbar">
-  <div class="brand">PL Pazar Paneli</div>
-  <nav class="topnav">
-    <button data-view="search" class="nav-btn active">Sorgu</button>
-    <button data-view="decisions" class="nav-btn">Kararlar</button>
-    <button data-view="history" class="nav-btn">Geçmiş</button>
-    <span class="user-chip" id="user-chip"></span>
-    <button id="open-login-btn" class="nav-btn">Giriş / Kayıt Ol</button>
-    <button id="logout-btn" class="nav-btn" style="display:none;">Çıkış</button>
-  </nav>
-</header>
+<div class="lg:flex min-h-screen">
 
-<main id="app">
-
-  <section id="view-search" class="view active">
-    <form id="search-form" class="search-bar">
-      <input type="text" id="kw-input" placeholder="keyword ya da ASIN gir (örn. samsung water filter  /  B071NFVVNG)" required>
-      <select id="market-input">
-        <option value="US">US</option>
-        <option value="UK">UK</option>
-        <option value="CA">CA</option>
-      </select>
-      <button type="submit" id="search-btn">Analiz Et</button>
-    </form>
-    <div class="category-override-row">
-      <label for="category-override-input">Kategori node override (opsiyonel — belirsiz keyword'lerde yanlış kategori seçilirse kullan):</label>
-      <input type="text" id="category-override-input" placeholder="örn. 2619525011:3741181:3741241:3741161">
+  <!-- Kenar çubuğu (mobilde üst şerit) -->
+  <aside class="lg:w-60 lg:shrink-0 lg:border-r border-b lg:border-b-0 border-hairline bg-surface-container-lowest lg:sticky lg:top-0 lg:h-screen flex flex-col">
+    <div class="flex items-center px-5 h-16 shrink-0">
+      <!-- "Inteligente" satırının gölge filtresi (userSpaceOnUse, % bölge) viewBox ~361x819'dan küçükse
+           hiç çizilmiyor; bu yüzden viewBox bu boyutta tutulup alt satır ("Private Label…") kutunun
+           overflow:hidden'ı ile gizleniyor. Logo dosyası değiştirilmedi. -->
+      <div class="h-11 overflow-hidden shrink-0"><img src="assets/hercullogo.svg#svgView(viewBox(150,136,820,365))" alt="Hercul Inteligente" class="block h-[60px] w-auto max-w-none" width="135" height="60"></div>
     </div>
-    <div id="status-line" class="status-line"></div>
-    <div id="result-container"></div>
-  </section>
-
-  <section id="view-decisions" class="view">
-    <div class="decisions-header">
-      <h2>Pazar Kararları</h2>
-      <div style="display:flex;align-items:center;gap:12px;"><div class="decisions-summary" id="decisions-summary"></div><button id="clear-decisions-btn" class="danger-btn">Tümünü Temizle</button></div>
-    </div>
-    <div class="decisions-board">
-      <div class="decision-column decision-column-uygun">
-        <div class="decision-col-header">
-          <span class="decision-dot dot-uygun"></span> Uygun
-          <span class="decision-count" id="count-uygun">0</span>
-        </div>
-        <div class="decision-cards" id="cards-uygun"></div>
-      </div>
-      <div class="decision-column decision-column-sinirda">
-        <div class="decision-col-header">
-          <span class="decision-dot dot-sinirda"></span> Sınırda
-          <span class="decision-count" id="count-sinirda">0</span>
-        </div>
-        <div class="decision-cards" id="cards-sinirda"></div>
-      </div>
-      <div class="decision-column decision-column-elenmis">
-        <div class="decision-col-header">
-          <span class="decision-dot dot-elenmis"></span> Elenmiş
-          <span class="decision-count" id="count-elenmis">0</span>
-        </div>
-        <div class="decision-cards" id="cards-elenmis"></div>
+    <nav class="flex lg:flex-col gap-1 px-3 pb-3 lg:pb-0 overflow-x-auto">
+      <button data-view="home" class="nav-btn active"><span class="material-symbols-outlined">space_dashboard</span>Ana Sayfa</button>
+      <button data-view="search" class="nav-btn"><span class="material-symbols-outlined">monitoring</span>Ürün Analizi</button>
+      <button data-view="checklists" class="nav-btn"><span class="material-symbols-outlined">checklist</span>Kontrol Listesi</button>
+      <button data-view="launch" class="nav-btn"><span class="material-symbols-outlined">rocket_launch</span>Lansman Raporu</button>
+      <button data-view="keywords" class="nav-btn"><span class="material-symbols-outlined">manage_search</span>Keyword Araştırma</button>
+      <button data-view="competitors" class="nav-btn"><span class="material-symbols-outlined">compare_arrows</span>Rakip Analizi</button>
+      <button data-view="trends" class="nav-btn"><span class="material-symbols-outlined">trending_up</span>Trendler &amp; Fırsatlar</button>
+      <button data-view="reports" class="nav-btn"><span class="material-symbols-outlined">folder_open</span>Raporlar</button>
+      <button data-view="training" class="nav-btn"><span class="material-symbols-outlined">school</span>Eğitim &amp; Görevler</button>
+      <button data-view="settings" class="nav-btn"><span class="material-symbols-outlined">tune</span>Ayarlar</button>
+      <div class="hidden lg:block h-px bg-hairline my-2 mx-2"></div>
+      <button data-view="decisions" class="nav-btn"><span class="material-symbols-outlined">view_kanban</span>Pazar Kararları</button>
+      <button data-view="history" class="nav-btn"><span class="material-symbols-outlined">history</span>Geçmiş</button>
+    </nav>
+    <div class="hidden lg:block mt-auto p-4">
+      <div class="rounded-xl bg-surface-container-low p-3.5">
+        <div class="eyebrow flex items-center gap-1.5 text-primary"><span class="material-symbols-outlined" style="font-size:16px">insights</span>6 Temel Kriter</div>
+        <p class="text-xs text-on-surface-variant mt-1.5 leading-relaxed">Ön değerlendirme bir öneridir; son karar ekibindir.</p>
       </div>
     </div>
-  </section>
+  </aside>
 
-  <section id="view-history" class="view">
-    <div class="decisions-header">
-      <h2>Son Sorgulanan Keyword'ler</h2>
-      <button id="clear-history-btn" class="danger-btn">Tümünü Temizle</button>
-    </div>
-    <div id="history-list"></div>
-  </section>
+  <div class="flex-1 min-w-0 flex flex-col">
+    <!-- Üst çubuk -->
+    <header class="h-16 flex items-center justify-end gap-3 px-4 sm:px-8 border-b border-hairline bg-surface-container-lowest/80 backdrop-blur sticky top-0 z-20">
+      <form id="global-search-form" class="hidden md:flex items-center mr-auto relative w-72 max-w-[40%]">
+        <span class="material-symbols-outlined absolute left-2.5 text-secondary" style="font-size:17px">search</span>
+        <input type="text" id="global-search-input" class="field w-full !h-9 !pl-8 !bg-surface-container-low !border-transparent" placeholder="ASIN veya keyword analiz et…" aria-label="ASIN veya keyword analiz et">
+      </form>
+      <span id="data-state-chip" class="chip chip-dot na hidden sm:inline-flex">Veri bekleniyor</span>
+      <span class="text-xs text-secondary truncate max-w-[40vw]" id="user-chip"></span>
+      <button id="open-login-btn" class="btn btn-outline btn-sm"><span class="material-symbols-outlined">login</span>Giriş / Kayıt</button>
+      <button id="logout-btn" class="btn btn-outline btn-sm" style="display:none;"><span class="material-symbols-outlined">logout</span>Çıkış</button>
+    </header>
 
-</main>
+    <main id="app" class="flex-1 px-4 sm:px-8 py-6 sm:py-8 max-w-[1280px] w-full mx-auto">
 
+      <!-- ===================== ANA SAYFA ===================== -->
+      <!-- Yalnızca /api/recent + /api/decisions (DB). Açılışta MCP çağrısı YOK. -->
+      <section id="view-home" class="view active">
+        <div class="flex flex-col md:flex-row md:items-end justify-between gap-4">
+          <div class="max-w-2xl">
+            <div class="eyebrow flex items-center gap-1.5 text-primary"><span class="material-symbols-outlined" style="font-size:16px">verified</span>Ana Sayfa · kayıtlı analiz ve kararların</div>
+            <h1 class="font-display text-[28px] sm:text-[34px] font-semibold tracking-tight leading-tight mt-2">Pazar İstihbarat Merkeziniz</h1>
+            <p class="text-sm sm:text-[15px] text-on-surface-variant mt-2 leading-relaxed">Son incelediğin pazarlar, ekip kararların ve aktivite geçmişi. Bu sayfa SellerSprite'a istek atmaz; yalnızca kayıtlı verileri okur.</p>
+          </div>
+          <div class="flex flex-wrap items-center gap-2 shrink-0">
+            <span id="home-status" class="text-xs text-secondary"></span>
+            <button type="button" id="home-refresh" class="btn btn-outline btn-sm" title="Kayıtları yeniden oku (MCP çağrısı yok)"><span class="material-symbols-outlined">refresh</span>Yenile</button>
+            <button type="button" class="btn btn-primary btn-sm" data-goto="search"><span class="material-symbols-outlined">add_chart</span>Yeni Analiz</button>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 mt-6">
+          <div class="card p-5">
+            <div class="flex justify-between gap-2"><div class="eyebrow">Analiz sayısı</div><span id="home-k-week" class="chip ok"></span></div>
+            <div class="mt-3 flex items-baseline gap-1.5"><span id="home-k-analyses" class="font-display text-[34px] font-medium tracking-tight tabular">—</span><span class="text-xs text-secondary">sorgu</span></div>
+            <div id="home-k-markets" class="text-xs text-secondary mt-1"></div>
+          </div>
+          <div class="card p-5">
+            <div class="flex justify-between"><div class="eyebrow">Uygun</div><span class="material-symbols-outlined text-primary">verified</span></div>
+            <div class="mt-3 flex items-baseline gap-1.5"><span id="home-k-uygun" class="font-display text-[34px] font-medium tracking-tight tabular">—</span><span class="text-xs text-secondary">karar</span></div>
+            <div class="crit-track"><div id="home-b-uygun" class="crit-fill" style="width:0"></div></div>
+            <div id="home-p-uygun" class="text-xs text-secondary mt-2"></div>
+          </div>
+          <div class="card p-5">
+            <div class="flex justify-between"><div class="eyebrow">Sınırda</div><span class="material-symbols-outlined text-tertiary">pending</span></div>
+            <div class="mt-3 flex items-baseline gap-1.5"><span id="home-k-sinirda" class="font-display text-[34px] font-medium tracking-tight tabular">—</span><span class="text-xs text-secondary">karar</span></div>
+            <div class="crit-track"><div id="home-b-sinirda" class="crit-fill" style="width:0;background:var(--tertiary-container)"></div></div>
+            <div id="home-p-sinirda" class="text-xs text-secondary mt-2"></div>
+          </div>
+          <div class="card p-5">
+            <div class="flex justify-between"><div class="eyebrow">Elenmiş</div><span class="material-symbols-outlined text-error">cancel</span></div>
+            <div class="mt-3 flex items-baseline gap-1.5"><span id="home-k-elenmis" class="font-display text-[34px] font-medium tracking-tight tabular">—</span><span class="text-xs text-secondary">karar</span></div>
+            <div class="crit-track"><div id="home-b-elenmis" class="crit-fill bad" style="width:0"></div></div>
+            <div id="home-p-elenmis" class="text-xs text-secondary mt-2"></div>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_340px] gap-6 mt-6">
+          <div class="card overflow-hidden min-w-0">
+            <div class="flex flex-wrap items-center justify-between gap-2 px-5 pt-5 pb-3">
+              <div>
+                <h3 class="font-display text-lg font-semibold">Son İncelenen Pazarlar &amp; Kararlar</h3>
+                <p class="text-xs text-secondary mt-0.5">Tıklayınca yeniden analiz edilir (canlı MCP çağrısı).</p>
+              </div>
+              <div class="flex items-center gap-2"><span id="home-markets-count" class="chip na"></span>
+                <button type="button" class="crit-more !text-[13px]" data-goto="reports">Tüm raporlar <span class="material-symbols-outlined" style="font-size:16px">arrow_forward</span></button></div>
+            </div>
+            <div id="home-markets" class="flex flex-col gap-2 px-3 pb-3"></div>
+          </div>
+
+          <div class="flex flex-col gap-6 min-w-0">
+            <div class="card card-pad hero-bg">
+              <div class="eyebrow flex items-center gap-1.5 text-primary"><span class="material-symbols-outlined" style="font-size:16px">trending_up</span>Trendler &amp; Fırsatlar</div>
+              <h3 class="font-display text-lg font-semibold mt-2">Yükselen nişleri tara</h3>
+              <p class="text-xs text-on-surface-variant mt-1.5 leading-relaxed">Arama sıralamasında hızla yükselen keyword'ler. Her tarama 1 MCP çağrısı olduğu için burada otomatik çalışmaz.</p>
+              <button type="button" class="btn btn-outline btn-sm mt-4" data-goto="trends"><span class="material-symbols-outlined">radar</span>Trendler sayfasına git</button>
+            </div>
+            <div class="card card-pad">
+              <div class="eyebrow mb-3">Hızlı erişim</div>
+              <div class="grid grid-cols-2 gap-2">
+                <button type="button" class="btn btn-outline btn-sm !justify-start min-w-0" data-goto="keywords"><span class="material-symbols-outlined">manage_search</span>Keyword</button>
+                <button type="button" class="btn btn-outline btn-sm !justify-start min-w-0" data-goto="competitors"><span class="material-symbols-outlined">compare_arrows</span>Rakipler</button>
+                <button type="button" class="btn btn-outline btn-sm !justify-start min-w-0" data-goto="decisions"><span class="material-symbols-outlined">view_kanban</span>Kararlar</button>
+                <button type="button" class="btn btn-outline btn-sm !justify-start min-w-0" data-goto="settings"><span class="material-symbols-outlined">tune</span>Ayarlar</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card card-pad mt-6">
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <div class="flex items-center gap-3">
+              <span class="w-9 h-9 rounded-lg bg-surface-container-low grid place-items-center text-primary"><span class="material-symbols-outlined">format_list_bulleted</span></span>
+              <div>
+                <h3 class="font-display text-lg font-semibold">Son Aktiviteler</h3>
+                <p class="text-xs text-secondary">Analiz ve karar kayıtlarının zaman damgaları · kararlarda her keyword'ün son kararı</p>
+              </div>
+            </div>
+          </div>
+          <ol id="home-feed" class="home-feed mt-4"></ol>
+        </div>
+      </section>
+
+      <!-- ===================== SORGU ===================== -->
+      <section id="view-search" class="view">
+        <div class="card hero-bg overflow-hidden">
+          <div class="p-5 sm:p-8">
+            <div class="flex flex-wrap items-center gap-2">
+              <span class="chip chip-dot ok">SellerSprite MCP Entegrasyonu</span>
+              <span class="text-xs text-secondary">canlı veri · önbellek okunmaz</span>
+            </div>
+            <div class="flex flex-wrap items-end justify-between gap-4 mt-4">
+              <div class="max-w-2xl">
+                <h1 class="font-display text-[28px] sm:text-[32px] font-semibold tracking-tight leading-tight">Ürününü Keşfet, Pazarını Anla</h1>
+                <p class="text-sm sm:text-[15px] text-on-surface-variant mt-2 leading-relaxed">Keyword ya da ASIN gir; kategori istatistikleri, rakipler ve 6 kriterli ön değerlendirme canlı SellerSprite verisiyle hesaplansın.</p>
+              </div>
+              <div class="flex flex-wrap gap-2">
+                <button type="button" class="btn btn-outline btn-sm" data-goto="history"><span class="material-symbols-outlined">history</span>Geçmiş Analizler</button>
+                <button type="button" class="btn btn-outline btn-sm" data-goto="decisions"><span class="material-symbols-outlined">bookmarks</span>Pazar Kararları</button>
+              </div>
+            </div>
+
+            <form id="search-form" class="card mt-6 p-4 sm:p-5 shadow-[0_4px_20px_rgba(11,28,48,0.05)]">
+              <div class="flex flex-col sm:flex-row gap-3">
+                <div class="relative flex-1 min-w-0">
+                  <span class="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-secondary">search</span>
+                  <input type="text" id="kw-input" class="field w-full !h-12 !pl-10 !text-[15px]" placeholder="keyword ya da ASIN (örn. samsung water filter  /  B071NFVVNG)" required>
+                </div>
+                <div class="flex gap-3">
+                  <select id="market-input" class="field !h-12 w-24">
+                    <option value="US">US</option>
+                    <option value="UK">UK</option>
+                    <option value="CA">CA</option>
+                  </select>
+                  <button type="submit" id="search-btn" class="btn btn-primary !h-12 flex-1 sm:flex-none px-6"><span class="material-symbols-outlined">auto_awesome</span>Analiz Et</button>
+                </div>
+              </div>
+              <div class="flex flex-col md:flex-row md:items-center gap-2 md:gap-3 mt-4">
+                <label for="category-override-input" class="eyebrow shrink-0">Kategori node override (opsiyonel)</label>
+                <input type="text" id="category-override-input" class="field !h-8 text-xs md:w-72" placeholder="örn. 2619525011:3741181:3741241:3741161">
+                <span class="text-xs text-secondary">Belirsiz keyword'lerde yanlış kategori seçilirse kullan.</span>
+              </div>
+              <div id="status-line" class="status-line mt-3"></div>
+            </form>
+          </div>
+        </div>
+
+        <div id="result-container" class="mt-8"></div>
+      </section>
+
+      <!-- ===================== ARAŞTIRMA KONTROL LİSTESİ ===================== -->
+      <!-- Otomatik maddeler sunucudaki analiz snapshot'ından değerlendirilir; kilit ve görünürlük sunucuda. -->
+      <section id="view-launch" class="view">
+        <div class="card card-pad hero-bg">
+          <div class="max-w-2xl">
+            <div class="flex flex-wrap items-center gap-2"><span class="chip chip-dot ok">Yapılacaklar + Bütçe</span><span class="text-xs text-secondary">tek rapor · PDF olarak kaydedilir</span></div>
+            <h1 class="font-display text-[26px] sm:text-[32px] font-semibold tracking-tight leading-tight mt-3">Lansman Raporu</h1>
+            <p class="text-sm text-on-surface-variant mt-2 leading-relaxed">İlk sevkiyat maliyet/kâr tablosu, Amazon Vine, Creator Connections ve SP+SD+SB reklam bütçesi. Reklam ve Vine tek varyasyonda açılır; diğerleri organik büyür. Bu işlem MCP çağrısı yapmaz — rapor yalnızca bu formdaki değerlerle hesaplanır.</p>
+          </div>
+        </div>
+        <div id="lr-prefill" class="status-line mt-4"></div>
+        <form id="lr-form" class="flex flex-col gap-4 mt-4" novalidate>
+          <div class="card card-pad">
+            <h3 class="font-display text-lg font-semibold">Ürün</h3>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+              <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Ürün adı (rapor başlığı)</span><input id="lr-product" class="field w-full mt-1" type="text" maxlength="120" required placeholder="örn. Manyetik Bambu Kesme Tahtası"></label>
+              <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Ana keyword</span><input id="lr-keyword" class="field w-full mt-1" type="text" maxlength="200" required placeholder="örn. bamboo cutting board"></label>
+            </div>
+          </div>
+
+          <div class="card card-pad">
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              <div><h3 class="font-display text-lg font-semibold">Varyasyonlar</h3>
+                <p class="text-xs text-secondary mt-0.5">1–4 varyasyon. Reklam ve Vine yalnızca işaretlenen varyasyonda açılır. Sepet ağırlığı boşsa sevkiyat adetlerinin payı kullanılır.</p></div>
+              <button type="button" id="lr-var-add" class="btn btn-outline btn-sm"><span class="material-symbols-outlined">add</span>Varyasyon ekle</button>
+            </div>
+            <div id="lr-vars" class="flex flex-col gap-3 mt-4"></div>
+          </div>
+
+          <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <div class="card card-pad">
+              <h3 class="font-display text-lg font-semibold">Ücretler &amp; İade</h3>
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mt-4">
+                <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Referral oranı (%)</span><input id="lr-referral" class="field w-full mt-1" type="number" min="0" max="99" step="0.1" value="15"></label>
+                <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">İade oranı (%)</span><input id="lr-return" class="field w-full mt-1" type="number" min="0" max="99" step="0.01" value="5"></label>
+                <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Vine kayıt ücreti ($)</span><input id="lr-vine-fee" class="field w-full mt-1" type="number" min="0" step="1" value="200"></label>
+              </div>
+              <p class="text-[11px] text-secondary mt-2">Vine kayıt ücreti standart $200 (parent-level); fiyat $100'ın altındaysa Amazon'un düşük tier kurallarını kontrol edin.</p>
+            </div>
+            <div class="card card-pad">
+              <h3 class="font-display text-lg font-semibold">Reklam Bütçesi</h3>
+              <div class="flex flex-wrap gap-4 mt-3 text-sm">
+                <label class="flex items-center gap-2"><input type="radio" name="lr-budget" value="acos" checked> Hedef ACOS</label>
+                <label class="flex items-center gap-2"><input type="radio" name="lr-budget" value="daily"> Günlük bütçe ($)</label>
+              </div>
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-3">
+                <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Hedef ACOS (%)</span><input id="lr-acos" class="field w-full mt-1" type="number" min="0.1" max="100" step="0.1" value="11"></label>
+                <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Günlük toplam bütçe ($)</span><input id="lr-daily" class="field w-full mt-1" type="number" min="1" step="1" placeholder="örn. 300" disabled></label>
+              </div>
+              <p class="text-[11px] text-secondary mt-2">Kanal dağılımı SP : SD : SB = 1 : 0,35 : 0,40.</p>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <div class="card card-pad">
+              <h3 class="font-display text-lg font-semibold">Amazon Vine</h3>
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-4">
+                <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">ABD Vine adedi</span><input id="lr-us-vine" class="field w-full mt-1" type="number" min="1" step="1" value="30"></label>
+              </div>
+              <label class="flex items-center gap-2 text-sm mt-4"><input type="checkbox" id="lr-sv-on"> İkinci Vine pazarı (yalnızca Vine, satış yok)</label>
+              <div id="lr-sv" class="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-3" style="display:none;">
+                <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Pazar adı</span><input id="lr-sv-name" class="field w-full mt-1" type="text" maxlength="60" value="Kanada (CA)"></label>
+                <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Stok kaynağı</span>
+                  <select id="lr-sv-src" class="field w-full mt-1"><option value="extra">Ek / ayrı sevkiyat</option><option value="main">Ana partiden ayrılır</option></select></label>
+                <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Gönderilen adet</span><input id="lr-sv-total" class="field w-full mt-1" type="number" min="1" step="1" value="40"></label>
+                <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Vine'a kaydedilen adet</span><input id="lr-sv-enrolled" class="field w-full mt-1" type="number" min="1" step="1" placeholder="boşsa gönderilen adet"></label>
+              </div>
+            </div>
+            <div class="card card-pad">
+              <h3 class="font-display text-lg font-semibold">Creator Connections</h3>
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-4">
+                <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Komisyon oranı (%)</span><input id="lr-cc" class="field w-full mt-1" type="number" min="0" max="99" step="0.1" value="15"></label>
+              </div>
+              <div class="flex flex-wrap gap-4 mt-3 text-sm">
+                <label class="flex items-center gap-2"><input type="radio" name="lr-ccmode" value="scenarios" checked> Düşük / Orta senaryo</label>
+                <label class="flex items-center gap-2"><input type="radio" name="lr-ccmode" value="expected"> Tek beklenen adet</label>
+              </div>
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mt-3">
+                <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Düşük (aylık adet)</span><input id="lr-cc-low" class="field w-full mt-1" type="number" min="0" step="1" value="30"></label>
+                <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Orta (aylık adet)</span><input id="lr-cc-mid" class="field w-full mt-1" type="number" min="0" step="1" value="80"></label>
+                <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Beklenen (aylık adet)</span><input id="lr-cc-exp" class="field w-full mt-1" type="number" min="0" step="1" placeholder="örn. 50" disabled></label>
+              </div>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <div class="card card-pad">
+              <h3 class="font-display text-lg font-semibold">Ana Keyword Verisi <span class="chip na !text-[10px] align-middle">aylık</span></h3>
+              <p class="text-xs text-secondary mt-0.5">SellerSprite verisi aylıktır. Önerilen ACOS = Bid ÷ (Dönüşüm × reklam varyasyonunun fiyatı) — panelin pazar ortalamalı ACOS'u kullanılmaz.</p>
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-4">
+                <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Aylık satış</span><input id="lr-kw-purch" class="field w-full mt-1" type="number" min="0" step="1"></label>
+                <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Aylık tıklama</span><input id="lr-kw-clicks" class="field w-full mt-1" type="number" min="0" step="1"></label>
+                <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Ortalama PPC bid ($)</span><input id="lr-kw-bid" class="field w-full mt-1" type="number" min="0" step="0.01"></label>
+                <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Ortalama piyasa fiyatı ($)</span><input id="lr-kw-price" class="field w-full mt-1" type="number" min="0" step="0.01"></label>
+              </div>
+            </div>
+            <div class="card card-pad">
+              <h3 class="font-display text-lg font-semibold">Kampanya</h3>
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-4">
+                <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Kampanya günü</span><input id="lr-days" class="field w-full mt-1" type="number" min="1" max="365" step="1" value="60"></label>
+              </div>
+              <p class="text-[11px] text-secondary mt-2">İlk parti stokunun tükenme süresi. Yalnızca reklam ve Creator Connections toplamlarının hesabında kullanılır; rapor metninde görünmez.</p>
+            </div>
+          </div>
+
+          <div class="set-actionbar card">
+            <div class="min-w-0">
+              <div class="font-semibold text-sm">Raporu oluştur</div>
+              <div id="lr-status" class="text-xs text-secondary mt-0.5">Rapor yeni sekmede açılır; oradan “PDF olarak kaydet”.</div>
+            </div>
+            <button type="submit" id="lr-submit" class="btn btn-primary"><span class="material-symbols-outlined">picture_as_pdf</span>Raporu Oluştur</button>
+          </div>
+        </form>
+      </section>
+
+      <section id="view-checklists" class="view">
+        <div class="card card-pad hero-bg">
+          <div class="flex flex-col md:flex-row md:items-end justify-between gap-4">
+            <div class="max-w-2xl">
+              <div class="flex flex-wrap items-center gap-2"><span class="chip chip-dot ok">PL metodoloji</span><span class="text-xs text-secondary">5 aşama · ürün doğrulama protokolü</span></div>
+              <h1 class="font-display text-[26px] sm:text-[32px] font-semibold tracking-tight leading-tight mt-3">Private Label Araştırma Kontrol Listesi</h1>
+              <p class="text-sm text-on-surface-variant mt-2 leading-relaxed">Bir ürünü pazara sürmeden önce tamamlanması gereken kontroller. İlk iki aşamadaki 6 madde, liste başlatıldığı andaki analiz verisinden <b>otomatik</b> değerlendirilir.</p>
+            </div>
+            <div class="flex flex-wrap gap-2 shrink-0">
+              <button type="button" id="ck-tpl-open" class="btn btn-outline" style="display:none;"><span class="material-symbols-outlined">tune</span>Şablonu Düzenle</button>
+              <button type="button" class="btn btn-primary" data-goto="search"><span class="material-symbols-outlined">add_circle</span>Yeni Ürün Listesi</button>
+            </div>
+          </div>
+        </div>
+        <div id="ck-status" class="status-line mt-4"></div>
+
+        <div id="ck-guest" class="card card-pad mt-6 text-center py-12" style="display:none;">
+          <span class="material-symbols-outlined text-outline" style="font-size:36px">lock</span>
+          <div class="font-display text-lg font-semibold mt-2">Bu bölüm için giriş yapın</div>
+          <p class="text-sm text-secondary mt-1">Kontrol listeleri kişiye bağlıdır; kayıtlı bir hesapla giriş yapmalısın.</p>
+        </div>
+
+        <!-- Şablon editörü (yalnızca owner) -->
+        <section id="ck-tpl" class="card card-pad mt-6" style="display:none;">
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <div><div class="eyebrow">Yalnızca owner'lar</div><h3 class="font-display text-lg font-semibold mt-1">Şablon &amp; Eşikler</h3>
+              <p class="text-xs text-secondary mt-1">Değişiklikler yalnızca bundan sonra başlatılan listelere uygulanır; mevcut listeler kendi kopyalarını korur. Aşamalar ve otomatik maddeler sabittir.</p></div>
+            <span id="ck-tpl-meta" class="chip na"></span>
+          </div>
+          <div id="ck-tpl-th" class="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4"></div>
+          <div id="ck-tpl-stages" class="flex flex-col gap-4 mt-5"></div>
+          <div class="flex flex-wrap items-center gap-2 mt-5">
+            <button type="button" id="ck-tpl-save" class="btn btn-primary"><span class="material-symbols-outlined">save</span>Şablonu Kaydet</button>
+            <button type="button" id="ck-tpl-reset" class="btn btn-outline"><span class="material-symbols-outlined">restart_alt</span>Varsayılana Dön</button>
+            <button type="button" id="ck-tpl-close" class="btn btn-outline">Kapat</button>
+            <span id="ck-tpl-msg" class="text-xs"></span>
+          </div>
+        </section>
+
+        <div id="ck-body" class="grid grid-cols-1 xl:grid-cols-[300px_minmax(0,1fr)] gap-6 mt-6" style="display:none;">
+          <aside class="min-w-0">
+            <div class="flex items-baseline justify-between mb-3"><h3 class="font-display text-base font-semibold">Listeler</h3><span id="ck-list-count" class="text-xs text-secondary"></span></div>
+            <div id="ck-list" class="flex xl:flex-col gap-3 overflow-x-auto xl:overflow-visible pb-1"></div>
+          </aside>
+          <div id="ck-detail" class="min-w-0"></div>
+        </div>
+      </section>
+
+      <!-- ===================== KEYWORD ARAŞTIRMA ===================== -->
+      <section id="view-keywords" class="view">
+        <div class="flex flex-col lg:flex-row lg:items-end justify-between gap-4">
+          <div class="max-w-3xl">
+            <div class="eyebrow flex items-center gap-1.5 text-primary"><span class="w-1.5 h-1.5 rounded-full bg-primary"></span>Keyword Araştırma · keyword_miner (geniş eşleşme)</div>
+            <h1 class="font-display text-[28px] sm:text-[36px] font-semibold tracking-tight leading-tight mt-2">Kelimelerin Gücüyle Pazar Hacmini Çözün</h1>
+            <p class="text-sm sm:text-[15px] text-on-surface-variant mt-2 leading-relaxed">Tohum kelimeye göre ilişkili keyword'lerin arama hacmi, tıklama, satış ve reklam metrikleri. CVR ve ACOS <b>(hesaplanan)</b> değerlerdir.</p>
+          </div>
+          <div class="flex flex-wrap gap-2 shrink-0">
+            <button type="button" id="kwv-export" class="btn btn-outline" disabled><span class="material-symbols-outlined">download</span>Dışa Aktar (Excel)</button>
+            <button type="button" class="btn btn-outline" data-goto="history"><span class="material-symbols-outlined">history</span>Geçmiş Sorgular</button>
+          </div>
+        </div>
+
+        <form id="kwv-form" class="card card-pad mt-6">
+          <div class="grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_120px_150px_auto] gap-3 items-end">
+            <label class="flex flex-col gap-1.5 min-w-0"><span class="eyebrow">Tohum kelime veya kök terim</span>
+              <span class="relative block">
+                <span class="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-secondary">search</span>
+                <input type="text" id="kwv-input" class="field w-full !h-11 !pl-10" placeholder="örn. cupping therapy" required>
+              </span>
+            </label>
+            <label class="flex flex-col gap-1.5"><span class="eyebrow">Pazar yeri</span>
+              <select id="kwv-market" class="field !h-11"><option value="US">US</option><option value="UK">UK</option><option value="CA">CA</option></select>
+            </label>
+            <label class="flex flex-col gap-1.5"><span class="eyebrow">Min. aylık hacim</span>
+              <input type="number" id="kwv-minvol" class="field !h-11" min="0" step="100" placeholder="örn. 5000" title="Yalnızca tabloyu filtreler — backend'e gönderilmez">
+            </label>
+            <button type="submit" class="btn btn-primary !h-11 analyze-submit"><span class="material-symbols-outlined">query_stats</span>Derinlemesine Tara</button>
+          </div>
+          <div class="analysis-status status-line mt-3"></div>
+        </form>
+
+        <div id="kwv-empty" class="card card-pad mt-6 text-center py-12">
+          <span class="material-symbols-outlined text-outline" style="font-size:36px">manage_search</span>
+          <div class="font-display text-lg font-semibold mt-2">Henüz analiz yok</div>
+          <p class="text-sm text-secondary mt-1">Bir tohum kelime girip taramayı başlat — sonuçlar Ürün Analizi ile aynı canlı veriyi kullanır.</p>
+        </div>
+
+        <div id="kwv-content" class="hidden">
+          <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 mt-6">
+            <div class="card p-5"><div class="flex justify-between"><div class="eyebrow">İlgili kelime</div><span class="material-symbols-outlined text-primary">format_list_bulleted</span></div>
+              <div class="mt-3 flex items-baseline gap-1.5"><span id="kwv-k-count" class="font-display text-[34px] font-medium tracking-tight tabular">—</span><span class="text-xs text-secondary">adet</span></div>
+              <div class="text-xs text-secondary mt-1">keyword_miner geniş eşleşme sonucu</div></div>
+            <div class="card p-5"><div class="flex justify-between"><div class="eyebrow">Ana keyword hacmi</div><span class="material-symbols-outlined text-primary">query_stats</span></div>
+              <div class="mt-3 flex items-baseline gap-1.5"><span id="kwv-k-vol" class="font-display text-[34px] font-medium tracking-tight tabular">—</span><span class="text-xs text-secondary">arama/ay</span></div>
+              <div id="kwv-k-vol-sub" class="text-xs text-secondary mt-1 truncate"></div></div>
+            <div class="card p-5"><div class="flex justify-between"><div class="eyebrow">Ana keyword bid</div><span class="material-symbols-outlined text-primary">payments</span></div>
+              <div class="mt-3 flex items-baseline gap-1.5"><span id="kwv-k-bid" class="font-display text-[34px] font-medium tracking-tight tabular">—</span><span class="text-xs text-secondary">/tıklama</span></div>
+              <div id="kwv-k-cpa" class="text-xs text-secondary mt-1"></div></div>
+            <div class="card p-5"><div class="flex justify-between"><div class="eyebrow">Ana keyword ACOS</div><span class="material-symbols-outlined text-primary">bolt</span></div>
+              <div class="mt-3 flex items-baseline gap-2"><span id="kwv-k-acos" class="font-display text-[34px] font-medium tracking-tight tabular">—</span><span id="kwv-k-acos-chip"></span></div>
+              <div id="kwv-k-cvr" class="text-xs text-secondary mt-1"></div></div>
+          </div>
+
+          <div class="grid grid-cols-1 2xl:grid-cols-[minmax(0,1fr)_320px] gap-6 mt-6">
+            <div class="card overflow-hidden min-w-0">
+              <div class="flex flex-wrap items-center justify-between gap-3 p-5 pb-4">
+                <div class="flex items-center gap-2"><h3 class="font-display text-lg font-semibold">Hedeflenen Kelime Matrisi</h3><span id="kwv-result-chip" class="chip ok"></span></div>
+                <div class="flex flex-wrap items-center gap-2">
+                  <input type="search" id="kwv-search" class="field !h-8 text-xs w-40" placeholder="tabloda ara…">
+                  <div class="tabs bg-surface-container-low rounded-lg p-0.5" id="kwv-filters">
+                    <button type="button" class="tab-btn !py-1 !px-2.5 !text-xs active" data-filter="all">Tümü</button>
+                    <button type="button" class="tab-btn !py-1 !px-2.5 !text-xs" data-filter="highvol" title="Aylık arama ≥ 10.000">Yüksek Hacim</button>
+                    <button type="button" class="tab-btn !py-1 !px-2.5 !text-xs" data-filter="lowacos" title="ACOS (hesaplanan) < %20">Düşük ACOS</button>
+                  </div>
+                </div>
+              </div>
+              <div class="table-wrap !rounded-none !border-x-0 !border-b-0">
+                <table class="data-table" id="kwv-table">
+                  <thead><tr>
+                    <th data-sort="keyword" class="sortable">Anahtar Kelime</th>
+                    <th data-sort="searches" class="sortable" title="Aylık arama sayısı">Aylık Hacim</th>
+                    <th data-sort="clicks" class="sortable">Clicks</th>
+                    <th data-sort="purchases" class="sortable">Purchases</th>
+                    <th data-sort="click_cvr" class="sortable" title="purchases / clicks (hesaplanan)">Click CVR</th>
+                    <th data-sort="bid" class="sortable">Bid</th>
+                    <th data-sort="acos" class="sortable" title="bid / (CVR × fiyat) (hesaplanan)">ACOS</th>
+                    <th data-sort="cpa" class="sortable">CPA</th>
+                    <th data-sort="relevancy" class="sortable kwv-th-rel">Relevancy</th>
+                    <th class="!text-center">Analiz</th>
+                  </tr></thead>
+                  <tbody id="kwv-tbody"></tbody>
+                </table>
+              </div>
+              <div class="flex flex-wrap items-center justify-between gap-3 px-5 py-4 border-t border-hairline">
+                <span id="kwv-range" class="text-xs text-secondary"></span>
+                <div id="kwv-pager" class="pager"></div>
+              </div>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-2 2xl:grid-cols-1 gap-6 min-w-0 content-start">
+              <div class="card card-pad">
+                <div class="flex items-center justify-between"><h3 class="font-display text-base font-semibold">Search Volume Trend</h3><span class="chip na">12 ay</span></div>
+                <p class="text-xs text-secondary mt-1">Ana keyword'ün kendi aylık arama hacmi.</p>
+                <div class="chart-box !h-[180px] mt-3"><canvas id="kwv-trend"></canvas><div id="kwv-trend-empty" class="chart-fallback-text" style="display:none;"></div></div>
+              </div>
+              <div class="card card-pad">
+                <div class="flex items-center justify-between"><h3 class="font-display text-base font-semibold">En Çok Satış Getiren</h3><span class="chip na">purchases</span></div>
+                <p class="text-xs text-secondary mt-1">Tahmini satış adedine göre ilk 5 keyword.</p>
+                <div id="kwv-top-purchases" class="flex flex-col gap-3 mt-4"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===================== TRENDLER & FIRSATLAR ===================== -->
+      <section id="view-trends" class="view">
+        <div class="card card-pad hero-bg">
+          <div class="flex flex-wrap items-center gap-2"><span class="chip chip-dot ok">ABA arama sıralaması</span><span class="text-xs text-secondary">aba_research_weekly / monthly · POST /api/discovery/trending</span></div>
+          <h1 class="font-display text-[26px] sm:text-[32px] font-semibold tracking-tight leading-tight mt-3">Erken Sinyalleri Yakalayın</h1>
+          <p class="text-sm text-on-surface-variant mt-2 leading-relaxed max-w-3xl">Amazon arama sıralamasında hızla yükselen keyword'ler. <b>Sıralama İvmesi</b>, keyword'ün arama <b>sırasının</b> ne kadar yükseldiğini gösterir (0.909 ≈ 11. sıradan 1. sıraya) — arama hacmi büyümesi değildir. Hacim için "Arama Hacmi" sütununa bakın.</p>
+        </div>
+
+        <form id="trd-form" class="card card-pad mt-6" novalidate>
+          <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-[minmax(0,1.4fr)_repeat(4,minmax(0,1fr))_auto] gap-3 items-end">
+            <label class="flex flex-col gap-1.5 min-w-0"><span class="eyebrow">Pazar tipi</span>
+              <select id="trd-model" class="field !h-11">
+                <option value="1">Popüler Pazar</option>
+                <option value="2">Anormal Hareketli</option>
+                <option value="3">Sürekli Büyüyen</option>
+                <option value="4" selected>Hızlı Yükselen</option>
+                <option value="5">Potansiyel</option>
+                <option value="6">Uzun Kuyruk</option>
+              </select>
+            </label>
+            <label class="flex flex-col gap-1.5 min-w-0"><span class="eyebrow">Periyot</span>
+              <select id="trd-gran" class="field !h-11"><option value="weekly" selected>Haftalık</option><option value="monthly">Aylık</option></select>
+            </label>
+            <label class="flex flex-col gap-1.5 min-w-0"><span class="eyebrow">Pazar yeri</span>
+              <select id="trd-market" class="field !h-11"><option value="US">US</option><option value="UK">UK</option><option value="CA">CA</option></select>
+            </label>
+            <label class="flex flex-col gap-1.5 min-w-0"><span class="eyebrow">Min. arama hacmi</span>
+              <input type="number" id="trd-minsearch" class="field !h-11" min="0" step="100" placeholder="opsiyonel">
+            </label>
+            <label class="flex flex-col gap-1.5 min-w-0"><span class="eyebrow">Sonuç sayısı</span>
+              <select id="trd-size" class="field !h-11"><option value="10">10</option><option value="20" selected>20</option><option value="50">50</option></select>
+            </label>
+            <button type="submit" id="trd-scan" class="btn btn-primary !h-11"><span class="material-symbols-outlined">radar</span>Tara</button>
+          </div>
+          <div class="flex flex-wrap items-center justify-between gap-2 mt-3">
+            <div id="trd-status" class="status-line"></div>
+            <div id="trd-stale" class="text-xs text-tertiary font-medium" style="display:none;">Filtreler değişti — sonuçları güncellemek için Tara'ya basın.</div>
+          </div>
+          <div class="text-xs text-secondary mt-1">Her tarama 1 SellerSprite MCP çağrısıdır; filtre değişince otomatik çekilmez.</div>
+        </form>
+
+        <div id="trd-empty" class="card card-pad mt-6 text-center py-12">
+          <span class="material-symbols-outlined text-outline" style="font-size:36px">radar</span>
+          <div class="font-display text-lg font-semibold mt-2">Henüz tarama yapılmadı</div>
+          <p class="text-sm text-secondary mt-1">Pazar tipini seçip Tara'ya basın.</p>
+        </div>
+
+        <div id="trd-content" class="hidden mt-6">
+          <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
+            <div class="flex flex-wrap items-center gap-2">
+              <h3 class="section-title">Öncelikli Fırsat Radarı</h3>
+              <span id="trd-summary-chip" class="chip ok"></span>
+              <span id="trd-meta" class="text-xs text-secondary"></span>
+            </div>
+            <label class="flex items-center gap-2 text-xs text-secondary">Sıralama
+              <select id="trd-sort" class="field !h-8 text-xs">
+                <option value="backend">Backend sırası</option>
+                <option value="growth_rate">Sıralama İvmesi</option>
+                <option value="searches">Arama Hacmi</option>
+                <option value="purchases">Satış</option>
+              </select>
+            </label>
+          </div>
+          <div id="trd-list" class="grid grid-cols-1 lg:grid-cols-2 gap-4"></div>
+        </div>
+      </section>
+
+      <!-- ===================== RAKİP ANALİZİ ===================== -->
+      <section id="view-competitors" class="view">
+        <div id="cv-empty" class="card card-pad text-center py-12">
+          <span class="material-symbols-outlined text-outline" style="font-size:36px">compare_arrows</span>
+          <div class="font-display text-lg font-semibold mt-2">Henüz incelenen pazar yok</div>
+          <p class="text-sm text-secondary mt-1">Rakip matrisi, son yapılan Ürün Analizi'nin kategori en çok satanlarından oluşur.</p>
+          <button type="button" class="btn btn-primary mt-4" data-goto="search"><span class="material-symbols-outlined">monitoring</span>Ürün Analizine Git</button>
+        </div>
+
+        <div id="cv-content" class="hidden flex-col gap-6">
+          <div class="flex flex-wrap items-center justify-between gap-3">
+            <div class="flex flex-wrap items-center gap-2 min-w-0">
+              <span class="chip !py-1.5 max-w-full"><span class="material-symbols-outlined" style="font-size:15px">hub</span><span class="truncate">İncelenen Pazar: <b id="cv-market-name"></b></span></span>
+              <span id="cv-asin-count" class="chip na"></span>
+            </div>
+            <div class="flex flex-wrap items-center gap-2">
+              <div class="tabs bg-surface-container-low rounded-lg p-0.5" id="cv-scope">
+                <button type="button" class="tab-btn !py-1 !px-2.5 !text-xs" data-scope="5">Top 5</button>
+                <button type="button" class="tab-btn !py-1 !px-2.5 !text-xs" data-scope="10">Top 10</button>
+                <button type="button" class="tab-btn !py-1 !px-2.5 !text-xs active" data-scope="all">Tümü</button>
+              </div>
+              <button type="button" id="cv-export" class="btn btn-primary btn-sm"><span class="material-symbols-outlined">download</span>Raporu İndir (Excel)</button>
+            </div>
+          </div>
+
+          <div class="card card-pad hero-bg">
+            <div class="flex flex-col md:flex-row md:items-end justify-between gap-6">
+              <div class="max-w-2xl">
+                <div class="flex flex-wrap items-center gap-2"><span class="chip ok">Rakip Analizi</span><span class="text-xs text-secondary">competitor_lookup · kategorinin gerçek en çok satanları</span></div>
+                <h1 class="font-display text-[26px] sm:text-[32px] font-semibold tracking-tight leading-tight mt-3">Rakiplerin Gücünü Haritalayın</h1>
+                <p class="text-sm text-on-surface-variant mt-2 leading-relaxed">Pazar liderlerinin ciro dağılımı, fiyat–puan konumu ve yorum bariyeri. Değerler SellerSprite'ın kendi tahminleridir; panel yeniden hesaplamaz.</p>
+              </div>
+              <div class="md:text-right shrink-0">
+                <div class="eyebrow">#1 rakip tahmini aylık ciro</div>
+                <div id="cv-top-revenue" class="font-display text-[34px] sm:text-[40px] font-medium tracking-tight text-primary tabular mt-1">—</div>
+                <div id="cv-top-revenue-sub" class="text-xs text-secondary mt-1"></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+            <div class="card card-pad flex flex-col">
+              <div class="eyebrow">Hacim paylaşımı</div>
+              <h3 class="font-display text-lg font-semibold mt-1">Pazar Ciro Dağılımı</h3>
+              <p class="text-xs text-secondary mt-1">Marka bazında ciro payı (market_brand_concentration).</p>
+              <div class="chart-box !h-[200px] mt-3"><canvas id="cv-brand-chart"></canvas></div>
+              <div id="cv-brand-foot" class="mt-auto pt-4 text-xs text-secondary"></div>
+            </div>
+            <div class="card card-pad flex flex-col">
+              <div class="eyebrow">Esneklik &amp; denge</div>
+              <h3 class="font-display text-lg font-semibold mt-1">Fiyat vs. Puan Dağılımı</h3>
+              <p class="text-xs text-secondary mt-1">Her nokta bir rakip; boyut aylık satış adedine göre.</p>
+              <div class="chart-box !h-[200px] mt-3"><canvas id="cv-scatter-chart"></canvas></div>
+              <div id="cv-scatter-foot" class="mt-auto pt-4 grid grid-cols-2 gap-2 text-xs text-secondary"></div>
+            </div>
+            <div class="card card-pad flex flex-col">
+              <div class="eyebrow">Pazara giriş bariyeri</div>
+              <h3 class="font-display text-lg font-semibold mt-1">Rakip Yorum Sayıları</h3>
+              <p class="text-xs text-secondary mt-1">Satış sırasına göre rakiplerin toplam yorum sayısı.</p>
+              <div class="chart-box !h-[200px] mt-3"><canvas id="cv-review-chart"></canvas></div>
+              <div id="cv-review-foot" class="mt-auto pt-4 grid grid-cols-2 gap-2 text-xs text-secondary"></div>
+            </div>
+          </div>
+
+          <div>
+            <div class="flex items-end justify-between gap-2 mb-3">
+              <div><div class="eyebrow">Satış sıralaması</div><h3 class="font-display text-lg font-semibold mt-1">Pazar Liderleri</h3></div>
+              <span class="text-xs text-secondary hidden sm:inline">aylık satış adedine göre ilk 3</span>
+            </div>
+            <div id="cv-leaders" class="grid grid-cols-1 md:grid-cols-3 gap-4"></div>
+          </div>
+
+          <div class="card overflow-hidden">
+            <div class="flex flex-wrap items-center justify-between gap-3 p-5 pb-4">
+              <div><div class="eyebrow">Granüler karşılaştırma</div><h3 class="font-display text-lg font-semibold mt-1">Detaylı Rakip Matrisi</h3></div>
+              <div class="flex flex-wrap gap-2">
+                <button type="button" class="chip-toggle" id="cv-f-bsr" aria-pressed="false">BSR &lt; 5.000</button>
+                <button type="button" class="chip-toggle" id="cv-f-fba" aria-pressed="false">Yalnızca FBA</button>
+              </div>
+            </div>
+            <div class="table-wrap !rounded-none !border-x-0 !border-b-0">
+              <table class="data-table">
+                <thead><tr>
+                  <th>Marka &amp; ASIN</th>
+                  <th class="l" title="availableDate — Amazon'da listelenme tarihi">Lansman</th>
+                  <th>Fiyat</th>
+                  <th>Aylık Satış</th>
+                  <th>Tahmini Ciro</th>
+                  <th>Puan &amp; Yorum</th>
+                  <th>BSR</th>
+                  <th class="!text-center">Lojistik</th>
+                  <th class="!text-center">Eylem</th>
+                </tr></thead>
+                <tbody id="cv-tbody"></tbody>
+              </table>
+            </div>
+            <div class="flex flex-wrap items-center justify-between gap-3 px-5 py-4 border-t border-hairline">
+              <span id="cv-range" class="text-xs text-secondary"></span>
+              <div id="cv-pager" class="pager"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===================== RAPORLAR ===================== -->
+      <section id="view-reports" class="view">
+        <div class="card card-pad hero-bg">
+          <div class="flex flex-col md:flex-row md:items-end justify-between gap-4">
+            <div class="max-w-2xl">
+              <div class="eyebrow flex items-center gap-1.5 text-primary"><span class="w-1.5 h-1.5 rounded-full bg-primary"></span>Stratejik kayıt defteri · private label</div>
+              <h1 class="font-display text-[26px] sm:text-[32px] font-semibold tracking-tight leading-tight mt-2">Pazar Raporları ve Fizibilite Arşivi</h1>
+              <p class="text-sm text-on-surface-variant mt-2 leading-relaxed">Analiz ettiğin pazarlar, ekip kararların ve algoritmik ön önerileri tek listede.</p>
+            </div>
+            <div class="flex flex-wrap md:flex-col gap-2 shrink-0">
+              <button type="button" id="rep-csv" class="btn btn-outline"><span class="material-symbols-outlined">download</span>Listeyi CSV Olarak İndir</button>
+              <button type="button" class="btn btn-primary" data-goto="search"><span class="material-symbols-outlined">add_chart</span>Yeni Analiz</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 mt-6">
+          <div class="card p-5"><div class="flex justify-between"><div class="eyebrow">Toplam kayıt</div><span class="material-symbols-outlined text-primary">folder_open</span></div>
+            <div class="mt-3 flex items-baseline gap-2"><span id="rep-k-total" class="font-display text-[34px] font-medium tracking-tight tabular">—</span><span id="rep-k-week" class="text-xs text-primary font-medium"></span></div>
+            <div class="crit-track"><div class="crit-fill" style="width:100%"></div></div></div>
+          <div class="card p-5"><div class="flex justify-between"><div class="eyebrow">Uygun bulunan</div><span class="material-symbols-outlined text-primary">verified</span></div>
+            <div class="mt-3 flex items-baseline gap-2"><span id="rep-k-uygun" class="font-display text-[34px] font-medium tracking-tight tabular">—</span><span id="rep-k-uygun-pct" class="chip ok"></span></div>
+            <div class="crit-track"><div id="rep-b-uygun" class="crit-fill" style="width:0"></div></div></div>
+          <div class="card p-5"><div class="flex justify-between"><div class="eyebrow">Elenen</div><span class="material-symbols-outlined text-error">cancel</span></div>
+            <div class="mt-3 flex items-baseline gap-2"><span id="rep-k-elenmis" class="font-display text-[34px] font-medium tracking-tight tabular">—</span><span id="rep-k-elenmis-pct" class="chip bad"></span></div>
+            <div class="crit-track"><div id="rep-b-elenmis" class="crit-fill bad" style="width:0"></div></div></div>
+          <div class="card p-5"><div class="flex justify-between"><div class="eyebrow">Sınırda / kararsız</div><span class="material-symbols-outlined text-tertiary">pending</span></div>
+            <div class="mt-3 flex items-baseline gap-2"><span id="rep-k-sinirda" class="font-display text-[34px] font-medium tracking-tight tabular">—</span><span id="rep-k-sinirda-sub" class="text-xs text-tertiary font-medium"></span></div>
+            <div class="crit-track"><div id="rep-b-sinirda" class="crit-fill" style="width:0;background:var(--tertiary-container)"></div></div></div>
+        </div>
+
+        <div class="card p-3 sm:p-4 mt-6 flex flex-col lg:flex-row lg:items-center gap-3">
+          <div class="relative flex-1 min-w-0">
+            <span class="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-secondary">search</span>
+            <input type="search" id="rep-search" class="field w-full !pl-10" placeholder="Keyword, ASIN veya not ara…">
+          </div>
+          <div class="tabs bg-surface-container-low rounded-lg p-0.5" id="rep-status">
+            <button type="button" class="tab-btn !py-1.5 !text-xs active" data-status="all">Tümü</button>
+            <button type="button" class="tab-btn !py-1.5 !text-xs" data-status="decided">Karar Verildi</button>
+            <button type="button" class="tab-btn !py-1.5 !text-xs" data-status="pending">İnceleniyor</button>
+          </div>
+          <div class="flex gap-2">
+            <select id="rep-range" class="field !h-9 text-xs">
+              <option value="7">Son 7 gün</option><option value="30">Son 30 gün</option><option value="90">Son 90 gün</option><option value="all" selected>Tüm zamanlar</option>
+            </select>
+            <select id="rep-market" class="field !h-9 text-xs">
+              <option value="all">Tüm pazarlar</option><option value="US">US</option><option value="UK">UK</option><option value="CA">CA</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_320px] gap-6 mt-6">
+          <div class="card overflow-hidden min-w-0">
+            <div class="flex items-center justify-between gap-2 px-5 py-4 bg-surface-container-low border-b border-hairline">
+              <h3 class="font-display text-lg font-semibold flex items-center gap-2"><span class="material-symbols-outlined text-primary">inventory</span>Fizibilite Dosyaları</h3>
+              <span id="rep-count" class="text-xs text-secondary"></span>
+            </div>
+            <div id="rep-list"></div>
+          </div>
+          <div class="card card-pad h-fit">
+            <div class="flex items-center justify-between"><h3 class="font-display text-lg font-semibold">Karar Dağılımı</h3><span id="rep-dist-range" class="text-xs text-secondary"></span></div>
+            <div class="chart-box !h-[200px] mt-4"><canvas id="rep-dist-chart"></canvas>
+              <div class="absolute inset-0 grid place-items-center pointer-events-none"><div class="text-center"><div id="rep-dist-total" class="font-display text-3xl font-semibold">—</div><div class="eyebrow">karar</div></div></div>
+            </div>
+            <div id="rep-dist-legend" class="flex flex-col gap-2 mt-5 text-sm"></div>
+            <div class="rounded-xl bg-surface-container-low p-3 mt-5 text-xs text-on-surface-variant leading-relaxed">Her keyword için <b>en son</b> kaydedilen ekip kararı sayılır. Kararsız kayıtlar dağılıma dahil değildir.</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===================== EĞİTİM & GÖREVLER ===================== -->
+      <!-- Yetki kontrolleri SUNUCUDA (require_user / require_staff / require_owner); burada yalnızca görünüm. -->
+      <section id="view-training" class="view">
+        <div class="card card-pad hero-bg">
+          <div class="flex flex-col md:flex-row md:items-end justify-between gap-5">
+            <div class="max-w-2xl">
+              <div class="eyebrow flex items-center gap-1.5 text-primary"><span class="w-1.5 h-1.5 rounded-full bg-primary"></span>Eğitim &amp; Görevler <span id="trn-role-chip" class="chip na ml-1"></span></div>
+              <h1 class="font-display text-[26px] sm:text-[32px] font-semibold tracking-tight leading-tight mt-2">Ekip Eğitimi</h1>
+              <p class="text-sm text-on-surface-variant mt-2 leading-relaxed">Sana atanan dersleri izle ve bitirdiklerini işaretle. Yöneticiler ders ekler, atar ve ilerlemeyi takip eder.</p>
+            </div>
+            <div id="trn-progress" class="min-w-[220px] md:text-right" style="display:none;">
+              <div class="eyebrow">İlerlemem</div>
+              <div class="font-display text-[34px] font-medium tracking-tight tabular mt-1"><span id="trn-progress-done">0</span><span class="text-secondary text-xl"> / <span id="trn-progress-total">0</span></span> <span class="text-sm text-secondary font-sans">tamamlandı</span></div>
+              <div class="crit-track"><div id="trn-progress-bar" class="crit-fill" style="width:0"></div></div>
+            </div>
+          </div>
+        </div>
+
+        <div id="trn-status" class="status-line mt-4"></div>
+
+        <div id="trn-guest" class="card card-pad mt-6 text-center py-12" style="display:none;">
+          <span class="material-symbols-outlined text-outline" style="font-size:36px">lock</span>
+          <div class="font-display text-lg font-semibold mt-2">Bu bölüm için giriş yapın</div>
+          <p class="text-sm text-secondary mt-1">Eğitimler kişiye atanır; görmek için kayıtlı bir hesapla giriş yapmalısın.</p>
+          <button type="button" id="trn-login" class="btn btn-primary mt-4"><span class="material-symbols-outlined">login</span>Giriş / Kayıt</button>
+        </div>
+
+        <section id="trn-mine" class="mt-6" style="display:none;">
+          <div class="flex items-baseline justify-between gap-2 mb-4">
+            <h3 class="section-title">Derslerim</h3>
+            <span id="trn-mine-count" class="text-xs text-secondary"></span>
+          </div>
+          <div id="trn-mine-list" class="grid grid-cols-1 xl:grid-cols-2 gap-4"></div>
+        </section>
+
+        <!-- Owner / admin -->
+        <div id="trn-staff" class="flex flex-col gap-6 mt-8" style="display:none;">
+          <section class="card card-pad">
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              <div><div class="eyebrow">Yönetim</div><h3 class="font-display text-lg font-semibold mt-1">Ders Yönetimi</h3></div>
+              <span id="trn-form-mode" class="chip na">Yeni ders</span>
+            </div>
+            <form id="trn-form" class="grid grid-cols-1 md:grid-cols-2 gap-3 mt-4" novalidate>
+              <input type="hidden" id="trn-f-id">
+              <label class="flex flex-col gap-1.5 md:col-span-2"><span class="eyebrow">Başlık *</span>
+                <input type="text" id="trn-f-title" class="field" maxlength="200" required placeholder="örn. Ürün araştırmasına giriş"></label>
+              <label class="flex flex-col gap-1.5 md:col-span-2"><span class="eyebrow">Açıklama</span>
+                <textarea id="trn-f-desc" class="field !h-24 py-2" maxlength="5000" placeholder="Dersin amacı, izlerken dikkat edilecekler…"></textarea></label>
+              <label class="flex flex-col gap-1.5 md:col-span-2"><span class="eyebrow">Video linki (https)</span>
+                <input type="url" id="trn-f-url" class="field" maxlength="500" placeholder="https://www.youtube.com/watch?v=…  ya da Loom / Drive linki">
+                <span id="trn-f-url-hint" class="text-xs text-secondary">YouTube linkleri sayfada oynatılır; diğer linkler yeni sekmede açılır.</span></label>
+              <label class="flex flex-col gap-1.5"><span class="eyebrow">Sıra</span>
+                <input type="number" id="trn-f-order" class="field" min="0" max="10000" step="1" value="1"></label>
+              <label class="flex flex-col gap-1.5"><span class="eyebrow">Son tarih (opsiyonel)</span>
+                <input type="date" id="trn-f-due" class="field"></label>
+              <fieldset class="md:col-span-2 flex flex-col gap-2">
+                <legend class="eyebrow mb-1.5">Atama</legend>
+                <div class="flex flex-wrap gap-4 text-sm">
+                  <label class="inline-flex items-center gap-2"><input type="radio" name="trn-assign" value="all" checked> Herkese</label>
+                  <label class="inline-flex items-center gap-2"><input type="radio" name="trn-assign" value="some"> Seçilen kişilere</label>
+                </div>
+                <div id="trn-f-users" class="trn-userpick" style="display:none;"></div>
+              </fieldset>
+              <div class="md:col-span-2 flex flex-wrap items-center gap-2">
+                <button type="submit" id="trn-f-save" class="btn btn-primary"><span class="material-symbols-outlined">save</span>Kaydet</button>
+                <button type="button" id="trn-f-cancel" class="btn btn-outline" style="display:none;">Vazgeç</button>
+                <span id="trn-f-msg" class="text-xs"></span>
+              </div>
+            </form>
+            <div class="table-wrap mt-6">
+              <table class="data-table">
+                <thead><tr><th class="l">Sıra</th><th class="l">Ders</th><th class="l">Video</th><th class="l">Son tarih</th><th class="l">Atama</th><th class="!text-center">İşlem</th></tr></thead>
+                <tbody id="trn-lessons-tbody"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="card card-pad">
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              <div><div class="eyebrow">Takip</div><h3 class="font-display text-lg font-semibold mt-1">Kişi × Ders Tamamlama</h3></div>
+              <div class="flex flex-wrap gap-3 text-xs text-secondary"><span><span class="trn-cell done">✓</span> tamamlandı</span><span><span class="trn-cell todo">—</span> atandı</span><span><span class="trn-cell na">·</span> atanmadı</span></div>
+            </div>
+            <div class="table-wrap mt-4">
+              <table class="data-table trn-matrix" id="trn-matrix"></table>
+            </div>
+          </section>
+
+          <section id="trn-roles" class="card card-pad" style="display:none;">
+            <div><div class="eyebrow">Yalnızca owner'lar</div><h3 class="font-display text-lg font-semibold mt-1">Rol Yönetimi</h3>
+              <p class="text-xs text-secondary mt-1">Owner'lar rolleri yönetir (birden fazla owner olabilir); admin'ler ders ekler, atar ve ilerlemeyi görür. Son kalan owner düşürülemez.</p></div>
+            <div class="table-wrap mt-4">
+              <table class="data-table"><thead><tr><th class="l">Kullanıcı</th><th class="l hidden sm:table-cell">Rol</th><th class="!text-center">Rol / Değiştir</th></tr></thead>
+                <tbody id="trn-roles-tbody"></tbody></table>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <!-- ===================== AYARLAR ===================== -->
+      <section id="view-settings" class="view">
+        <div class="card card-pad hero-bg">
+          <div class="eyebrow flex items-center gap-1.5 text-primary"><span class="w-1.5 h-1.5 rounded-full bg-primary"></span>Ayarlar · /api/thresholds</div>
+          <h1 class="font-display text-[26px] sm:text-[32px] font-semibold tracking-tight leading-tight mt-2">Analiz Kriterleri ve Eşikler</h1>
+          <p class="text-sm text-on-surface-variant mt-2 leading-relaxed max-w-2xl">Ön değerlendirmedeki 6 private label kriterinin eşik değerleri. Eşikler hesabına özeldir ve kaydettikten sonraki analizlerde kullanılır; açık analiz ekranı yeniden puanlanmaz.</p>
+        </div>
+
+        <div id="set-banner" class="set-banner mt-6" role="status" style="display:none;"></div>
+
+        <div class="card card-pad mt-6">
+          <div class="flex flex-wrap items-start justify-between gap-3">
+            <div class="flex gap-3">
+              <span class="w-10 h-10 shrink-0 rounded-lg bg-surface-container-low grid place-items-center text-primary"><span class="material-symbols-outlined">rule</span></span>
+              <div>
+                <h3 class="font-display text-lg font-semibold">Private Label Eleme Kriteri Eşikleri</h3>
+                <p class="text-xs text-secondary mt-0.5">scoring.py · ön değerlendirmenin Olumlu / Olumsuz sınırları</p>
+              </div>
+            </div>
+            <span id="set-dirty-chip" class="chip na">Yükleniyor…</span>
+          </div>
+          <form id="set-form" class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-5" novalidate></form>
+
+          <div class="rounded-xl bg-surface-container-low p-4 mt-4 flex flex-col sm:flex-row sm:items-center gap-3">
+            <span class="material-symbols-outlined text-primary">filter_alt_off</span>
+            <div class="flex-1 text-[13px]">
+              <div class="font-semibold">Otomatik eleme kuralı</div>
+              <div class="text-secondary text-xs mt-0.5">0 olumsuz = Uygun · 1–3 = Sınırda · 4 ve üzeri olumsuz = Elenmiş. Bu kural backend'de sabittir, buradan değiştirilemez.</div>
+            </div>
+            <span class="chip bad shrink-0">4+ olumsuz → Elenmiş</span>
+          </div>
+        </div>
+
+        <div class="set-actionbar card mt-6">
+          <div class="min-w-0">
+            <div class="font-semibold text-sm">Eşik değişiklikleri</div>
+            <div id="set-status" class="text-xs text-secondary mt-0.5">—</div>
+          </div>
+          <div class="flex flex-wrap gap-2">
+            <button type="button" id="set-revert" class="btn btn-outline" disabled><span class="material-symbols-outlined">undo</span>Geri Al</button>
+            <button type="button" id="set-reset" class="btn btn-outline" disabled><span class="material-symbols-outlined">restart_alt</span>Sıfırla</button>
+            <button type="button" id="set-save" class="btn btn-primary" disabled><span class="material-symbols-outlined">check</span>Kaydet</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===================== KARARLAR ===================== -->
+      <section id="view-decisions" class="view">
+        <div class="flex flex-wrap items-end justify-between gap-3 mb-6">
+          <div>
+            <div class="eyebrow">Ekip kararları</div>
+            <h2 class="section-title mt-1">Pazar Kararları</h2>
+          </div>
+          <div class="flex items-center gap-3">
+            <div class="text-xs text-secondary" id="decisions-summary"></div>
+            <button id="clear-decisions-btn" class="btn btn-danger">Tümünü Temizle</button>
+          </div>
+        </div>
+        <div class="decisions-board">
+          <div class="decision-column">
+            <div class="decision-col-header"><span class="decision-dot dot-uygun"></span> Uygun <span class="decision-count" id="count-uygun">0</span></div>
+            <div class="decision-cards" id="cards-uygun"></div>
+          </div>
+          <div class="decision-column">
+            <div class="decision-col-header"><span class="decision-dot dot-sinirda"></span> Sınırda <span class="decision-count" id="count-sinirda">0</span></div>
+            <div class="decision-cards" id="cards-sinirda"></div>
+          </div>
+          <div class="decision-column">
+            <div class="decision-col-header"><span class="decision-dot dot-elenmis"></span> Elenmiş <span class="decision-count" id="count-elenmis">0</span></div>
+            <div class="decision-cards" id="cards-elenmis"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===================== GEÇMİŞ ===================== -->
+      <section id="view-history" class="view">
+        <div class="flex flex-wrap items-end justify-between gap-3 mb-6">
+          <div>
+            <div class="eyebrow">Sorgu geçmişi</div>
+            <h2 class="section-title mt-1">Son Sorgulanan Keyword'ler</h2>
+          </div>
+          <button id="clear-history-btn" class="btn btn-danger">Tümünü Temizle</button>
+        </div>
+        <div id="history-list" class="card overflow-hidden"></div>
+      </section>
+
+    </main>
+  </div>
+</div>
+
+<!-- ===================== ANALİZ PANELİ ŞABLONU ===================== -->
 <template id="tpl-panel">
-  <div class="panel">
-    <div class="panel-head">
-      <div>
-        <div class="kw-title"></div>
-        <div class="kw-sub"></div>
-      </div>
-      <div class="panel-head-right">
-        <div class="export-buttons">
-          <button class="export-report-btn" title="Tam raporu Excel olarak indir">📊 Rapor İndir</button>
-          <button class="export-keywords-btn" title="Sadece keyword tablosunu Excel olarak indir">📋 Keyword Tablosu İndir</button>
+  <div class="panel flex flex-col gap-6">
+
+    <!-- Ürün / keyword başlığı -->
+    <div class="card card-pad">
+      <div class="flex flex-col md:flex-row md:items-start justify-between gap-4">
+        <div class="min-w-0">
+          <div class="flex flex-wrap gap-1.5 panel-chips"></div>
+          <h2 class="kw-title font-display text-[22px] sm:text-2xl font-semibold tracking-tight mt-3 break-words"></h2>
+          <div class="kw-breadcrumb flex flex-wrap items-center gap-1 text-xs text-secondary mt-2"></div>
+          <div class="kw-sub text-xs text-secondary mt-2"></div>
         </div>
-        <div class="verdict-block">
-          <div class="verdict-label">ön öneri</div>
+        <div class="flex flex-wrap gap-2 shrink-0">
+          <button class="export-report-btn btn btn-outline" title="Tam raporu Excel olarak indir"><span class="material-symbols-outlined">description</span>Rapor İndir</button>
+          <button class="export-keywords-btn btn btn-outline" title="Sadece keyword tablosunu Excel olarak indir"><span class="material-symbols-outlined">table_view</span>Keyword Tablosu İndir</button>
+          <button class="lr-start-btn btn btn-outline" title="Bu analizin ana keyword verisi ve iade oranıyla lansman raporu formunu aç (MCP çağrısı yapmaz)"><span class="material-symbols-outlined">rocket_launch</span>Lansman Raporu</button>
+          <button class="ck-start-btn btn btn-primary" title="Bu analizin anlık kopyasıyla araştırma kontrol listesi oluştur (MCP çağrısı yapmaz)"><span class="material-symbols-outlined">checklist</span>Kontrol Listesi Başlat</button>
+        </div>
+      </div>
+
+      <div class="asin-info-block mt-5" style="display:none;">
+        <div class="eyebrow mb-2">Ürün bilgisi · reverse ASIN</div>
+        <div class="asin-info-grid"></div>
+      </div>
+    </div>
+
+    <!-- Ön öneri + Pazar kararı -->
+    <div class="grid grid-cols-1 lg:grid-cols-[minmax(0,5fr)_minmax(0,8fr)] gap-6">
+      <div class="card card-pad">
+        <div class="flex justify-between items-center">
+          <div class="eyebrow">Ön öneri</div>
+          <span class="material-symbols-outlined text-tertiary">balance</span>
+        </div>
+        <div class="flex flex-wrap items-center gap-3 mt-3">
           <span class="verdict-badge"></span>
+          <span class="verdict-hint text-xs text-secondary"></span>
+        </div>
+        <p class="text-[13.5px] text-on-surface-variant leading-relaxed mt-4">Algoritmik ön öneri 6 kritere dayanır: 0 olumsuz = Uygun, 1–3 = Sınırda, 4+ = Elenmiş. Tek bir olumsuz kriter tek başına eleme sebebi değildir.</p>
+      </div>
+
+      <div class="card card-pad">
+        <div class="flex flex-wrap justify-between items-center gap-2">
+          <div class="flex items-center gap-2"><div class="eyebrow">Pazar kararı</div><span class="chip na">Ekip kararı · kalıcı</span></div>
+          <span class="decision-saved-msg text-xs text-primary font-semibold"></span>
+        </div>
+        <div class="decision-row flex flex-col sm:flex-row gap-3 mt-4">
+          <select class="decision-select field sm:w-52">
+            <option value="">İncelemede / Karar yok</option>
+            <option value="Uygun">Uygun</option>
+            <option value="Sınırda">Sınırda</option>
+            <option value="Elenmiş">Elenmiş</option>
+          </select>
+          <input type="text" class="decision-note field flex-1" placeholder="karar notu ekle (opsiyonel — örn. tedarikçi notu)">
+          <button class="decision-save btn btn-primary"><span class="material-symbols-outlined">save</span>Kaydet</button>
+        </div>
+        <div class="mt-4 rounded-xl bg-surface-container-low p-4 flex gap-3">
+          <span class="material-symbols-outlined text-tertiary mt-0.5">info</span>
+          <div class="verdict-summary text-[13px] leading-relaxed text-on-surface"></div>
         </div>
       </div>
     </div>
 
-    <div class="section-label">pazar kararı <small>(ekip kararı — kalıcı kaydedilir)</small></div>
-    <div class="decision-row">
-      <select class="decision-select">
-        <option value="">— seç —</option>
-        <option value="Uygun">Uygun</option>
-        <option value="Sınırda">Sınırda</option>
-        <option value="Elenmiş">Elenmiş</option>
-      </select>
-      <input type="text" class="decision-note" placeholder="karar notu (opsiyonel)">
-      <button class="decision-save">Kaydet</button>
-      <span class="decision-saved-msg"></span>
-    </div>
+    <!-- Ön değerlendirme: mevcut 6 kriter -->
+    <section>
+      <div class="flex flex-wrap items-center justify-between gap-2 mb-4">
+        <div class="flex flex-wrap items-center gap-3">
+          <h3 class="section-title">Ön Değerlendirme</h3>
+          <span class="neg-chip chip bad"><span class="neg-count"></span>/6 olumsuz · 4+ = Elenmiş</span>
+        </div>
+        <span class="text-xs text-secondary">6 temel private label fizibilite kriteri</span>
+      </div>
+      <div class="crit-grid"></div>
+    </section>
 
-    <div class="verdict-summary"></div>
+    <!-- Pazar özeti + grafikler -->
+    <section>
+      <div class="flex items-baseline justify-between gap-2 mb-4">
+        <h3 class="section-title">Pazar Özeti</h3>
+        <span class="text-xs text-secondary">kategori geneli · market_research_statistics</span>
+      </div>
+      <div class="stat-grid"></div>
+      <div class="charts-grid grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+        <div class="chart-card card card-pad"><div class="eyebrow mb-3">Marka Payı</div><div class="chart-box"><canvas class="chart-brand"></canvas></div></div>
+        <div class="chart-card card card-pad"><div class="eyebrow mb-3">Fiyat Dağılımı</div><div class="chart-box"><canvas class="chart-price"></canvas></div></div>
+        <div class="chart-card card card-pad"><div class="eyebrow mb-3">Launch Time Dağılımı</div><div class="chart-box"><canvas class="chart-launch"></canvas></div></div>
+        <div class="chart-card card card-pad"><div class="eyebrow mb-3" title="Bu keyword'ün son 12 ayki aylık Amazon arama hacmi (kategori trafiği değil)">Search Volume Trend</div><div class="chart-box"><canvas class="chart-trend"></canvas><div class="chart-fallback-text" style="display:none;"></div></div></div>
+      </div>
+    </section>
 
-    <div class="section-label">ön değerlendirme <small>(<span class="neg-count"></span>/6 olumsuz · 4+ = Elenmiş)</small></div>
-    <div class="crit-grid"></div>
+    <!-- Detay sekmeleri -->
+    <section class="card card-pad">
+      <div class="tabs mb-5">
+        <button class="tab-btn active" data-tab="competitors">Top Rakipler</button>
+        <button class="tab-btn" data-tab="keywords">Relevant Keywords</button>
+        <button class="tab-btn" data-tab="profit">Birim Maliyet &amp; Kâr</button>
+        <button class="tab-btn" data-tab="signals">Hercules Signal Engine</button>
+        <button class="tab-btn" data-tab="proof">Proof Assets</button>
+      </div>
 
-    <div class="asin-info-block" style="display:none;">
-      <div class="section-label">ürün bilgisi <small>(reverse ASIN)</small></div>
-      <div class="asin-info-grid"></div>
-    </div>
+      <!-- Top rakipler -->
+      <div class="tab-pane active" data-pane="competitors">
+        <div class="flex flex-col sm:flex-row gap-3 mb-4">
+          <input type="text" class="competitor-asins field flex-1" placeholder="ASIN'leri virgülle ayır (örn. B071NFVVNG, B09HR7L313)">
+          <button class="competitor-fetch-btn btn btn-outline"><span class="material-symbols-outlined">refresh</span>Manuel ASIN ile Yeniden Çek</button>
+        </div>
+        <div class="table-wrap">
+          <table class="comp-table data-table">
+            <thead><tr>
+              <th>ASIN &amp; Marka</th>
+              <th>Fiyat</th>
+              <th title="Tahmini aylık satış adedi">Satış / Ay</th>
+              <th title="Tahmini aylık ciro (satış x fiyat)">Aylık Ciro</th>
+              <th title="Best Sellers Rank — kategorideki satış sıralaması. Düşük = daha çok satıyor.">BSR</th>
+              <th title="Ortalama yıldız puanı">Puan</th>
+              <th title="Toplam yorum sayısı. Yüksekse pazara girmek zor.">Yorum</th>
+            </tr></thead>
+            <tbody class="comp-tbody"></tbody>
+          </table>
+        </div>
+        <div class="text-xs text-secondary mt-3">Otomatik çekildi (kategorinin gerçek en çok satanları) — istersen manuel ASIN girip yeniden çekebilirsin.</div>
+      </div>
 
-    <div class="section-label">pazar özeti</div>
-    <div class="stat-grid"></div>
+      <!-- Relevant keywords -->
+      <div class="tab-pane" data-pane="keywords">
+        <div class="table-wrap">
+          <table class="kw-table data-table">
+            <thead><tr>
+              <th data-sort="keyword">Keyword</th>
+              <th data-sort="searches" title="Bu kelimenin Amazon'da aylık aranma sayısı">Search</th>
+              <th data-sort="clicks" title="Arama sonucunda ürünlere yapılan toplam tıklama">Clicks</th>
+              <th data-sort="purchases" title="Bu kelimeden gelen tahmini satış adedi">Purchases</th>
+              <th data-sort="click_cvr" title="Dönüşüm oranı = Satış / Tıklama (hesaplanan). Yüksek olması iyi.">Click CVR</th>
+              <th data-sort="bid" title="Amazon'un önerdiği tıklama başı reklam maliyeti">Bid</th>
+              <th data-sort="acos" title="Reklam maliyeti / satış geliri (hesaplanan). DÜŞÜK olması iyi. %30 altı çok iyi, %75 üstü zararlı.">ACOS</th>
+              <th data-sort="cpa" title="Bir satış elde etmenin tahmini reklam maliyeti">CPA</th>
+              <th data-sort="relevancy" class="th-relevancy" title="Bu kelimenin aranan ürünle ne kadar ilgili olduğu (0-100)">Relevancy</th>
+            </tr></thead>
+            <tbody class="kw-tbody"></tbody>
+          </table>
+        </div>
+        <div class="text-xs text-secondary mt-3">Click CVR ve ACOS <b>(hesaplanan)</b>: purchases/clicks ve bid/(CVR × fiyat) — SellerSprite'ın web arayüzündeki resmi rakam değildir.</div>
+      </div>
 
-    <div class="charts-grid">
-      <div class="chart-card"><div class="chart-title">Marka Payı</div><canvas class="chart-brand"></canvas></div>
-      <div class="chart-card"><div class="chart-title">Fiyat Dağılımı</div><canvas class="chart-price"></canvas></div>
-      <div class="chart-card"><div class="chart-title">Launch Time Dağılımı</div><canvas class="chart-launch"></canvas></div>
-      <div class="chart-card"><div class="chart-title" title="Bu keyword'ün son 12 ayki aylık Amazon arama hacmi (kategori trafiği değil)">Search Volume Trend</div><canvas class="chart-trend"></canvas><div class="chart-fallback-text" style="display:none;"></div></div>
-    </div>
+      <!-- Kar analizi -->
+      <div class="tab-pane" data-pane="profit">
+        <div class="profit-card flex flex-col gap-5">
+          <div class="profit-source-note"></div>
+          <div class="profit-inputs">
+            <label>Alış / COGS ($)<input type="number" step="0.01" class="p-cogs field" value="6.00"></label>
+            <label>Satış Fiyatı ($)<input type="number" step="0.01" class="p-sale field" value="37.75"></label>
+            <label>FBA Fee ($)<input type="number" step="0.01" class="p-fba field" value="5.50"></label>
+            <label>Referral Fee ($)<input type="number" step="0.01" class="p-ref field" value="5.66"></label>
+            <label>ACOS (%)<input type="number" step="0.1" class="p-acos field" value="40"></label>
+            <label>Return Rate (%)<input type="number" step="0.1" class="p-ret field" value="3"></label>
+            <label>Genel Gider (%)<input type="number" step="0.1" class="p-gen field" value="1"></label>
+          </div>
+          <div class="profit-outputs">
+            <div class="po"><span>Reklam Maliyeti</span><strong class="o-adv">—</strong></div>
+            <div class="po"><span>Return Maliyeti</span><strong class="o-retc">—</strong></div>
+            <div class="po"><span>Toplam Maliyet</span><strong class="o-tot">—</strong></div>
+          </div>
+          <div class="profit-summary">
+            <div class="ps"><div class="ps-l">Birim Kâr</div><div class="ps-v o-profit">—</div></div>
+            <div class="ps"><div class="ps-l">Kâr Marjı</div><div class="ps-v o-margin">—</div></div>
+            <div class="ps"><div class="ps-l">ROI</div><div class="ps-v o-roi">—</div></div>
+          </div>
+          <div class="text-xs text-secondary">Kâr marjı değiştikçe <b>Kriter 06 — Net Kâr Marjı</b> ve ön öneri canlı güncellenir.</div>
+        </div>
+      </div>
 
-    <div class="section-label">relevant keywords <small>(CVR / ACOS hesaplanan)</small></div>
-    <div class="table-wrap">
-      <table class="kw-table">
-        <thead><tr>
-          <th>Keyword</th>
-          <th title="Bu kelimenin Amazon'da aylık aranma sayısı">Search</th>
-          <th title="Arama sonucunda ürünlere yapılan toplam tıklama">Clicks</th>
-          <th title="Bu kelimeden gelen tahmini satış adedi">Purchases</th>
-          <th title="Dönüşüm oranı = Satış / Tıklama. Yüksek olması iyi.">Click CVR</th>
-          <th title="Amazon'un önerdiği tıklama başı reklam maliyeti">Bid</th>
-          <th title="Reklam maliyeti / satış geliri. DÜŞÜK olması iyi. %30 altı çok iyi, %75 üstü zararlı.">ACOS</th>
-          <th title="Bir satış elde etmenin tahmini reklam maliyeti">CPA</th>
-          <th class="th-relevancy" title="Bu kelimenin aranan ürünle ne kadar ilgili olduğu (0-100)">Relevancy</th>
-        </tr></thead>
-        <tbody class="kw-tbody"></tbody>
-      </table>
-    </div>
-
-    <div class="section-label">top rakipler <small>(otomatik çekildi — istersen aşağıya manuel ASIN girip yeniden çekebilirsin)</small></div>
-    <div class="competitor-fetch-row">
-      <input type="text" class="competitor-asins" placeholder="ASIN'leri virgülle ayır (örn. B071NFVVNG, B09HR7L313)">
-      <button class="competitor-fetch-btn">Manuel ASIN ile Yeniden Çek</button>
-    </div>
-    <div class="table-wrap" style="margin-top:8px;">
-      <table class="comp-table">
-        <thead><tr><th>ASIN</th><th>Marka</th><th>Fiyat</th>
-  <th title="Tahmini aylık satış adedi">Aylık Satış</th>
-  <th title="Tahmini aylık ciro (satış x fiyat)">Aylık Ciro</th>
-  <th title="Best Sellers Rank — kategorideki satış sıralaması. Düşük = daha çok satıyor.">BSR</th>
-  <th title="Ortalama yıldız puanı">Rating</th>
-  <th title="Toplam yorum sayısı. Yüksekse pazara girmek zor.">Review</th></tr></thead>
-        <tbody class="comp-tbody"></tbody>
-      </table>
-    </div>
-
-    <div class="section-label">hercules signal engine <small>v2.1 — Market / Demand / Truth / Risk sinyalleri</small></div>
-    <div class="signal-card">
-      <div class="signal-inputs">
-        <div class="signal-input-group">
-          <div class="sig-group-title">Risk bileşenleri (manuel, 0-100 — yüksek=riskli)</div>
-          <div class="signal-inputs-grid">
-            <label>Regülasyon<input type="number" class="s-reg" value="20" min="0" max="100"></label>
-            <label>IP/Marka<input type="number" class="s-ip" value="20" min="0" max="100"></label>
-            <label>Tedarikçi Konsantrasyonu<input type="number" class="s-supc" value="30" min="0" max="100"></label>
-            <label>Return Riski<input type="number" class="s-ret" value="30" min="0" max="100"></label>
-            <label>Mevsimsel Nakit Akışı<input type="number" class="s-seas" value="20" min="0" max="100"></label>
-            <label>Review Manipülasyonu<input type="number" class="s-revm" value="15" min="0" max="100"></label>
+      <!-- Hercules Signal Engine -->
+      <div class="tab-pane" data-pane="signals">
+        <div class="text-xs text-secondary mb-4">v2.1 — Market / Demand / Truth / Risk sinyalleri</div>
+        <div class="signal-card flex flex-col gap-5">
+          <div class="signal-inputs grid grid-cols-1 xl:grid-cols-2 gap-5">
+            <div class="signal-input-group rounded-xl bg-surface-container-low p-4">
+              <div class="sig-group-title">Risk bileşenleri (manuel, 0-100 — yüksek = riskli)</div>
+              <div class="signal-inputs-grid">
+                <label>Regülasyon<input type="number" class="s-reg field" value="20" min="0" max="100"></label>
+                <label>IP/Marka<input type="number" class="s-ip field" value="20" min="0" max="100"></label>
+                <label>Tedarikçi Konsantrasyonu<input type="number" class="s-supc field" value="30" min="0" max="100"></label>
+                <label>Return Riski<input type="number" class="s-ret field" value="30" min="0" max="100"></label>
+                <label>Mevsimsel Nakit Akışı<input type="number" class="s-seas field" value="20" min="0" max="100"></label>
+                <label>Review Manipülasyonu<input type="number" class="s-revm field" value="15" min="0" max="100"></label>
+              </div>
+            </div>
+            <div class="signal-input-group rounded-xl bg-surface-container-low p-4">
+              <div class="sig-group-title">Uygunluk / Sertifika (opsiyonel)</div>
+              <div class="signal-inputs-grid">
+                <label>Kategori Anahtarı<input type="text" class="s-category field" placeholder="örn. water_filtration"></label>
+                <label>Sağlanan Sertifikalar<input type="text" class="s-certs field" placeholder="virgülle ayır"></label>
+              </div>
+            </div>
+          </div>
+          <div class="flex items-center gap-3">
+            <button class="signal-compute-btn btn btn-primary"><span class="material-symbols-outlined">bolt</span>Sinyalleri Hesapla</button>
+            <div class="signal-status text-xs text-secondary"></div>
+          </div>
+          <div class="signal-results" style="display:none;">
+            <div class="signal-bars"></div>
+            <div class="opp-score-row flex flex-wrap items-center gap-4 mt-4">
+              <div class="opp-score-block">
+                <div class="ps-l">Opportunity Score</div>
+                <div class="opp-score-val">—</div>
+              </div>
+              <div class="blue-ocean-badge">—</div>
+              <div class="stage-gate-badge">—</div>
+            </div>
+            <div class="gate-reasons mt-3"></div>
+            <div class="compliance-banner mt-3" style="display:none;"></div>
           </div>
         </div>
-        <div class="signal-input-group">
-          <div class="sig-group-title">Uygunluk / Sertifika (opsiyonel)</div>
-          <div class="signal-inputs-grid">
-            <label>Kategori Anahtarı<input type="text" class="s-category" placeholder="örn. water_filtration"></label>
-            <label>Sağlanan Sertifikalar<input type="text" class="s-certs" placeholder="virgülle ayır"></label>
+      </div>
+
+      <!-- Proof assets -->
+      <div class="tab-pane" data-pane="proof">
+        <div class="text-xs text-secondary mb-4">Aşama 2 — sourcing kanıtları, manuel</div>
+        <div class="proof-card">
+          <div class="proof-add-row flex flex-col sm:flex-row gap-3">
+            <select class="proof-type-select field sm:w-72">
+              <option value="factory_video">Fabrika videosu (20p)</option>
+              <option value="sample_photo">Numune fotoğrafı (15p)</option>
+              <option value="measurement_video">Ölçü/tartı videosu (15p)</option>
+              <option value="packaging_proof">Ambalaj kanıtı (10p)</option>
+              <option value="coa_lab_cert">COA/lab raporu (25p veya regüle kategoride VETO)</option>
+              <option value="real_use_content">Gerçek kullanım foto/video (15p)</option>
+            </select>
+            <input type="text" class="proof-note field flex-1" placeholder="not (opsiyonel)">
+            <button class="proof-add-btn btn btn-outline"><span class="material-symbols-outlined">add</span>Ekle</button>
           </div>
+          <div class="proof-list mt-4"></div>
+          <div class="proof-total text-sm mt-3">Proof Score: <strong class="proof-total-val">0</strong>/100</div>
         </div>
       </div>
-      <button class="signal-compute-btn">Sinyalleri Hesapla</button>
-      <div class="signal-status"></div>
-      <div class="signal-results" style="display:none;">
-        <div class="signal-bars"></div>
-        <div class="opp-score-row">
-          <div class="opp-score-block">
-            <div class="ps-l">Opportunity Score</div>
-            <div class="opp-score-val">—</div>
-          </div>
-          <div class="blue-ocean-badge">—</div>
-          <div class="stage-gate-badge">—</div>
-        </div>
-        <div class="gate-reasons"></div>
-        <div class="compliance-banner" style="display:none;"></div>
-      </div>
-    </div>
+    </section>
 
-    <div class="section-label">proof assets <small>(Aşama 2 — sourcing kanıtları, manuel)</small></div>
-    <div class="proof-card">
-      <div class="proof-add-row">
-        <select class="proof-type-select">
-          <option value="factory_video">Fabrika videosu (20p)</option>
-          <option value="sample_photo">Numune fotoğrafı (15p)</option>
-          <option value="measurement_video">Ölçü/tartı videosu (15p)</option>
-          <option value="packaging_proof">Ambalaj kanıtı (10p)</option>
-          <option value="coa_lab_cert">COA/lab raporu (25p veya regüle kategoride VETO)</option>
-          <option value="real_use_content">Gerçek kullanım foto/video (15p)</option>
-        </select>
-        <input type="text" class="proof-note" placeholder="not (opsiyonel)">
-        <button class="proof-add-btn">Ekle</button>
-      </div>
-      <div class="proof-list"></div>
-      <div class="proof-total">Proof Score: <strong class="proof-total-val">0</strong>/100</div>
-    </div>
-
-    <div class="section-label">kar analizi <small>(canlı — değerleri değiştir)</small></div>
-    <div class="profit-card">
-      <div class="profit-source-note"></div>
-      <div class="profit-inputs">
-        <label>Alış / COGS ($)<input type="number" step="0.01" class="p-cogs" value="6.00"></label>
-        <label>Satış Fiyatı ($)<input type="number" step="0.01" class="p-sale" value="37.75"></label>
-        <label>FBA Fee ($)<input type="number" step="0.01" class="p-fba" value="5.50"></label>
-        <label>Referral Fee ($)<input type="number" step="0.01" class="p-ref" value="5.66"></label>
-        <label>ACOS (%)<input type="number" step="0.1" class="p-acos" value="40"></label>
-        <label>Return Rate (%)<input type="number" step="0.1" class="p-ret" value="3"></label>
-        <label>Genel Gider (%)<input type="number" step="0.1" class="p-gen" value="1"></label>
-      </div>
-      <div class="profit-outputs">
-        <div class="po"><span>Reklam Maliyeti</span><strong class="o-adv">—</strong></div>
-        <div class="po"><span>Return Maliyeti</span><strong class="o-retc">—</strong></div>
-        <div class="po"><span>Toplam Maliyet</span><strong class="o-tot">—</strong></div>
-      </div>
-      <div class="profit-summary">
-        <div class="ps"><div class="ps-l">Birim Kar</div><div class="ps-v o-profit">—</div></div>
-        <div class="ps"><div class="ps-l">Kar Marjı</div><div class="ps-v o-margin">—</div></div>
-        <div class="ps"><div class="ps-l">ROI</div><div class="ps-v o-roi">—</div></div>
-      </div>
-    </div>
   </div>
 </template>
 

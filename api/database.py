@@ -3,6 +3,7 @@ Veritabanı katmanı — db_adapter üzerinden Postgres (paylaşımlı/kalıcı)
 SQLite (yerel test) ile çalışır. Bkz. db_adapter.py docstring.
 """
 import json
+import os
 import time
 import hashlib
 import secrets
@@ -20,6 +21,10 @@ CACHE_TTL_SECONDS = 24 * 3600
 PAYLOAD_VERSION = 3
 
 _SCHEMAS = [
+    """CREATE TABLE IF NOT EXISTS user_thresholds (
+        user_id INTEGER PRIMARY KEY, min_avg_price REAL, min_gross_margin REAL,
+        max_acos REAL, max_brand_share REAL, min_strong_new_brands REAL,
+        min_net_margin REAL, updated_at INTEGER NOT NULL)""",
     """CREATE TABLE IF NOT EXISTS keyword_analysis (
         id INTEGER PRIMARY KEY AUTOINCREMENT, keyword TEXT NOT NULL, marketplace TEXT NOT NULL,
         fetched_at INTEGER NOT NULL, fetched_by TEXT, payload_json TEXT NOT NULL, verdict TEXT,
@@ -34,6 +39,37 @@ _SCHEMAS = [
     """CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL UNIQUE,
         password_hash TEXT NOT NULL, salt TEXT NOT NULL, created_at INTEGER NOT NULL)""",
+    # EĞİTİM & GÖREVLER — dersler, atamalar (assign_all=1 ise herkese), tamamlamalar
+    """CREATE TABLE IF NOT EXISTS training_lessons (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, description TEXT,
+        video_url TEXT, sort_order INTEGER NOT NULL DEFAULT 0, due_date TEXT,
+        assign_all INTEGER NOT NULL DEFAULT 1, created_by INTEGER,
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)""",
+    """CREATE TABLE IF NOT EXISTS training_assignments (
+        lesson_id INTEGER NOT NULL, user_id INTEGER NOT NULL,
+        PRIMARY KEY (lesson_id, user_id))""",
+    # ARAŞTIRMA KONTROL LİSTESİ — tek şablon (owner düzenler), ürün başına liste + maddeler.
+    # Liste oluşturulurken şablonun ve analizin KOPYASI saklanır (sonradan MCP çağrısı yok).
+    """CREATE TABLE IF NOT EXISTS checklist_template (
+        id INTEGER PRIMARY KEY, template_json TEXT NOT NULL, updated_at INTEGER NOT NULL, updated_by TEXT)""",
+    """CREATE TABLE IF NOT EXISTS checklists (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, user_email TEXT,
+        analysis_key TEXT NOT NULL, marketplace TEXT NOT NULL, title TEXT,
+        snapshot_json TEXT NOT NULL, stages_json TEXT NOT NULL, thresholds_json TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'open', locked_by TEXT, locked_at INTEGER,
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)""",
+    """CREATE TABLE IF NOT EXISTS checklist_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, checklist_id INTEGER NOT NULL, stage_key TEXT NOT NULL,
+        item_order INTEGER NOT NULL DEFAULT 0, kind TEXT NOT NULL, auto_key TEXT, text TEXT NOT NULL,
+        checked INTEGER NOT NULL DEFAULT 0, checked_by TEXT, checked_at INTEGER, note TEXT,
+        created_by TEXT, created_at INTEGER NOT NULL)""",
+    # Onay / kilit açma geçmişi: kim, ne zaman, neden (kilit açılsa da kayıt silinmez).
+    """CREATE TABLE IF NOT EXISTS checklist_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, checklist_id INTEGER NOT NULL, kind TEXT NOT NULL,
+        by_email TEXT, at INTEGER NOT NULL, reason TEXT, details_json TEXT)""",
+    """CREATE TABLE IF NOT EXISTS training_completions (
+        lesson_id INTEGER NOT NULL, user_id INTEGER NOT NULL, completed_at INTEGER NOT NULL,
+        PRIMARY KEY (lesson_id, user_id))""",
     """CREATE TABLE IF NOT EXISTS sessions (
         id INTEGER PRIMARY KEY AUTOINCREMENT, token TEXT NOT NULL UNIQUE,
         user_id INTEGER NOT NULL, email TEXT NOT NULL, created_at INTEGER NOT NULL)""",
@@ -108,6 +144,25 @@ async def _add_column_if_missing(table: str, column: str, coltype: str):
 async def _migrate_schema():
     """Eski dağıtımlardan kalan eksik sütunları tamamlar (bkz. _add_column_if_missing)."""
     await _add_column_if_missing("market_decision", "user_id", "INTEGER")
+    # Roller: canlı Postgres'te users tablosu zaten var -> sütun migrasyonla eklenir.
+    # Owner ATANABİLİR bir roldür (birden fazla olabilir); yetki her istekte bu
+    # sütundan okunur. Migrasyon idempotent: boş/geçersiz roller member olur;
+    # yalnızca HİÇ owner yoksa en küçük id'li kullanıcı owner yapılır — mevcut
+    # owner'lara (ve ek owner'lara) asla dokunulmaz.
+    await _add_column_if_missing("users", "role", "TEXT")
+    # Kontrol listesi gerekçeli onay: canlıda checklists tablosu bu sütunlar olmadan kurulmuş olabilir.
+    await _add_column_if_missing("checklists", "approval_reason", "TEXT")
+    await _add_column_if_missing("checklists", "overridden_json", "TEXT")
+    await execute("UPDATE users SET role = 'member' WHERE role IS NULL OR role NOT IN ('owner', 'admin', 'member')")
+    # Kalıcı owner'lar (OWNER_EMAILS): listede olan mevcut kullanıcılar owner yapılır.
+    # Değişken yoksa küme boş -> hiçbir şey yapılmaz.
+    perm = sorted(permanent_owner_emails())
+    if perm:
+        marks = ",".join("?" for _ in perm)
+        await execute(f"UPDATE users SET role = 'owner' WHERE LOWER(email) IN ({marks})", tuple(perm))
+    await execute(
+        "UPDATE users SET role = 'owner' WHERE id = (SELECT MIN(id) FROM users) "
+        "AND NOT EXISTS (SELECT 1 FROM users WHERE role = 'owner')")
 
 
 async def init_db():
@@ -134,9 +189,10 @@ async def create_user(email: str, password: str) -> dict:
         raise ValueError("Bu e-posta zaten kayıtlı")
     salt = secrets.token_hex(16)
     pw_hash = _hash_password(password, salt)
+    role = "owner" if email in permanent_owner_emails() or await user_count() == 0 else "member"
     user_id = await execute_returning_id(
-        "INSERT INTO users (email, password_hash, salt, created_at) VALUES (?, ?, ?, ?)",
-        (email, pw_hash, salt, int(time.time())))
+        "INSERT INTO users (email, password_hash, salt, created_at, role) VALUES (?, ?, ?, ?, ?)",
+        (email, pw_hash, salt, int(time.time()), role))
     return {"id": user_id, "email": email}
 
 
@@ -447,3 +503,453 @@ async def list_launch_checkpoints(keyword: str):
 async def get_hit_rate():
     rows = await fetch_all("SELECT verdict, COUNT(*) AS c FROM launch_checkpoints GROUP BY verdict")
     return {r["verdict"]: r["c"] for r in rows}
+
+
+# ---------------------------------------------------------------------------
+# KULLANICIYA ÖZEL EŞİK DEĞERLERİ (Ayarlar sayfası)
+# ---------------------------------------------------------------------------
+_THRESHOLD_KEYS = ["min_avg_price", "min_gross_margin", "max_acos",
+                    "max_brand_share", "min_strong_new_brands", "min_net_margin"]
+
+
+async def get_user_thresholds(user_id: int) -> dict:
+    """
+    Kullanıcının özelleştirdiği eşikleri döner (yalnızca override ettiği
+    alanlar, None olanlar hariç) — boş dict dönerse kullanıcı hiç
+    özelleştirme yapmamış demektir, çağıran taraf DEFAULT_THRESHOLDS'a düşer.
+    """
+    row = await fetch_one("SELECT * FROM user_thresholds WHERE user_id = ?", (user_id,))
+    if not row:
+        return {}
+    return {k: row[k] for k in _THRESHOLD_KEYS if row.get(k) is not None}
+
+
+async def save_user_thresholds(user_id: int, thresholds: dict):
+    """
+    Kısmi güncelleme kabul eder — yalnızca gönderilen alanlar değişir,
+    gönderilmeyenler (None) mevcut değerini korur (upsert mantığı).
+    """
+    existing = await fetch_one("SELECT * FROM user_thresholds WHERE user_id = ?", (user_id,))
+    merged = {k: (existing.get(k) if existing else None) for k in _THRESHOLD_KEYS}
+    for k, v in thresholds.items():
+        if k in _THRESHOLD_KEYS and v is not None:
+            merged[k] = v
+
+    now = int(time.time())
+    if USE_POSTGRES:
+        sql = f"""INSERT INTO user_thresholds (user_id, {', '.join(_THRESHOLD_KEYS)}, updated_at)
+                  VALUES (?, {', '.join(['?'] * len(_THRESHOLD_KEYS))}, ?)
+                  ON CONFLICT (user_id) DO UPDATE SET
+                  {', '.join(f'{k} = EXCLUDED.{k}' for k in _THRESHOLD_KEYS)}, updated_at = EXCLUDED.updated_at"""
+    else:
+        sql = f"""INSERT INTO user_thresholds (user_id, {', '.join(_THRESHOLD_KEYS)}, updated_at)
+                  VALUES (?, {', '.join(['?'] * len(_THRESHOLD_KEYS))}, ?)
+                  ON CONFLICT(user_id) DO UPDATE SET
+                  {', '.join(f'{k}=excluded.{k}' for k in _THRESHOLD_KEYS)}, updated_at=excluded.updated_at"""
+    await execute(sql, (user_id, *[merged[k] for k in _THRESHOLD_KEYS], now))
+
+
+async def reset_user_thresholds(user_id: int):
+    """Tüm özelleştirmeleri siler, kullanıcı DEFAULT_THRESHOLDS'a döner."""
+    await execute("DELETE FROM user_thresholds WHERE user_id = ?", (user_id,))
+
+
+# ---------------------------------------------------------------------------
+# ROLLER (owner / admin / member)
+# Owner atanabilir bir roldür, birden fazla owner olabilir. Yetki HER İSTEKTE
+# users.role sütunundan okunur. Kilitlenme koruması: son kalan owner düşürülemez.
+# ---------------------------------------------------------------------------
+VALID_ROLES = ("owner", "admin", "member")
+
+
+class LastOwnerError(Exception):
+    """Son kalan owner'ı düşürme girişimi."""
+
+
+class PermanentOwnerError(Exception):
+    """OWNER_EMAILS'teki kalıcı owner'ı düşürme girişimi."""
+
+
+def permanent_owner_emails() -> frozenset[str]:
+    """
+    Kalıcı owner'lar Vercel ortam değişkeni OWNER_EMAILS'ten okunur (virgülle ayrılmış).
+    E-postalar koda YAZILMAZ (repo herkese açık). İstek anında okunur; yoksa boş küme
+    -> hiçbir davranış değişmez.
+    """
+    raw = os.environ.get("OWNER_EMAILS") or ""
+    return frozenset(e.strip().lower() for e in raw.split(",") if e.strip())
+
+
+def _is_permanent(email) -> bool:
+    return bool(email) and str(email).strip().lower() in permanent_owner_emails()
+
+
+def _norm_role(role) -> str:
+    return role if role in VALID_ROLES else "member"
+
+
+async def get_user_role(user_id: int) -> str | None:
+    row = await fetch_one("SELECT role, email FROM users WHERE id = ?", (user_id,))
+    if not row:
+        return None
+    return "owner" if _is_permanent(row.get("email")) else _norm_role(row.get("role"))
+
+
+async def owner_count() -> int:
+    row = await fetch_one("SELECT COUNT(*) AS c FROM users WHERE role = 'owner'")
+    return (row or {}).get("c", 0) or 0
+
+
+async def list_users() -> list[dict]:
+    rows = await fetch_all("SELECT id, email, role, created_at FROM users ORDER BY id")
+    return [{"id": r["id"], "email": r["email"], "created_at": r["created_at"],
+             "role": "owner" if _is_permanent(r["email"]) else _norm_role(r.get("role")),
+             "permanent": _is_permanent(r["email"])} for r in rows]
+
+
+async def set_user_role(user_id: int, role: str):
+    """
+    Rol değiştirir. Owner'ı düşürürken (owner -> admin/member) başka en az bir
+    owner kalmalı; aksi halde LastOwnerError. Koşul tek UPDATE içinde de
+    uygulanır; ardından owner sayısı kontrol edilir ve (eşzamanlı iki düşürme
+    gibi) beklenmedik bir durumda 0 owner kalırsa değişiklik geri alınır.
+    """
+    if role not in VALID_ROLES:
+        raise ValueError("Geçersiz rol")
+    current = await get_user_role(user_id)
+    if current is None:
+        raise ValueError("Kullanıcı bulunamadı")
+    if role != "owner":
+        row = await fetch_one("SELECT email FROM users WHERE id = ?", (user_id,))
+        if row and _is_permanent(row["email"]):
+            raise PermanentOwnerError("Bu kullanıcı kalıcı owner (OWNER_EMAILS) — rolü düşürülemez")
+    if current == "owner" and role != "owner":
+        if await owner_count() <= 1:
+            raise LastOwnerError("Son kalan owner düşürülemez — önce başka birini owner yapın")
+        await execute(
+            "UPDATE users SET role = ? WHERE id = ? AND "
+            "(SELECT COUNT(*) FROM users WHERE role = 'owner') > 1", (role, user_id))
+        if await owner_count() == 0:
+            await execute("UPDATE users SET role = 'owner' WHERE id = ?", (user_id,))
+            raise LastOwnerError("Son kalan owner düşürülemez — önce başka birini owner yapın")
+        if await get_user_role(user_id) == "owner":
+            raise LastOwnerError("Son kalan owner düşürülemez — önce başka birini owner yapın")
+    else:
+        await execute("UPDATE users SET role = ? WHERE id = ?", (role, user_id))
+
+
+# ---------------------------------------------------------------------------
+# EĞİTİM & GÖREVLER
+# ---------------------------------------------------------------------------
+async def _lesson_assignees(lesson_ids: list[int]) -> dict[int, list[int]]:
+    if not lesson_ids:
+        return {}
+    marks = ", ".join("?" * len(lesson_ids))
+    rows = await fetch_all(f"SELECT lesson_id, user_id FROM training_assignments WHERE lesson_id IN ({marks})",
+                           tuple(lesson_ids))
+    out: dict[int, list[int]] = {i: [] for i in lesson_ids}
+    for r in rows:
+        out.setdefault(r["lesson_id"], []).append(r["user_id"])
+    return out
+
+
+async def list_lessons_all() -> list[dict]:
+    rows = await fetch_all("SELECT * FROM training_lessons ORDER BY sort_order, id")
+    assignees = await _lesson_assignees([r["id"] for r in rows])
+    for r in rows:
+        r["assign_all"] = bool(r["assign_all"])
+        r["assignee_ids"] = sorted(assignees.get(r["id"], []))
+    return rows
+
+
+async def list_lessons_for_user(user_id: int) -> list[dict]:
+    """Yalnızca kullanıcıya atanmış dersler (herkese atananlar + kişisel atamalar)."""
+    return await fetch_all(
+        """SELECT l.* FROM training_lessons l
+           WHERE l.assign_all = 1
+              OR EXISTS (SELECT 1 FROM training_assignments a WHERE a.lesson_id = l.id AND a.user_id = ?)
+           ORDER BY l.sort_order, l.id""", (user_id,))
+
+
+async def is_lesson_assigned(lesson_id: int, user_id: int) -> bool:
+    row = await fetch_one(
+        """SELECT 1 AS ok FROM training_lessons l
+           WHERE l.id = ? AND (l.assign_all = 1
+              OR EXISTS (SELECT 1 FROM training_assignments a WHERE a.lesson_id = l.id AND a.user_id = ?))""",
+        (lesson_id, user_id))
+    return bool(row)
+
+
+async def get_lesson(lesson_id: int) -> dict | None:
+    return await fetch_one("SELECT * FROM training_lessons WHERE id = ?", (lesson_id,))
+
+
+async def _replace_assignments(lesson_id: int, assignee_ids: list[int]):
+    await execute("DELETE FROM training_assignments WHERE lesson_id = ?", (lesson_id,))
+    for uid in sorted(set(assignee_ids)):
+        await execute("INSERT INTO training_assignments (lesson_id, user_id) VALUES (?, ?)", (lesson_id, uid))
+
+
+async def create_lesson(data: dict, created_by: int) -> int:
+    now = int(time.time())
+    lesson_id = await execute_returning_id(
+        """INSERT INTO training_lessons (title, description, video_url, sort_order, due_date, assign_all,
+           created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (data["title"], data.get("description") or "", data.get("video_url") or None, data.get("sort_order", 0),
+         data.get("due_date") or None, 1 if data.get("assign_all", True) else 0, created_by, now, now))
+    await _replace_assignments(lesson_id, [] if data.get("assign_all", True) else data.get("assignee_ids", []))
+    return lesson_id
+
+
+async def update_lesson(lesson_id: int, data: dict):
+    await execute(
+        """UPDATE training_lessons SET title = ?, description = ?, video_url = ?, sort_order = ?, due_date = ?,
+           assign_all = ?, updated_at = ? WHERE id = ?""",
+        (data["title"], data.get("description") or "", data.get("video_url") or None, data.get("sort_order", 0),
+         data.get("due_date") or None, 1 if data.get("assign_all", True) else 0, int(time.time()), lesson_id))
+    await _replace_assignments(lesson_id, [] if data.get("assign_all", True) else data.get("assignee_ids", []))
+
+
+async def delete_lesson(lesson_id: int):
+    await execute("DELETE FROM training_completions WHERE lesson_id = ?", (lesson_id,))
+    await execute("DELETE FROM training_assignments WHERE lesson_id = ?", (lesson_id,))
+    await execute("DELETE FROM training_lessons WHERE id = ?", (lesson_id,))
+
+
+async def set_completion(lesson_id: int, user_id: int, completed: bool):
+    """Yalnızca çağıranın KENDİ kaydı — user_id her zaman oturumdan gelir, istekten değil."""
+    if completed:
+        await execute(
+            "INSERT INTO training_completions (lesson_id, user_id, completed_at) VALUES (?, ?, ?) "
+            "ON CONFLICT (lesson_id, user_id) DO NOTHING", (lesson_id, user_id, int(time.time())))
+    else:
+        await execute("DELETE FROM training_completions WHERE lesson_id = ? AND user_id = ?", (lesson_id, user_id))
+
+
+async def completions_for_user(user_id: int) -> dict[int, int]:
+    rows = await fetch_all("SELECT lesson_id, completed_at FROM training_completions WHERE user_id = ?", (user_id,))
+    return {r["lesson_id"]: r["completed_at"] for r in rows}
+
+
+async def all_completions() -> list[dict]:
+    return await fetch_all("SELECT lesson_id, user_id, completed_at FROM training_completions")
+
+
+
+# ---------------------------------------------------------------------------
+# ARAŞTIRMA KONTROL LİSTESİ
+# Kilit kuralı her değişiklik sorgusunun İÇİNDE (AND status='open') — kilitli liste
+# sunucu tarafında değiştirilemez; çağıran taraf etkilenen satır yoksa 423 döner.
+# ---------------------------------------------------------------------------
+async def get_analysis_record(analysis_key: str, marketplace: str) -> dict | None:
+    """Son kaydedilen analiz payload'u (keyword_analysis log tablosu) — MCP çağrısı yok."""
+    row = await fetch_one(
+        "SELECT payload_json, fetched_at FROM keyword_analysis WHERE keyword = ? AND marketplace = ?",
+        (analysis_key, marketplace))
+    if not row:
+        return None
+    try:
+        return {"payload": json.loads(row["payload_json"]), "fetched_at": row["fetched_at"]}
+    except (TypeError, ValueError):
+        return None
+
+
+async def get_checklist_template() -> dict | None:
+    row = await fetch_one("SELECT template_json, updated_at, updated_by FROM checklist_template WHERE id = 1")
+    if not row:
+        return None
+    return {"template": json.loads(row["template_json"]), "updated_at": row["updated_at"], "updated_by": row["updated_by"]}
+
+
+async def save_checklist_template(template: dict, updated_by: str):
+    now = int(time.time())
+    await execute("DELETE FROM checklist_template WHERE id = 1")
+    await execute("INSERT INTO checklist_template (id, template_json, updated_at, updated_by) VALUES (1, ?, ?, ?)",
+                  (json.dumps(template), now, updated_by))
+
+
+async def reset_checklist_template():
+    await execute("DELETE FROM checklist_template WHERE id = 1")
+
+
+async def create_checklist(user_id: int, user_email: str, analysis_key: str, marketplace: str, title: str,
+                           snapshot: dict, stages: list, thresholds: dict, items: list[dict]) -> int:
+    now = int(time.time())
+    cid = await execute_returning_id(
+        """INSERT INTO checklists (user_id, user_email, analysis_key, marketplace, title, snapshot_json, stages_json,
+           thresholds_json, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)""",
+        (user_id, user_email, analysis_key, marketplace, title, json.dumps(snapshot), json.dumps(stages),
+         json.dumps(thresholds), now, now))
+    for it in items:
+        await execute(
+            """INSERT INTO checklist_items (checklist_id, stage_key, item_order, kind, auto_key, text, created_by, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (cid, it["stage_key"], it["item_order"], it["kind"], it.get("auto_key"), it["text"], user_email, now))
+    return cid
+
+
+def _checklist_row(r: dict) -> dict:
+    r = dict(r)
+    for k in ("snapshot_json", "stages_json", "thresholds_json"):
+        r[k[:-5]] = json.loads(r.pop(k) or "null")
+    r["overridden"] = json.loads(r.pop("overridden_json", None) or "null") or []
+    return r
+
+
+async def get_checklist(cid: int) -> dict | None:
+    r = await fetch_one("SELECT * FROM checklists WHERE id = ?", (cid,))
+    return _checklist_row(r) if r else None
+
+
+async def list_checklists(user_id: int | None = None) -> list[dict]:
+    """user_id verilirse yalnızca o kullanıcının listeleri (member); None ise tümü (owner/admin)."""
+    if user_id is None:
+        rows = await fetch_all("SELECT * FROM checklists ORDER BY updated_at DESC, id DESC")
+    else:
+        rows = await fetch_all("SELECT * FROM checklists WHERE user_id = ? ORDER BY updated_at DESC, id DESC", (user_id,))
+    return [_checklist_row(r) for r in rows]
+
+
+async def checklist_items(cid: int) -> list[dict]:
+    return await fetch_all("SELECT * FROM checklist_items WHERE checklist_id = ? ORDER BY item_order, id", (cid,))
+
+
+async def items_for_checklists(cids: list[int]) -> dict[int, list[dict]]:
+    if not cids:
+        return {}
+    marks = ", ".join("?" * len(cids))
+    rows = await fetch_all(f"SELECT * FROM checklist_items WHERE checklist_id IN ({marks}) ORDER BY item_order, id", tuple(cids))
+    out: dict[int, list[dict]] = {c: [] for c in cids}
+    for r in rows:
+        out.setdefault(r["checklist_id"], []).append(r)
+    return out
+
+
+async def _touch(cid: int):
+    await execute("UPDATE checklists SET updated_at = ? WHERE id = ?", (int(time.time()), cid))
+
+
+async def set_item_state(cid: int, item_id: int, checked: bool, note: str | None, by: str) -> bool:
+    """Yalnızca manuel/özel madde ve yalnızca açık listede. Değişti mi?"""
+    now = int(time.time())
+    before = await fetch_one(
+        "SELECT id FROM checklist_items WHERE id = ? AND checklist_id = ? AND kind IN ('manual', 'custom') "
+        "AND EXISTS (SELECT 1 FROM checklists WHERE id = ? AND status = 'open')", (item_id, cid, cid))
+    if not before:
+        return False
+    await execute(
+        "UPDATE checklist_items SET checked = ?, checked_by = ?, checked_at = ?, note = ? "
+        "WHERE id = ? AND checklist_id = ? AND kind IN ('manual', 'custom') "
+        "AND EXISTS (SELECT 1 FROM checklists WHERE id = ? AND status = 'open')",
+        (1 if checked else 0, by if checked else None, now if checked else None, note, item_id, cid, cid))
+    after = await fetch_one("SELECT checked, note FROM checklist_items WHERE id = ?", (item_id,))
+    if not after or bool(after["checked"]) != bool(checked) or (after["note"] or None) != (note or None):
+        return False  # bu arada kilitlendi -> değişmedi
+    await _touch(cid)
+    return True
+
+
+async def add_custom_item(cid: int, stage_key: str, text: str, by: str) -> int | None:
+    row = await fetch_one("SELECT status FROM checklists WHERE id = ?", (cid,))
+    if not row or row["status"] != "open":
+        return None
+    mx = await fetch_one("SELECT MAX(item_order) AS m FROM checklist_items WHERE checklist_id = ?", (cid,))
+    iid = await execute_returning_id(
+        """INSERT INTO checklist_items (checklist_id, stage_key, item_order, kind, text, created_by, created_at)
+           VALUES (?, ?, ?, 'custom', ?, ?, ?)""",
+        (cid, stage_key, ((mx or {}).get("m") or 0) + 1, text, by, int(time.time())))
+    # Kilitlenme ile ekleme yarışırsa: eklenen maddeyi geri al
+    row = await fetch_one("SELECT status FROM checklists WHERE id = ?", (cid,))
+    if not row or row["status"] != "open":
+        await execute("DELETE FROM checklist_items WHERE id = ?", (iid,))
+        return None
+    await _touch(cid)
+    return iid
+
+
+async def delete_custom_item(cid: int, item_id: int) -> bool:
+    row = await fetch_one(
+        "SELECT id FROM checklist_items WHERE id = ? AND checklist_id = ? AND kind = 'custom' "
+        "AND EXISTS (SELECT 1 FROM checklists WHERE id = ? AND status = 'open')", (item_id, cid, cid))
+    if not row:
+        return False
+    await execute(
+        "DELETE FROM checklist_items WHERE id = ? AND checklist_id = ? AND kind = 'custom' "
+        "AND EXISTS (SELECT 1 FROM checklists WHERE id = ? AND status = 'open')", (item_id, cid, cid))
+    await _touch(cid)
+    return True
+
+
+async def _add_checklist_event(cid: int, kind: str, by: str, at: int, reason: str | None, details: dict | None = None):
+    await execute("INSERT INTO checklist_events (checklist_id, kind, by_email, at, reason, details_json) "
+                  "VALUES (?, ?, ?, ?, ?, ?)",
+                  (cid, kind, by, at, reason, json.dumps(details, ensure_ascii=False) if details else None))
+
+
+async def checklist_events(cid: int) -> list[dict]:
+    rows = await fetch_all("SELECT * FROM checklist_events WHERE checklist_id = ? ORDER BY at, id", (cid,))
+    out = []
+    for r in rows:
+        r = dict(r)
+        r["details"] = json.loads(r.pop("details_json") or "null")
+        out.append(r)
+    return out
+
+
+async def lock_checklist(cid: int, by: str, reason: str | None = None, overridden: list | None = None) -> int | None:
+    """Koşullu kilit (yalnızca status='open'). Başarılıysa kilit zaman damgasını döner."""
+    now = int(time.time())
+    ov = json.dumps(overridden, ensure_ascii=False) if overridden else None
+    await execute("UPDATE checklists SET status = 'locked', locked_by = ?, locked_at = ?, updated_at = ?, "
+                  "approval_reason = ?, overridden_json = ? WHERE id = ? AND status = 'open'",
+                  (by, now, now, reason, ov, cid))
+    row = await fetch_one("SELECT status, locked_by, locked_at FROM checklists WHERE id = ?", (cid,))
+    if not (row and row["status"] == "locked" and row["locked_at"] == now and row["locked_by"] == by):
+        return None
+    return now
+
+
+async def record_lock_event(cid: int, by: str, at: int, reason: str | None, overridden: list | None):
+    await _add_checklist_event(cid, "lock", by, at, reason, {"overridden": overridden or []})
+
+
+async def revert_lock(cid: int, locked_at: int):
+    """Kilitleme sonrası yarış kontrolü başarısız olursa YALNIZCA bu kilidi geri alır."""
+    await execute("UPDATE checklists SET status = 'open', locked_by = NULL, locked_at = NULL, "
+                  "approval_reason = NULL, overridden_json = NULL WHERE id = ? AND status = 'locked' AND locked_at = ?",
+                  (cid, locked_at))
+
+
+async def unlock_checklist(cid: int, by: str, reason: str) -> bool:
+    """Owner'ın gerekçeli kilit açması. Önceki onayın bilgisi olaya kopyalanır, sonra liste açılır."""
+    row = await fetch_one("SELECT status, locked_by, locked_at, approval_reason, overridden_json "
+                          "FROM checklists WHERE id = ?", (cid,))
+    if not row or row["status"] != "locked":
+        return False
+    now = int(time.time())
+    await execute("UPDATE checklists SET status = 'open', locked_by = NULL, locked_at = NULL, "
+                  "approval_reason = NULL, overridden_json = NULL, updated_at = ? "
+                  "WHERE id = ? AND status = 'locked' AND locked_at = ?", (now, cid, row["locked_at"]))
+    after = await fetch_one("SELECT status, locked_at FROM checklists WHERE id = ?", (cid,))
+    if not after or after["status"] != "open":
+        return False
+    await _add_checklist_event(cid, "unlock", by, now, reason, {
+        "previous_locked_by": row["locked_by"], "previous_locked_at": row["locked_at"],
+        "previous_approval_reason": row["approval_reason"],
+        "previous_overridden": json.loads(row["overridden_json"] or "null") or []})
+    return True
+
+
+async def delete_checklist(cid: int) -> bool:
+    row = await fetch_one("SELECT status FROM checklists WHERE id = ?", (cid,))
+    if not row or row["status"] != "open":
+        return False
+    # Önce liste (koşullu); yalnızca liste gerçekten silindiyse maddeleri temizle
+    await execute("DELETE FROM checklists WHERE id = ? AND status = 'open'", (cid,))
+    if await fetch_one("SELECT id FROM checklists WHERE id = ?", (cid,)):
+        return False
+    await execute("DELETE FROM checklist_items WHERE checklist_id = ? "
+                  "AND NOT EXISTS (SELECT 1 FROM checklists WHERE id = ?)", (cid, cid))
+    await execute("DELETE FROM checklist_events WHERE checklist_id = ? "
+                  "AND NOT EXISTS (SELECT 1 FROM checklists WHERE id = ?)", (cid, cid))
+    return True

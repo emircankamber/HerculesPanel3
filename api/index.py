@@ -19,6 +19,7 @@ import time
 import json
 import re
 from datetime import datetime, timezone
+from urllib.parse import quote
 
 # Vercel'in Python runtime'ı bu dosyayı importlib ile dosya-yolu üzerinden
 # yüklüyor ve api/ klasörünü otomatik olarak sys.path'e eklemiyor — bu yüzden
@@ -31,7 +32,7 @@ import asyncio
 from fastapi import FastAPI, HTTPException, Query, BackgroundTasks, Depends, Header
 from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from mcp_client import call_tool
 from scoring import calc_keyword_ad_metrics, calc_profit, pre_assessment, DEFAULT_THRESHOLDS
@@ -54,6 +55,8 @@ try:
 except ImportError:
     PORTFOLIO_AVAILABLE = False
 import database as db
+import checklist as ckl
+import launch_report as lr
 import excel_export
 import supplier_scoring as sup
 import launch_control as lc
@@ -104,6 +107,33 @@ async def require_auth(authorization: str | None = Header(default=None)) -> dict
     if not session:
         raise HTTPException(401, "Oturum geçersiz veya süresi dolmuş — lütfen giriş yapın")
     return {"email": session["email"], "user_id": session["user_id"]}
+
+
+async def require_user(user: dict = Depends(require_auth)) -> dict:
+    """
+    Gerçek (kayıtlı) bir kullanıcı + SUNUCU tarafında hesaplanan rolü.
+    Auth kapalıyken (hiç kullanıcı yok) eğitim/rol uçları kullanılamaz: atanacak
+    kimse yok ve tamamlama bir kişiye bağlanmak zorunda.
+    """
+    if user.get("auth_disabled") or not user.get("user_id"):
+        raise HTTPException(401, "Bu bölüm için kayıtlı bir hesapla giriş yapın")
+    role = await db.get_user_role(user["user_id"])
+    if not role:
+        raise HTTPException(401, "Kullanıcı bulunamadı — lütfen tekrar giriş yapın")
+    return {**user, "role": role}
+
+
+async def require_staff(user: dict = Depends(require_user)) -> dict:
+    """Owner veya admin."""
+    if user["role"] not in ("owner", "admin"):
+        raise HTTPException(403, "Bu işlem için yönetici yetkisi gerekli")
+    return user
+
+
+async def require_owner(user: dict = Depends(require_user)) -> dict:
+    if user["role"] != "owner":
+        raise HTTPException(403, "Bu işlemi yalnızca owner yapabilir")
+    return user
 
 
 # ---------------------------------------------------------------------------
@@ -462,6 +492,10 @@ async def analyze(req: AnalyzeRequest, user: dict = Depends(require_auth)):
         raw_gross_margin = stats_data.get("avgProfit")
         gross_margin = (raw_gross_margin / 100 if raw_gross_margin > 1 else raw_gross_margin) if raw_gross_margin is not None else None
 
+        # Kullanıcının Ayarlar'da özelleştirdiği eşikler (varsa) — yoksa
+        # pre_assessment zaten DEFAULT_THRESHOLDS'a düşer (bkz. scoring.py).
+        user_thresholds = await db.get_user_thresholds(uid)
+
         assessment = pre_assessment(
             avg_price=stats_data.get("avgPrice"),
             gross_margin=gross_margin,
@@ -469,6 +503,7 @@ async def analyze(req: AnalyzeRequest, user: dict = Depends(require_auth)):
             top_brand_share=top_brand_share,
             strong_new_brands=strong_new_brands_count,  # top 10 rakip availableDate proxy'si (bkz. yukarıdaki not)
             net_margin=None,
+            thresholds=user_thresholds,
         )
 
         payload = {
@@ -585,6 +620,23 @@ def _safe_filename(keyword: str, suffix: str) -> str:
     return f"{safe or 'analiz'}_{suffix}.xlsx"
 
 
+_TR_ASCII = str.maketrans({"ş": "s", "Ş": "S", "ğ": "g", "Ğ": "G", "ı": "i", "İ": "I",
+                           "ç": "c", "Ç": "C", "ö": "o", "Ö": "O", "ü": "u", "Ü": "U"})
+
+
+def _content_disposition(filename: str) -> str:
+    """
+    RFC 5987/6266: Türkçe (ASCII dışı) dosya adları için.
+    Eskiden ad doğrudan filename="..." içine yazılıyordu; Starlette başlıkları latin-1
+    kodladığı için ş/ğ/ı içeren keyword'lerde (örn. "şemsiye") export uçları 500 veriyordu.
+    filename  = ASCII yedek (ş→s, ğ→g, ı→i, İ→I, ç→c, ö→o, ü→u; kalan ASCII dışı → _)
+    filename* = UTF-8 yüzde kodlu asıl ad (modern tarayıcılar bunu kullanır)
+    """
+    fallback = "".join(c if 32 <= ord(c) < 127 and c not in '"\\' else "_"
+                       for c in filename.translate(_TR_ASCII))
+    return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(filename, safe='')}"
+
+
 @app.post("/api/export/report")
 async def export_report(payload: dict, user: dict = Depends(require_auth)):
     """
@@ -600,32 +652,78 @@ async def export_report(payload: dict, user: dict = Depends(require_auth)):
     return Response(
         content=xlsx_bytes,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": _content_disposition(filename)},
     )
 
 
 class ExportKeywordsRequest(BaseModel):
     keyword: str
     keyword_rows: list[dict]
+    note: str | None = Field(None, max_length=300)   # panel filtre notu -> Excel başlığına
 
 
 @app.post("/api/export/keywords")
 async def export_keywords(req: ExportKeywordsRequest, user: dict = Depends(require_auth)):
     """Sadece Relevant Keywords tablosunu ayrı bir Excel dosyası olarak üretir."""
     try:
-        xlsx_bytes = excel_export.build_keywords_xlsx(req.keyword_rows, req.keyword)
+        xlsx_bytes = excel_export.build_keywords_xlsx(req.keyword_rows, req.keyword, req.note)
     except Exception as e:
         raise HTTPException(500, f"Excel oluşturulamadı: {e}")
     filename = _safe_filename(req.keyword, "keywords")
     return Response(
         content=xlsx_bytes,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": _content_disposition(filename)},
     )
 
 
 @app.get("/api/thresholds")
-async def thresholds():
+async def thresholds(user: dict = Depends(require_auth)):
+    """
+    DEFAULT_THRESHOLDS + kullanıcının özelleştirdiği alanlar (varsa) birleşik
+    döner. auth kapalıyken (henüz kullanıcı yok) user_id=0 için kayıt
+    olmayacağı için saf DEFAULT_THRESHOLDS döner — davranış değişmez.
+    """
+    uid = user.get("user_id", 0)
+    overrides = await db.get_user_thresholds(uid)
+    return {**DEFAULT_THRESHOLDS, **overrides}
+
+
+class ThresholdUpdateRequest(BaseModel):
+    # Sınırlar app.js::THRESHOLD_FIELDS min/max ile BİREBİR aynı (tek kaynak
+    # tutarlılığı) — biri değişirse diğeri de değişmeli. Yüzde alanları formda
+    # 0-100 gösterilir ama buraya 0-1 oran olarak gelir (ACOS formda 0-150).
+    # Aralık dışı değer -> FastAPI otomatik 422.
+    min_avg_price: float | None = Field(None, ge=0, le=100)          # $0-100
+    min_gross_margin: float | None = Field(None, ge=0, le=1)         # %0-100
+    max_acos: float | None = Field(None, ge=0, le=1.5)               # %0-150
+    max_brand_share: float | None = Field(None, ge=0, le=1)          # %0-100
+    min_strong_new_brands: int | None = Field(None, ge=0, le=20)     # 0-20 marka, tam sayı
+    min_net_margin: float | None = Field(None, ge=0, le=1)           # %0-100
+
+
+@app.put("/api/thresholds")
+async def update_thresholds(req: ThresholdUpdateRequest, user: dict = Depends(require_auth)):
+    """
+    Kısmi güncelleme — yalnızca gönderilen (None olmayan) alanlar değişir.
+    Auth kapalıyken (auth_disabled) user_id=0 altında kaydedilir; ilk
+    kullanıcı kaydolduğunda bu "global" satırın miras alınması beklenmez —
+    her kullanıcı kendi eşiklerini yeniden ayarlamalı (bilinçli basit tutuldu).
+    """
+    uid = user.get("user_id", 0)
+    payload = req.dict(exclude_none=True)
+    if not payload:
+        raise HTTPException(400, "Güncellenecek en az bir alan gerekli")
+    await db.save_user_thresholds(uid, payload)
+    merged = {**DEFAULT_THRESHOLDS, **await db.get_user_thresholds(uid)}
+    return merged
+
+
+@app.post("/api/thresholds/reset")
+async def reset_thresholds(user: dict = Depends(require_auth)):
+    """Tüm özelleştirmeleri siler, kullanıcı fabrika eşiklerine döner."""
+    uid = user.get("user_id", 0)
+    await db.reset_user_thresholds(uid)
     return DEFAULT_THRESHOLDS
 
 
@@ -1122,11 +1220,14 @@ async def auth_status(authorization: str | None = Header(default=None)):
     count = await db.user_count()
     token = (authorization or "").replace("Bearer ", "").strip()
     session = await db.get_session(token) if token else None
+    role = await db.get_user_role(session["user_id"]) if session else None
     return {
         "auth_required": count > 0,
         "has_users": count > 0,
         "logged_in": bool(session),
         "email": session["email"] if session else None,
+        "user_id": session["user_id"] if session and role else None,
+        "role": role,  # "owner" | "admin" | "member" | None — yetki kontrolü yine sunucuda yapılır
         "storage": db.storage_info(),
     }
 
@@ -1285,9 +1386,11 @@ async def analyze_asin(req: AnalyzeAsinRequest, user: dict = Depends(require_aut
         raw_gm = stats_data.get("avgProfit")
         gross_margin = (raw_gm / 100 if raw_gm and raw_gm > 1 else raw_gm) if raw_gm is not None else None
 
+        user_thresholds = await db.get_user_thresholds(uid)
         assessment = pre_assessment(
             avg_price=stats_data.get("avgPrice"), gross_margin=gross_margin, acos=main_acos,
-            top_brand_share=top_brand_share, strong_new_brands=strong_new_brands_count, net_margin=None)
+            top_brand_share=top_brand_share, strong_new_brands=strong_new_brands_count, net_margin=None,
+            thresholds=user_thresholds)
 
         payload = {
             "keyword": f"{asin} — {(product.get('title') or '')[:60]}",
@@ -1328,3 +1431,623 @@ async def analyze_asin(req: AnalyzeAsinRequest, user: dict = Depends(require_aut
         raise
     except Exception as e:
         raise HTTPException(502, f"SellerSprite MCP hatası: {e}")
+
+
+# ---------------------------------------------------------------------------
+# TRENDLER & FIRSATLAR — aba_research_weekly/monthly (gerçek MCP verisiyle
+# doğrulandı) üzerine kurulu keşif endpoint'i
+# ---------------------------------------------------------------------------
+SEARCH_MODEL_LABELS = {
+    1: "Popüler Pazar", 2: "Anormal Hareketli", 3: "Sürekli Büyüyen",
+    4: "Hızlı Yükselen", 5: "Potansiyel", 6: "Uzun Kuyruk",
+}
+
+
+class TrendingRequest(BaseModel):
+    marketplace: str = "US"
+    search_model: int = 4  # varsayılan: hızlı yükselen (Breakout Nişler)
+    granularity: str = "weekly"  # "weekly" | "monthly"
+    departments: list[str] = []
+    min_searches: int | None = None
+    size: int = 20
+
+
+@app.post("/api/discovery/trending")
+async def discovery_trending(req: TrendingRequest, user: dict = Depends(require_auth)):
+    """
+    Trendler & Fırsatlar sayfası için: aba_research_weekly/monthly'den
+    yükselen/anormal/potansiyel keyword'leri çeker. Gerçek MCP çağrısıyla
+    doğrulanmış alan adları kullanılıyor — DÜRÜSTLÜK NOTU: Google Trends'i
+    (mcp__Seller_Sprite__google_trend) ya da sosyal medya/TikTok viral
+    katsayısını burada KULLANMIYORUZ — bu ikincisi için gerçek bir MCP
+    kaynağı bulunamadı (Stitch tasarımındaki "Viral Dönüşüm Katsayısı"
+    kartının backend karşılığı yok, eklenmemeli).
+    """
+    if req.search_model not in SEARCH_MODEL_LABELS:
+        raise HTTPException(400, f"search_model 1-6 arası olmalı: {SEARCH_MODEL_LABELS}")
+    tool = "aba_research_weekly" if req.granularity == "weekly" else "aba_research_monthly"
+
+    args = {
+        "marketplace": req.marketplace, "searchModel": req.search_model,
+        "size": req.size, "order": {"field": "searches_growth", "desc": True},
+    }
+    if req.departments:
+        args["departments"] = req.departments
+    if req.min_searches:
+        args["minSearches"] = req.min_searches
+
+    raw = await call_tool(tool, args)
+    items = raw.get("data", {}).get("items", []) if isinstance(raw.get("data"), dict) else []
+
+    results = [{
+        "keyword": it.get("keyword"),
+        "departments": it.get("departments", []),
+        "searches": it.get("searches"),
+        "search_rank": it.get("searchRank"),
+        "growth_rate": it.get("searchRankGrowthRate"),  # 0-1 oran: arama SIRALAMASI yükselme oranı (0.909 = 11. sıradan 1. sıraya), hacim büyümesi DEĞİL
+        "growth_4w": it.get("w4RankGrowthRate"),
+        "growth_12w": it.get("w12RankGrowthRate"),
+        "purchases": it.get("purchases"),
+        "purchase_rate": it.get("purchaseRate"),
+        "bid": it.get("bid"), "bid_min": it.get("bidMin"), "bid_max": it.get("bidMax"),
+        "top3_brands": [b for b in (it.get("top3Brands") or []) if b],
+        "top3_asins": [{
+            "asin": a.get("asin"), "image_url": a.get("imageUrl"),
+            "click_rate": a.get("clickRate"), "conversion_rate": a.get("conversionRate"),
+        } for a in (it.get("top3AsinDtoList") or [])],
+    } for it in items]
+
+    return {
+        "search_model": req.search_model,
+        "search_model_label": SEARCH_MODEL_LABELS[req.search_model],
+        "granularity": req.granularity,
+        "total": raw.get("data", {}).get("total") if isinstance(raw.get("data"), dict) else None,
+        "results": results,
+    }
+
+
+
+# ---------------------------------------------------------------------------
+# ROLLER & EĞİTİM / GÖREVLER
+# Yetki kuralları SUNUCUDA: member yalnızca kendisine atanan dersleri görür ve
+# yalnızca KENDİ tamamlamasını değiştirir (user_id her zaman oturumdan gelir).
+# Owner/admin ders yönetir ve ilerlemeyi görür; rolleri yalnızca owner'lar değiştirir
+# (birden fazla owner olabilir); son kalan owner düşürülemez (409).
+# ---------------------------------------------------------------------------
+_YT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
+_YT_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "youtube-nocookie.com", "www.youtube-nocookie.com"}
+
+
+def _validate_video_url(url: str | None) -> str | None:
+    """Boş -> None. Aksi halde yalnızca https, host zorunlu, makul uzunluk."""
+    from urllib.parse import urlsplit
+    if url is None or not url.strip():
+        return None
+    url = url.strip()
+    if len(url) > 500:
+        raise HTTPException(422, "Video linki en fazla 500 karakter olabilir")
+    parts = urlsplit(url)
+    if parts.scheme != "https" or not parts.hostname:
+        raise HTTPException(422, "Video linki https:// ile başlamalı")
+    if any(c in url for c in ' "<>\\\n\r\t'):
+        raise HTTPException(422, "Video linki geçersiz karakter içeriyor")
+    return url
+
+
+def youtube_video_id(url: str | None) -> str | None:
+    """Yalnızca bilinen YouTube host'larında ve 11 karakterlik geçerli ID'de döner; aksi halde None."""
+    from urllib.parse import urlsplit, parse_qs
+    if not url:
+        return None
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return None
+    if parts.scheme != "https" or not parts.hostname:
+        return None
+    host = parts.hostname.lower()
+    vid = None
+    if host == "youtu.be":
+        vid = parts.path.lstrip("/").split("/")[0]
+    elif host in _YT_HOSTS:
+        if parts.path == "/watch":
+            vid = (parse_qs(parts.query).get("v") or [None])[0]
+        else:
+            m = re.match(r"^/(?:embed|shorts|live|v)/([^/]+)/?$", parts.path)
+            vid = m.group(1) if m else None
+    return vid if vid and _YT_ID_RE.match(vid) else None
+
+
+def _lesson_out(row: dict, completed_at: int | None = None, staff: bool = False) -> dict:
+    out = {
+        "id": row["id"], "title": row["title"], "description": row.get("description") or "",
+        "video_url": row.get("video_url"), "youtube_id": youtube_video_id(row.get("video_url")),
+        "sort_order": row.get("sort_order", 0), "due_date": row.get("due_date"),
+        "completed": completed_at is not None, "completed_at": completed_at,
+    }
+    if staff:
+        out["assign_all"] = bool(row.get("assign_all"))
+        out["assignee_ids"] = row.get("assignee_ids", [])
+        out["created_at"] = row.get("created_at")
+        out["updated_at"] = row.get("updated_at")
+    return out
+
+
+class LessonIn(BaseModel):
+    title: str = Field(..., min_length=1, max_length=200)
+    description: str = Field("", max_length=5000)
+    video_url: str | None = Field(None, max_length=500)
+    sort_order: int = Field(0, ge=0, le=10000)
+    due_date: str | None = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    assign_all: bool = True
+    assignee_ids: list[int] = Field(default_factory=list, max_length=500)
+
+
+async def _clean_lesson(req: LessonIn) -> dict:
+    data = req.model_dump()
+    data["title"] = data["title"].strip()
+    if not data["title"]:
+        raise HTTPException(422, "Başlık boş olamaz")
+    data["video_url"] = _validate_video_url(data.get("video_url"))
+    if data.get("due_date"):
+        try:
+            datetime.strptime(data["due_date"], "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(422, "Son tarih geçerli bir tarih olmalı (YYYY-AA-GG)")
+    else:
+        data["due_date"] = None
+    if not data["assign_all"]:
+        valid_ids = {u["id"] for u in await db.list_users()}
+        unknown = sorted(set(data["assignee_ids"]) - valid_ids)
+        if unknown:
+            raise HTTPException(422, f"Bilinmeyen kullanıcı id: {unknown}")
+        if not data["assignee_ids"]:
+            raise HTTPException(422, "Seçilen kişilere atama için en az bir kişi seçin")
+    else:
+        data["assignee_ids"] = []
+    return data
+
+
+@app.get("/api/training/lessons")
+async def training_lessons(user: dict = Depends(require_user)):
+    """Member: yalnızca kendisine atananlar. Owner/admin: tüm dersler + atama bilgisi. Hepsinde kendi tamamlaması."""
+    mine = await db.completions_for_user(user["user_id"])
+    staff = user["role"] in ("owner", "admin")
+    assigned = await db.list_lessons_for_user(user["user_id"])
+    my_lessons = [_lesson_out(r, mine.get(r["id"])) for r in assigned]
+    resp = {"role": user["role"], "my_lessons": my_lessons,
+            "my_progress": {"completed": sum(1 for l in my_lessons if l["completed"]), "total": len(my_lessons)}}
+    if staff:
+        resp["all_lessons"] = [_lesson_out(r, mine.get(r["id"]), staff=True) for r in await db.list_lessons_all()]
+    return resp
+
+
+@app.post("/api/training/lessons")
+async def training_create(req: LessonIn, user: dict = Depends(require_staff)):
+    data = await _clean_lesson(req)
+    lesson_id = await db.create_lesson(data, user["user_id"])
+    return {"ok": True, "id": lesson_id}
+
+
+@app.put("/api/training/lessons/{lesson_id}")
+async def training_update(lesson_id: int, req: LessonIn, user: dict = Depends(require_staff)):
+    if not await db.get_lesson(lesson_id):
+        raise HTTPException(404, "Ders bulunamadı")
+    await db.update_lesson(lesson_id, await _clean_lesson(req))
+    return {"ok": True, "id": lesson_id}
+
+
+@app.delete("/api/training/lessons/{lesson_id}")
+async def training_delete(lesson_id: int, user: dict = Depends(require_staff)):
+    if not await db.get_lesson(lesson_id):
+        raise HTTPException(404, "Ders bulunamadı")
+    await db.delete_lesson(lesson_id)
+    return {"ok": True}
+
+
+class CompletionIn(BaseModel):
+    completed: bool
+
+
+@app.post("/api/training/lessons/{lesson_id}/complete")
+async def training_complete(lesson_id: int, req: CompletionIn, user: dict = Depends(require_user)):
+    """Yalnızca kendi tamamlaması: gövdede user_id YOK, oturumdaki kullanıcı kullanılır."""
+    if not await db.is_lesson_assigned(lesson_id, user["user_id"]):
+        raise HTTPException(404, "Ders bulunamadı ya da size atanmamış")
+    await db.set_completion(lesson_id, user["user_id"], req.completed)
+    done = await db.completions_for_user(user["user_id"])
+    return {"ok": True, "completed": lesson_id in done, "completed_at": done.get(lesson_id)}
+
+
+@app.get("/api/training/progress")
+async def training_progress(user: dict = Depends(require_staff)):
+    """Kişi × ders tamamlama tablosu (yalnızca owner/admin)."""
+    users = await db.list_users()
+    lessons = await db.list_lessons_all()
+    all_ids = [u["id"] for u in users]
+    return {
+        "users": users,
+        "lessons": [{"id": l["id"], "title": l["title"], "sort_order": l["sort_order"], "due_date": l.get("due_date"),
+                     "assignee_ids": all_ids if l["assign_all"] else l["assignee_ids"]} for l in lessons],
+        "completions": await db.all_completions(),
+    }
+
+
+@app.get("/api/users")
+async def users_list(user: dict = Depends(require_staff)):
+    """Atama ve rol yönetimi için kullanıcı listesi (owner/admin)."""
+    return {"users": await db.list_users(), "me": user["user_id"], "my_role": user["role"]}
+
+
+class RoleIn(BaseModel):
+    role: str = Field(..., pattern=r"^(owner|admin|member)$")
+
+
+@app.post("/api/users/{target_id}/role")
+async def users_set_role(target_id: int, req: RoleIn, user: dict = Depends(require_owner)):
+    """
+    Yalnızca owner'lar (rol her istekte DB'den okunur). Herkesi owner/admin/member
+    yapabilir, başka bir owner'ı (ve kendini) düşürebilir — ama son kalan owner
+    ve OWNER_EMAILS'teki kalıcı owner'lar düşürülemez (409).
+    """
+    if await db.get_user_role(target_id) is None:
+        raise HTTPException(404, "Kullanıcı bulunamadı")
+    try:
+        await db.set_user_role(target_id, req.role)
+    except db.PermanentOwnerError as e:
+        raise HTTPException(409, str(e))
+    except db.LastOwnerError as e:
+        raise HTTPException(409, str(e))
+    return {"ok": True, "id": target_id, "role": await db.get_user_role(target_id),
+            "self_changed": target_id == user["user_id"]}
+
+
+
+# ---------------------------------------------------------------------------
+# ARAŞTIRMA KONTROL LİSTESİ
+# - Liste, son kaydedilen analizin (keyword_analysis log kaydı) ANLIK KOPYASIYLA
+#   oluşturulur; sonradan MCP çağrısı yapılmaz. İstemcinin gönderdiği değerlere
+#   güvenilmez: otomatik maddeler sunucudaki snapshot'tan değerlendirilir.
+# - Görünürlük: member yalnızca kendi listeleri (başkasınınkine 404), owner/admin tümü.
+# - Kilitli liste sunucuda değiştirilemez (423). Kilitleme: owner/admin, tüm maddeler tamamsa.
+# ---------------------------------------------------------------------------
+async def _effective_template() -> tuple[dict, dict | None]:
+    rec = await db.get_checklist_template()
+    if rec:
+        try:
+            return ckl.validate_template(rec["template"]), rec
+        except ckl.TemplateError:
+            pass  # bozuk kayıt -> varsayılana düş
+    return ckl.default_template(), None
+
+
+def _template_out(tpl: dict, rec: dict | None) -> dict:
+    th = tpl["thresholds"]
+    stages = [{**s, "items": [{**it, "text": ckl.auto_text(it["auto"], th)} if it.get("auto") else it for it in s["items"]]}
+              for s in tpl["stages"]]
+    return {"template": {**tpl, "stages": stages}, "is_default": rec is None,
+            "updated_at": rec["updated_at"] if rec else None, "updated_by": rec["updated_by"] if rec else None,
+            "threshold_limits": {k: {"min": lo, "max": hi, "integer": is_int} for k, (lo, hi, is_int) in ckl.THRESHOLD_LIMITS.items()}}
+
+
+def _checklist_out(cl: dict, items: list[dict], user: dict, detail: bool = True, events: list | None = None) -> dict:
+    staff = user["role"] in ("owner", "admin")
+    is_open = cl["status"] == "open"
+    values = (cl.get("snapshot") or {}).get("values") or {}
+    th = cl.get("thresholds") or ckl.DEFAULT_THRESHOLDS
+    critical_stages = {s["key"] for s in cl.get("stages") or [] if s.get("critical")}
+    # Gerekçeyle geçilen otomatik maddeler yalnızca KİLİTLİ listede geçerli (kilit açılınca sıfırlanır)
+    overridden = set() if is_open else {o.get("item_id") for o in cl.get("overridden") or []}
+    out_items, done, critical_open, manual_open, auto_unpassed = [], 0, 0, 0, []
+    for it in items:
+        o = {"id": it["id"], "stage_key": it["stage_key"], "kind": it["kind"], "text": it["text"],
+             "checked_by": it.get("checked_by"), "checked_at": it.get("checked_at"), "note": it.get("note") or "",
+             "created_by": it.get("created_by")}
+        if it["kind"] == "auto":
+            ev = ckl.evaluate_auto(it.get("auto_key"), values, th)
+            ov = ev["status"] != "pass" and it["id"] in overridden
+            o.update({"auto_key": it.get("auto_key"), "auto_status": ev["status"], "auto_display": ev["display"],
+                      "auto_value": ev["value"], "auto_override": ov,
+                      "checked": ev["status"] == "pass" or ov, "checked_by": None, "checked_at": None})
+            if ev["status"] != "pass":
+                auto_unpassed.append({"item_id": it["id"], "auto_key": it.get("auto_key"), "text": it["text"],
+                                      "status": ev["status"], "display": ev["display"]})
+        else:
+            o["checked"] = bool(it.get("checked"))
+            manual_open += not o["checked"]
+        done += o["checked"]
+        if not o["checked"] and it["stage_key"] in critical_stages:
+            critical_open += 1
+        out_items.append(o)
+    total = len(out_items)
+    complete = total > 0 and done == total
+    manual_complete = total > 0 and manual_open == 0
+    can_edit = is_open and (staff or cl["user_id"] == user["user_id"])
+    out = {
+        "id": cl["id"], "title": cl.get("title"), "analysis_key": cl["analysis_key"], "marketplace": cl["marketplace"],
+        "owner_email": cl.get("user_email"), "is_mine": cl["user_id"] == user["user_id"],
+        "status": cl["status"], "locked_by": cl.get("locked_by"), "locked_at": cl.get("locked_at"),
+        "approval_reason": None if is_open else cl.get("approval_reason"),
+        "overridden_count": 0 if is_open else len(cl.get("overridden") or []),
+        "analysis_fetched_at": (cl.get("snapshot") or {}).get("fetched_at"),
+        "created_at": cl["created_at"], "updated_at": cl["updated_at"],
+        "progress": {"done": done, "total": total, "critical_open": critical_open, "complete": complete,
+                     "manual_open": manual_open, "manual_complete": manual_complete},
+        "can_edit": can_edit, "can_delete": can_edit,
+        # Manuel/özel maddeler tamamsa onaylanabilir; geçmeyen/veri olmayan otomatik madde varsa gerekçe zorunlu
+        "can_lock": staff and is_open and manual_complete,
+        "needs_reason": is_open and bool(auto_unpassed),
+        "auto_unpassed": auto_unpassed if is_open else [],
+        "can_unlock": user["role"] == "owner" and not is_open,
+    }
+    if detail:
+        snap = cl.get("snapshot") or {}
+        out.update({"stages": cl.get("stages") or [], "thresholds": th, "items": out_items,
+                    "snapshot": {k: snap.get(k) for k in ("keyword", "marketplace", "analysis_mode", "fetched_at", "category")}
+                    | {"values": values},
+                    "events": [{"kind": e["kind"], "by": e.get("by_email"), "at": e["at"], "reason": e.get("reason"),
+                                "overridden": [{"text": x.get("text"), "status": x.get("status"), "display": x.get("display")}
+                                               for x in ((e.get("details") or {}).get("overridden") or [])]}
+                               for e in events or []]})
+    return out
+
+
+async def _get_checklist_for(cid: int, user: dict) -> dict:
+    cl = await db.get_checklist(cid)
+    if not cl or (user["role"] not in ("owner", "admin") and cl["user_id"] != user["user_id"]):
+        raise HTTPException(404, "Kontrol listesi bulunamadı")  # member başkasının listesinin varlığını bile göremez
+    return cl
+
+
+async def _get_editable(cid: int, user: dict) -> dict:
+    cl = await _get_checklist_for(cid, user)
+    if cl["status"] != "open":
+        raise HTTPException(423, "Liste onaylanıp kilitlendi — değiştirilemez")
+    return cl
+
+
+@app.get("/api/checklists/template")
+async def checklist_template_get(user: dict = Depends(require_user)):
+    tpl, rec = await _effective_template()
+    return _template_out(tpl, rec)
+
+
+@app.put("/api/checklists/template")
+async def checklist_template_put(payload: dict, user: dict = Depends(require_owner)):
+    """Yalnızca owner. Aşamalar ve otomatik maddeler sabit; başlıklar, manuel maddeler ve eşikler düzenlenir.
+    Mevcut listeler etkilenmez (her liste oluşturulduğu andaki şablonun kopyasını taşır)."""
+    try:
+        tpl = ckl.validate_template(payload.get("template") if isinstance(payload, dict) else None)
+    except ckl.TemplateError as e:
+        raise HTTPException(422, str(e))
+    await db.save_checklist_template(tpl, user["email"])
+    tpl, rec = await _effective_template()
+    return _template_out(tpl, rec)
+
+
+@app.post("/api/checklists/template/reset")
+async def checklist_template_reset(user: dict = Depends(require_owner)):
+    await db.reset_checklist_template()
+    tpl, rec = await _effective_template()
+    return _template_out(tpl, rec)
+
+
+class ChecklistCreate(BaseModel):
+    analysis_key: str = Field(..., min_length=1, max_length=300)
+    marketplace: str = Field(..., pattern=r"^[A-Z]{2}$")
+
+
+@app.post("/api/checklists")
+async def checklist_create(req: ChecklistCreate, user: dict = Depends(require_user)):
+    rec = await db.get_analysis_record(req.analysis_key, req.marketplace)
+    if not rec:
+        raise HTTPException(404, "Bu ürün için kayıtlı analiz bulunamadı — önce Ürün Analizi'ni çalıştırın")
+    payload = {**rec["payload"], "_analysis_key": req.analysis_key}
+    snapshot = ckl.extract_snapshot(payload, rec["fetched_at"])
+    tpl, _ = await _effective_template()
+    th = tpl["thresholds"]
+    asin_title = ((payload.get("asin_info") or {}).get("title") or "") if payload.get("analysis_mode") == "asin" else ""
+    title = (asin_title or str(payload.get("keyword") or req.analysis_key)).strip()[:200]
+    items, order = [], 0
+    for st in tpl["stages"]:
+        for it in st["items"]:
+            order += 1
+            if it.get("auto"):
+                items.append({"stage_key": st["key"], "item_order": order, "kind": "auto", "auto_key": it["auto"],
+                              "text": ckl.auto_text(it["auto"], th)})
+            else:
+                items.append({"stage_key": st["key"], "item_order": order, "kind": "manual", "text": it["text"]})
+    stages = [{k: s[k] for k in ("key", "title", "subtitle", "critical")} for s in tpl["stages"]]
+    cid = await db.create_checklist(user["user_id"], user["email"], req.analysis_key, req.marketplace, title,
+                                    snapshot, stages, th, items)
+    return await _checklist_detail(cid, user)
+
+
+@app.get("/api/checklists")
+async def checklist_list(user: dict = Depends(require_user)):
+    staff = user["role"] in ("owner", "admin")
+    lists = await db.list_checklists(None if staff else user["user_id"])
+    items = await db.items_for_checklists([c["id"] for c in lists])
+    return {"role": user["role"], "checklists": [_checklist_out(c, items.get(c["id"], []), user, detail=False) for c in lists]}
+
+
+@app.get("/api/checklists/{cid}")
+async def checklist_get(cid: int, user: dict = Depends(require_user)):
+    await _get_checklist_for(cid, user)
+    return await _checklist_detail(cid, user)
+
+
+class ChecklistItemUpdate(BaseModel):
+    checked: bool
+    note: str | None = Field(None, max_length=1000)
+
+
+@app.post("/api/checklists/{cid}/items/{item_id}")
+async def checklist_item_update(cid: int, item_id: int, req: ChecklistItemUpdate, user: dict = Depends(require_user)):
+    """Yalnızca manuel/özel maddeler; otomatik maddeler snapshot'tan hesaplanır, elle işaretlenemez."""
+    await _get_editable(cid, user)
+    items = {i["id"]: i for i in await db.checklist_items(cid)}
+    it = items.get(item_id)
+    if not it:
+        raise HTTPException(404, "Madde bulunamadı")
+    if it["kind"] == "auto":
+        raise HTTPException(400, "Otomatik maddeler analiz verisinden hesaplanır, elle işaretlenemez")
+    note = (req.note or "").strip() or None
+    if not await db.set_item_state(cid, item_id, req.checked, note, user["email"]):
+        raise HTTPException(423, "Liste onaylanıp kilitlendi — değiştirilemez")
+    return await _checklist_detail(cid, user)
+
+
+class ChecklistCustomItem(BaseModel):
+    stage_key: str = Field(..., pattern=r"^(market|competition|defects|legal|costs)$")
+    text: str = Field(..., min_length=1, max_length=300)
+
+
+@app.post("/api/checklists/{cid}/items")
+async def checklist_item_add(cid: int, req: ChecklistCustomItem, user: dict = Depends(require_user)):
+    await _get_editable(cid, user)
+    text = req.text.strip()
+    if not text:
+        raise HTTPException(422, "Madde metni boş olamaz")
+    if await db.add_custom_item(cid, req.stage_key, text, user["email"]) is None:
+        raise HTTPException(423, "Liste onaylanıp kilitlendi — değiştirilemez")
+    return await _checklist_detail(cid, user)
+
+
+@app.delete("/api/checklists/{cid}/items/{item_id}")
+async def checklist_item_delete(cid: int, item_id: int, user: dict = Depends(require_user)):
+    """Yalnızca özel (kullanıcının eklediği) maddeler silinebilir."""
+    await _get_editable(cid, user)
+    it = next((i for i in await db.checklist_items(cid) if i["id"] == item_id), None)
+    if not it:
+        raise HTTPException(404, "Madde bulunamadı")
+    if it["kind"] != "custom":
+        raise HTTPException(400, "Yalnızca özel eklenen maddeler silinebilir")
+    if not await db.delete_custom_item(cid, item_id):
+        raise HTTPException(423, "Liste onaylanıp kilitlendi — değiştirilemez")
+    return await _checklist_detail(cid, user)
+
+
+class ChecklistReasonIn(BaseModel):
+    reason: str | None = Field(None, max_length=1000)
+
+
+CK_REASON_MIN = 5
+
+
+def _clean_reason(reason: str | None) -> str:
+    return " ".join((reason or "").split())
+
+
+async def _checklist_detail(cid: int, user: dict) -> dict:
+    return _checklist_out(await db.get_checklist(cid), await db.checklist_items(cid), user,
+                          events=await db.checklist_events(cid))
+
+
+@app.post("/api/checklists/{cid}/lock")
+async def checklist_lock(cid: int, body: ChecklistReasonIn | None = None, user: dict = Depends(require_staff)):
+    """Owner/admin onaylayıp kilitler. Manuel/özel maddelerin hepsi işaretli olmalı. Geçmeyen ya da
+    "Veri yok" olan otomatik madde varsa gerekçe ZORUNLU; gerekçe, onaylayan ve zaman saklanır."""
+    cl = await _get_editable(cid, user)
+    out = _checklist_out(cl, await db.checklist_items(cid), user)
+    p = out["progress"]
+    if not p["manual_complete"]:
+        raise HTTPException(409, f"Manuel maddeler tamamlanmadan onaylanamaz ({p['manual_open']} açık madde)")
+    reason = _clean_reason(body.reason if body else None)
+    if out["needs_reason"] and len(reason) < CK_REASON_MIN:
+        raise HTTPException(422, f"{len(out['auto_unpassed'])} otomatik madde geçmedi ya da veri yok — "
+                                 f"onay için gerekçe zorunlu (en az {CK_REASON_MIN} karakter)")
+    overridden = out["auto_unpassed"]
+    locked_at = await db.lock_checklist(cid, user["email"], reason or None, overridden)
+    if not locked_at:
+        raise HTTPException(423, "Liste zaten kilitli")
+    # Yarış kontrolü: kilitleme anında bir manuel madde geri alındıysa / madde eklendiyse kilidi kaldır
+    after = _checklist_out(await db.get_checklist(cid), await db.checklist_items(cid), user)
+    if not after["progress"]["complete"]:
+        await db.revert_lock(cid, locked_at)
+        raise HTTPException(409, "Kilitleme sırasında bir madde değişti — tekrar deneyin")
+    await db.record_lock_event(cid, user["email"], locked_at, reason or None, overridden)
+    return await _checklist_detail(cid, user)
+
+
+@app.post("/api/checklists/{cid}/unlock")
+async def checklist_unlock(cid: int, body: ChecklistReasonIn | None = None, user: dict = Depends(require_owner)):
+    """Yalnızca owner, gerekçe yazarak kilitli listeyi açar. Kim/ne zaman/neden ve önceki onay olaya yazılır."""
+    cl = await _get_checklist_for(cid, user)
+    if cl["status"] != "locked":
+        raise HTTPException(409, "Liste kilitli değil")
+    reason = _clean_reason(body.reason if body else None)
+    if len(reason) < CK_REASON_MIN:
+        raise HTTPException(422, f"Kilidi açmak için gerekçe zorunlu (en az {CK_REASON_MIN} karakter)")
+    if not await db.unlock_checklist(cid, user["email"], reason):
+        raise HTTPException(409, "Liste aynı anda değişti — tekrar deneyin")
+    return await _checklist_detail(cid, user)
+
+
+@app.delete("/api/checklists/{cid}")
+async def checklist_delete(cid: int, user: dict = Depends(require_user)):
+    await _get_editable(cid, user)
+    if not await db.delete_checklist(cid):
+        raise HTTPException(423, "Liste onaylanıp kilitlendi — silinemez")
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# LANSMAN RAPORU (amazon-urun-lansman-raporu skill metodolojisi — api/launch_report.py)
+# MCP çağrısı YOK; tüm girdiler formdan gelir. Rapor HTML döner, panel yeni sekmede
+# açar ve tarayıcıdan "PDF olarak kaydet" ile yazdırılır (weasyprint Vercel'de yok).
+# ---------------------------------------------------------------------------
+class LRVariation(BaseModel):
+    name: str = Field(..., min_length=1, max_length=80)
+    price: float = Field(..., gt=0, le=100000)
+    cogs: float = Field(..., ge=0, le=100000)
+    fba: float = Field(..., ge=0, le=10000)
+    units: int = Field(..., ge=0, le=1_000_000)
+    share: float | None = Field(None, ge=0, le=100)   # sepet ağırlığı (%); boşsa sevkiyat payı
+
+
+class LRSecondVine(BaseModel):
+    name: str = Field("Kanada (CA)", min_length=1, max_length=60)
+    total: int = Field(..., ge=1, le=100_000)
+    enrolled: int | None = Field(None, ge=1, le=100_000)
+    from_main_batch: bool = False
+
+
+class LRKeyword(BaseModel):
+    monthly_purchases: float | None = Field(None, ge=0)
+    monthly_clicks: float | None = Field(None, ge=0)
+    bid: float | None = Field(None, ge=0, le=1000)
+    market_avg_price: float | None = Field(None, ge=0, le=100000)
+
+
+class LaunchReportIn(BaseModel):
+    product_name: str = Field(..., min_length=1, max_length=120)
+    main_keyword: str = Field(..., min_length=1, max_length=200)
+    variations: list[LRVariation] = Field(..., min_length=1, max_length=lr.MAX_VARIATIONS)
+    ads_index: int = Field(0, ge=0, lt=lr.MAX_VARIATIONS)
+    referral_pct: float = Field(15, ge=0, lt=100)
+    budget_mode: str = Field("acos", pattern=r"^(daily|acos)$")
+    daily_budget: float | None = Field(None, gt=0, le=1_000_000)
+    target_acos_pct: float | None = Field(11, gt=0, le=100)
+    us_vine_units: int = Field(..., ge=1, le=100_000)
+    second_vine: LRSecondVine | None = None
+    vine_fee: float = Field(200, ge=0, le=100_000)
+    return_pct: float = Field(5, ge=0, lt=100)
+    cc_pct: float = Field(15, ge=0, lt=100)
+    cc_mode: str = Field("scenarios", pattern=r"^(expected|scenarios)$")
+    cc_expected: int | None = Field(None, ge=0, le=1_000_000)
+    cc_low: int = Field(30, ge=0, le=1_000_000)
+    cc_mid: int = Field(80, ge=0, le=1_000_000)
+    campaign_days: int = Field(60, ge=1, le=365)
+    keyword: LRKeyword = Field(default_factory=LRKeyword)
+
+
+@app.post("/api/launch-report")
+async def launch_report(req: LaunchReportIn, user: dict = Depends(require_auth)):
+    try:
+        html, _, _ = lr.generate(req.model_dump())
+    except lr.ReportError as e:
+        raise HTTPException(422, str(e))
+    return Response(content=html, media_type="text/html; charset=utf-8",
+                    headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+

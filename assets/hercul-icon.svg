@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Favicon: hercullogo.svg'nin yalnızca ikon kısmı (3 sütun, gövde, 2 daire).
+     Şekil ve gradyan değerleri orijinal dosyadan birebir alındı; yazı/font içermez.
+     Kaynak logo assets/hercullogo.svg değiştirilmedi. -->
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="143.5 139.5 250 250">
+  <defs>
+    <linearGradient id="linear-gradient" x1="1092.41" y1="443.921" x2="1169.413" y2="443.921" gradientUnits="userSpaceOnUse">
+      <stop offset=".148" stop-color="#acb0a1"/>
+      <stop offset="1" stop-color="#586e63"/>
+    </linearGradient>
+    <linearGradient id="linear-gradient-3" x1="279.873" y1="280.012" x2="279.099" y2="218.804" xlink:href="#linear-gradient"/>
+    <linearGradient id="linear-gradient-4" x1="307.55" y1="191.969" x2="307.55" y2="279.312" gradientUnits="userSpaceOnUse">
+      <stop offset=".19" stop-color="#9d9570"/>
+      <stop offset="1" stop-color="#d0c4ad"/>
+    </linearGradient>
+    <linearGradient id="linear-gradient-5" x1="335.54" y1="172.483" x2="335.54" y2="265.03" gradientUnits="userSpaceOnUse">
+      <stop offset=".237" stop-color="#caaf85"/>
+      <stop offset=".776" stop-color="#d5b283"/>
+    </linearGradient>
+    <linearGradient id="linear-gradient-6" x1="229.081" y1="383.151" x2="226.093" y2="146.904" xlink:href="#linear-gradient"/>
+    <linearGradient id="linear-gradient-7" x1="331.088" y1="277.932" x2="331.088" y2="322.294" xlink:href="#linear-gradient-4"/>
+    <linearGradient id="linear-gradient-8" x1="329.281" y1="368.076" x2="328.896" y2="337.572" xlink:href="#linear-gradient"/>
+  </defs>
+  <polygon fill="url(#linear-gradient-3)" points="290.009 282.832 269.111 294.621 269.111 227.64 290.009 215.852 290.009 282.832"/>
+  <polygon fill="url(#linear-gradient-4)" points="297.101 203.757 297.101 212.331 297.101 270.738 297.101 279.312 317.999 267.523 317.999 258.949 317.999 200.542 317.999 191.969 297.101 203.757"/>
+  <polygon fill="url(#linear-gradient-5)" points="325.091 184.272 325.091 189.476 325.091 192.846 325.091 198.049 325.091 251.253 325.091 256.456 325.091 259.826 325.091 265.03 345.989 253.241 345.989 248.038 345.989 244.668 345.989 239.464 345.989 186.26 345.989 181.057 345.989 177.687 345.989 172.483 325.091 184.272"/>
+  <path fill="url(#linear-gradient-6)" d="M261.579,146.455c-5.655,3.971-12.151,8.267-18.259,11.676-15.637,8.727-52.365,16.728-52.365,16.728,0,0,4.865.424,8.417,2.107,3.552,1.682,5.421,2.804,9.346,9.533,3.925,6.729,3.739,15.515,3.739,15.515v181.318h2.43s4.112-17.01,7.477-25.796c3.365-8.786,6.169-16.449,19.066-35.142,5.482-7.944,13.145-15.745,20.149-22.096v-153.842Z"/>
+  <circle fill="url(#linear-gradient-7)" cx="331.088" cy="300.113" r="22.181"/>
+  <circle fill="url(#linear-gradient-8)" cx="329.088" cy="352.824" r="15.253"/>
+</svg>

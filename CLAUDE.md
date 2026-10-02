@@ -127,6 +127,12 @@ gerçek bir keyword'le test et (henüz denenmedi).
   sorgulayınca çöker. `database.py::_add_column_if_missing()` +
   `_migrate_schema()` bunu `init_db()` içinde otomatik halleder — yeni bir
   sütun eklersen buraya da ekle.
+- **Dosya adı başlıkları (Content-Disposition) latin-1 ile kodlanır** — Türkçe keyword'ü
+  doğrudan `filename="..."` içine yazmak ş/ğ/ı'da `UnicodeEncodeError` → 500 veriyordu (tüm Excel
+  export'ları). Dosya döndüren HER uçta `index.py::_content_disposition()` kullan: ASCII yedek
+  (ş→s, ğ→g, ı→i, İ→I, ç→c, ö→o, ü→u, kalan ASCII dışı → _) + RFC 5987 `filename*=UTF-8''...`.
+  Frontend `downloadBlob` adı istemcide kurar ve Türkçe harfleri korur. (Test notu: Chromium
+  `C` yerelinde ASCII dışı indirme adlarını "download"a çevirir — Playwright'ı `LC_ALL=C.UTF-8` ile çalıştır.)
 - **Yakalanmayan hatalar düz metin döner, JSON değil** — Vercel'in runtime'ı
   FastAPI'yi atlayıp kendi "Internal Server Error" sayfasını gösteriyor,
   frontend bunu JSON sanıp parse edince anlaşılmaz hata veriyor.
@@ -214,3 +220,135 @@ yanlış tahmin edildi, sonra gerçek çağrıyla düzeltildi). İki yol var:
   doğrula, (2) `mcp_client.py::call_tool`'a doğru `wrap_in_request` değeriyle
   ekle, (3) stub ile uçtan uca test et, (4) gerçek deploy sonrası kullanıcıdan
   ekran görüntüsü/log iste, tahmin etme.
+
+
+## Trendler & Fırsatlar — gerçek MCP kaynağı bulundu (aba_research_weekly/monthly)
+
+`/api/discovery/trending` endpoint'i `aba_research_weekly`/`aba_research_monthly`
+tool'larını kullanıyor — gerçek MCP çağrısıyla doğrulandı. `searchModel`
+parametresi (1-6) pazar tipini seçiyor: 1=Popüler, 2=Anormal Hareketli,
+3=Sürekli Büyüyen, **4=Hızlı Yükselen** (Stitch tasarımındaki "Breakout
+Nişler" kartının gerçek karşılığı), 5=Potansiyel, 6=Uzun Kuyruk.
+
+Gerçek alan adları: `data.items` (dict içinde liste, keyword_miner gibi),
+her item'da `searches` (arama HACMİ — hacim için tek doğru alan),
+`searchRankGrowthRate` (0-1 oran; arama SIRALAMASININ yükselme oranı, hacim
+büyümesi DEĞİL — ör. 0.909 ≈ 11. sıradan 1. sıraya çıkış; panelde "Sıralama
+İvmesi" olarak etiketleniyor, asla "hacim büyümesi" deme),
+`w4RankGrowthRate`/`w12RankGrowthRate` (aynı sıralama ivmesinin 4/12 haftalık
+karşılaştırması),
+`top3Brands`, `top3AsinDtoList` (görsel URL + CTR/CVR ile).
+
+**Oran birimleri (gerçek MCP verisiyle doğrulandı):** `purchaseRate`,
+`top3AsinDtoList[].clickRate` ve `top3AsinDtoList[].conversionRate` (backend'de
+`purchase_rate`, `click_rate`, `conversion_rate`) HER ZAMAN 0-1 oran. Kanıt:
+`purchaseRate = purchases / searches` (17881 / 2518485 = 0.0071 = %0.71).
+Frontend'de büyüklüğe bakan tahmin mantığı YOK — daima ×100 ile yüzdeye
+çevrilir (`app.js::fmtRate`). Küçük değerler (%0.71 gibi) doğrudur, "yanlış
+birim" sanıp düzeltmeye çalışma.
+
+**Kullanılmayan (bilerek):** `google_trend` tool'u da var (Amazon dışı,
+Google arama trendini veriyor) ama henüz backend'e bağlanmadı —
+"Mevsimsellik Riski" kartı için kullanılabilir, ihtiyaç olursa test edilip
+eklenmeli. **TikTok/sosyal medya viral katsayısı için hiçbir gerçek MCP
+kaynağı YOK** — Stitch tasarımındaki "Viral Dönüşüm Katsayısı" kartı bu
+yüzden backend'e hiç bağlanmamalı, sahte veri olur.
+
+
+## Roller & Eğitim / Görevler (owner / admin / member)
+
+- **Rol kaynağı:** `users.role` sütunu (`_migrate_schema` içinde `_add_column_if_missing`
+  ile eklenir — canlı Postgres'te users tablosu zaten vardı). Owner **atanabilir** bir
+  roldür, birden fazla owner olabilir; yetki her istekte bu sütundan okunur
+  (`database.py::get_user_role`). Migrasyon idempotent: boş/geçersiz rol → member;
+  yalnızca HİÇ owner yoksa en küçük id'li kullanıcı owner yapılır (mevcut owner'lara
+  dokunmaz). Hiç kullanıcı yokken ilk kayıt olan owner olur.
+- **Yetki SUNUCUDA:** `index.py` → `require_user` (gerçek hesap şart; auth kapalıyken
+  401), `require_staff` (owner/admin), `require_owner`. Arayüzde gizlemek yalnızca kolaylık.
+  - Member yalnızca kendisine atanan dersleri görür (`assign_all=1` ya da
+    `training_assignments`'ta kaydı olanlar) ve yalnızca KENDİ tamamlamasını değiştirir:
+    `/api/training/lessons/{id}/complete` gövdesinde user_id YOK, oturumdan alınır;
+    atanmamış derse 404.
+  - Rolleri yalnızca owner'lar değiştirir (`/api/users/{id}/role`: owner|admin|member;
+    başka bir owner'ı ve kendini düşürebilir). **Kilitlenme koruması:** son kalan owner
+    düşürülemez → 409 (`set_user_role` → `LastOwnerError`; koşul UPDATE içinde de var ve
+    sonrasında 0 owner kalırsa değişiklik geri alınır).
+- **Kalıcı owner (`OWNER_EMAILS`):** Vercel ortam değişkeni, virgülle ayrılmış e-postalar
+  (küçük harfe çevrilip boşlukları temizlenir; istek anında okunur — `database.permanent_owner_emails`).
+  E-postaları KODA YAZMA (repo herkese açık). Listedekiler `_migrate_schema`'da owner yapılır, bu
+  e-postayla yeni kayıt doğrudan owner olur, `get_user_role` onları DB'deki değerden bağımsız owner
+  sayar. Kimse (kendileri dahil) düşüremez → 409 (`PermanentOwnerError`); `/api/users` `permanent`
+  bayrağı döner, rol ekranında seçim kilitli + "kalıcı owner" etiketi. Değişken yoksa hiçbir şey değişmez.
+- **Video linkleri:** yalnızca https. YouTube ID'si sunucuda (`youtube_video_id`) ve
+  istemcide (`YT_ID_RE`) 11 karakter `[A-Za-z0-9_-]` olarak doğrulanır, yalnızca bilinen
+  YouTube host'larında; gömme `youtube-nocookie.com/embed/{id}`. Diğer linkler yeni sekmede
+  (`rel="noopener noreferrer"`).
+- Tablolar: `training_lessons`, `training_assignments`, `training_completions`
+  (`completed_at` zaman damgası). Ders silinince atama/tamamlamalar da silinir.
+
+## Logo (`assets/hercullogo.svg`)
+
+Dosyayı DEĞİŞTİRME/optimize etme. Kırpma `#svgView(viewBox(...))` ile yapılıyor.
+**Tuzak:** "Inteligente" satırı `filterUnits="userSpaceOnUse"` ve bölgesi belirtilmemiş
+(varsayılan -%10/%120) bir gölge filtresi kullanıyor; viewBox ~361 birimden kısa ya da
+~819 birimden darsa satır HİÇ çizilmiyor. Kenar çubuğunda viewBox bu boyutta tutulup alt
+satır kapsayıcının `overflow:hidden`'ı ile gizleniyor. Favicon: `assets/hercul-icon.svg`
+(yalnızca ikon şekilleri, orijinal değerlerle).
+
+## Araştırma Kontrol Listesi (`api/checklist.py` + `/api/checklists*`)
+
+- **Snapshot SUNUCUDA alınır:** `POST /api/checklists {analysis_key, marketplace}` →
+  `keyword_analysis` log kaydındaki son payload okunur (keyword modunda anahtar =
+  `req.keyword`, ASIN modunda `ASIN:{asin}`). MCP çağrısı YOK; istemci değer
+  göndermez (member otomatik maddeleri sahte değerle geçiremesin diye). Liste,
+  oluşturulduğu andaki snapshot + şablon + eşiklerin KOPYASINI taşır; analiz ya da
+  şablon sonradan değişse de mevcut liste değişmez.
+- **6 otomatik madde** (`checklist.evaluate_auto`, elle işaretlenemez — 400):
+  arama > 40.000 (yalnızca ana keyword'ün exact satırı; ASIN modunda "Veri yok"),
+  ilk 10 rakip ciro toplamı > $500.000, ort. yorum < 800, yeni marka ≥ 3
+  (pre_assessment'taki "Güçlü Yeni Marka" değeri), ilk 3 marka payı < %65,
+  ort. fiyat $25–$70 (iki uç dahil). Veri yoksa `no_data` → "Veri yok", geçti sayılmaz.
+- **Onay & kilit:** owner/admin kilitler; manuel/özel maddelerin HEPSİ işaretli olmalı (409).
+  Geçmeyen ya da "Veri yok" olan otomatik madde varsa `POST /lock {reason}` ile **gerekçe
+  zorunlu** (boşluklar temizlendikten sonra ≥5 karakter, yoksa 422). Gerekçe, onaylayan ve
+  zaman `checklists.approval_reason/locked_by/locked_at`'a, geçilen maddeler
+  `overridden_json`'a yazılır; bu maddeler `auto_override=true` ("gerekçeyle geçildi") olarak
+  döner, `auto_status` gerçek değerini (fail/no_data) korur. (ASIN listelerinde arama hacmi
+  maddesi hep "Veri yok" — gerekçesiz onay hiç mümkün olmazdı.)
+  Kilitli listede her değişiklik 423 (owner dahil); kural her UPDATE/DELETE'in içinde
+  (`AND status='open'`). Görünürlük: member yalnızca kendi listeleri (başkasınınkine 404).
+- **Kilit açma:** `POST /api/checklists/{id}/unlock {reason}` — YALNIZCA owner (`require_owner`,
+  admin/member 403), gerekçe zorunlu (422), kilitli olmayan liste 409. Açılınca override'lar
+  sıfırlanır (tekrar onayda yeniden gerekçe gerekir). Geçmiş `checklist_events` tablosunda
+  (kind lock|unlock, by_email, at, reason, details_json — unlock olayı önceki onayın
+  kişi/zaman/gerekçesini de saklar); kilit açılsa da kayıtlar silinmez, detayda `events` olarak döner.
+  `approval_reason`/`overridden_json` sütunları `_migrate_schema`'da eklenir.
+- **Şablon:** tek kayıt (`checklist_template`, yoksa `DEFAULT_TEMPLATE`), yalnızca owner
+  düzenler. 5 aşama ve otomatik maddeler sabit; başlıklar, manuel maddeler ve eşikler
+  değişir. "Patent, Marka & Hukuk" (`legal`) aşamasındaki açık maddeler kritik sayılır.
+
+## Lansman Raporu (`api/launch_report.py` + `POST /api/launch-report`)
+
+- Kaynak: kullanıcının `amazon-urun-lansman-raporu` skill'i. Hesaplama metodolojisi BİREBİR
+  (formüller ve işlem sırası dahil) — skill'in orijinal Python kodu test oracle'ı olarak çalıştırılıp
+  her rakam `==` ile karşılaştırıldı (1/2 varyasyon orijinalle, 4 varyasyon orijinalle doğrulanmış
+  N-varyasyonlu transliterasyonla). Formülü "sadeleştirmek" ya da işlem sırasını değiştirmek
+  kuruşluk farklar çıkarır — değiştirirsen oracle testini yeniden çalıştır.
+- Saf modül, MCP çağrısı YOK, endpoint `require_auth`. weasyprint YOK (Vercel'de sistem
+  kütüphaneleri yok): sunucu HTML döner, panel Blob URL ile yeni sekmede açar, tarayıcıdan
+  "PDF olarak kaydet". Sayfa numarası `@page @bottom-center` (Chromium 131+ destekler).
+  Rapor sayfası kendi CSP'sini taşır (yalnızca nonce'lu tek script: yazdır butonu); tüm form
+  metinleri `esc()`, @page içeriği `css_str()` ile kaçırılır.
+- Kurallar (skill): TOPLAM MALİYET yalnızca COGS; Vine ek gideri (FBA+kayıt), Reklam, CC ayrı
+  gider satırları; ACOS = kampanya reklamı / Bölüm 4 brüt gelir; kampanya günü yalnızca iç hesapta
+  (metinde YOK — "~60 gün sonra" cümlesi Amazon'un komisyon ödeme süresidir, kampanya günü değil);
+  "optimal"/"%100" yok; bölüm sırası 1-10; reklam ve Vine TEK varyasyonda.
+- Veri farkları: SellerSprite keyword verisi AYLIK → Bölüm 2 "Aylık Satış". "Önerilen ACOS" =
+  Bid ÷ (purchases/clicks × reklam varyasyonunun KENDİ fiyatı) — panelin pazar-ortalama-fiyatlı
+  ACOS'u kopyalanmaz. Ürün Analizi'nden açılınca exact keyword satırı (purchases, clicks, bid,
+  avgPrice) ve `market_return_rate` önceden dolar.
+- Şablondan bilinçli sapmalar (rakamları etkilemez): tek senaryolu CC tablosunda başlık/sütun
+  sayısı düzeltildi; kullanıcının girdiği oranlar (referral, CC, iade) tam sayı değilse ondalıkla yazılır (%6.4, şablon %6 derdi) — Bölüm 7 ACOS değerleri ve hedef ACOS cümlesi şablondaki gibi TAM SAYI; Bölüm 2'ye
+  "türetilmiştir" dipnotu (skill metni bunu istiyor); 1 varyasyonda sepet ağırlığı satırı yok;
+  sepet ağırlığı girilmezse sevkiyat adedi payı kullanılır.
+

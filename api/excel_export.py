@@ -269,8 +269,9 @@ def build_report_xlsx(data: dict) -> bytes:
     return buf.read()
 
 
-def build_keywords_xlsx(keyword_rows: list, seed_keyword: str = "") -> bytes:
-    """Sadece Relevant Keywords tablosunu ayrı bir Excel dosyası olarak üretir."""
+def build_keywords_xlsx(keyword_rows: list, seed_keyword: str = "", note: str | None = None) -> bytes:
+    """Sadece Relevant Keywords tablosunu ayrı bir Excel dosyası olarak üretir.
+    `note`: panelde filtre uygulandıysa başlığa eklenen kısa açıklama (ör. "filtreli: Yüksek Hacim · 3/12 satır")."""
     wb = Workbook()
     ws = wb.active
     ws.title = "Keywords"
@@ -279,7 +280,7 @@ def build_keywords_xlsx(keyword_rows: list, seed_keyword: str = "") -> bytes:
         ws.column_dimensions[col].width = w
 
     ws.merge_cells("A1:I1")
-    c = ws.cell(1, 1, f"RELEVANT KEYWORDS — “{seed_keyword}”")
+    c = ws.cell(1, 1, f"RELEVANT KEYWORDS — “{seed_keyword}”" + (f" · {note}" if note else ""))
     c.font = H_FONT
     c.fill = NAVY
     c.alignment = CENTER
