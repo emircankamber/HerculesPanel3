@@ -241,6 +241,7 @@ async function runAnalysis(keyword, marketplace, categoryOverride = "") {
       ? "önbellekten yüklendi (24 saat içinde daha önce çekilmiş)"
       : "canlı SellerSprite verisi yüklendi");
     lastAnalysis = data;
+    kwvResetSort();  // yeni analiz: sıralama varsayılana (Relevancy / Traffic Share, azalan)
     renderPanel(data);
     renderDataViews();
     const t = data.fetched_at_iso ? new Date(data.fetched_at_iso) : new Date();
@@ -556,13 +557,17 @@ function renderPanel(data) {
     }
   });
 
-  // --- Relevant keywords tablosu ---
+  // --- Relevant keywords tablosu (tarayıcıda sıralanır; her yeni analizde varsayılan: Relevancy/Traffic Share ↓) ---
   const tbody = root.querySelector(".kw-tbody");
-  (data.keyword_rows || []).forEach(row => {
-    const tr = document.createElement("tr");
-    const acos = row.acos;
-    const acosClass = acos == null ? "" : acos < 0.2 ? "acos-good" : acos < 0.5 ? "acos-mid" : "acos-bad";
-    tr.innerHTML = `
+  const kwSort = { ...KW_SORT_DEFAULT };
+  const kwSortedRows = () => sortKeywordRows(data.keyword_rows || [], kwSort.key, kwSort.dir);
+  const renderKwTable = () => {
+    tbody.innerHTML = "";
+    kwSortedRows().forEach(row => {
+      const tr = document.createElement("tr");
+      const acos = row.acos;
+      const acosClass = acos == null ? "" : acos < 0.2 ? "acos-good" : acos < 0.5 ? "acos-mid" : "acos-bad";
+      tr.innerHTML = `
       <td class="font-medium">${esc(row.keyword ?? "")}</td>
       <td title="${fmtNum(row.searches)}">${fmtCompact(row.searches)}</td>
       <td title="${fmtNum(row.clicks)}">${fmtCompact(row.clicks)}</td>
@@ -572,8 +577,12 @@ function renderPanel(data) {
       <td class="${acosClass}">${acos != null ? (acos * 100).toFixed(1) + "%" : "n/a"}</td>
       <td>${row.cpa != null ? "$" + row.cpa.toFixed(2) : "n/a"}</td>
       <td>${row.relevancy != null ? esc(row.relevancy) + (data.analysis_mode === "asin" ? "%" : "") : "n/a"}</td>`;
-    tbody.appendChild(tr);
-  });
+      tbody.appendChild(tr);
+    });
+    markSortedHeaders(root.querySelectorAll(".kw-table th[data-sort]"), kwSort);
+  };
+  bindSortHeaders(root.querySelectorAll(".kw-table th[data-sort]"), kwSort, renderKwTable);
+  renderKwTable();
 
   // --- Kar analizi (canlı) ---
   const profitInputs = ["cogs", "sale", "fba", "ref", "acos", "ret", "gen"].map(k => root.querySelector(`.p-${k}`));
@@ -793,7 +802,7 @@ function renderPanel(data) {
     try {
       const res = await apiFetch(`${API_BASE}/api/export/keywords`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ keyword: data.keyword, keyword_rows: data.keyword_rows || [] }),
+        body: JSON.stringify({ keyword: data.keyword, keyword_rows: kwSortedRows() }),  // ekrandaki sırayla
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       await downloadBlob(res, `${data.keyword}_keywords.xlsx`);
@@ -1325,7 +1334,69 @@ function renderDataViews() {
 // ---------------------------------------------------------------------------
 // Keyword Araştırma
 // ---------------------------------------------------------------------------
-const kwvState = { filter: "all", query: "", sortKey: null, sortDir: -1, page: 1, perPage: 10 };
+// --- Keyword tablosu sıralaması (Ürün Analizi + Keyword Araştırma ortak; tamamen tarayıcıda, MCP yok) ---
+// Varsayılan: Relevancy azalan (ASIN modunda aynı alan "Traffic Share" adıyla gösterilir).
+const KW_SORT_DEFAULT = { key: "relevancy", dir: -1 };
+const KW_TEXT_COLS = new Set(["keyword"]);
+const KW_COLLATOR = new Intl.Collator("tr", { sensitivity: "base", numeric: true });
+
+/** Sıralama değeri: Keyword -> metin; diğerleri SAYI ("1,234", "12%" gibi metinler de sayıya çevrilir). Boş/n/a -> null. */
+function kwSortValue(row, key) {
+  const v = row[key];
+  if (KW_TEXT_COLS.has(key)) {
+    const t = v == null ? "" : String(v).trim();
+    return t === "" ? null : t;
+  }
+  if (v == null || v === "") return null;
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  const t = String(v).replace(/[%,\s$]/g, "");
+  if (t === "") return null;
+  const n = Number(t);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** Kararlı sıralama; null değerler yön ne olursa olsun en altta, eşitlikte orijinal sıra korunur. */
+function sortKeywordRows(rows, key, dir) {
+  if (!key) return [...rows];
+  return rows.map((r, i) => ({ r, i, v: kwSortValue(r, key) }))
+    .sort((a, b) => {
+      if (a.v == null || b.v == null) return a.v == null && b.v == null ? a.i - b.i : a.v == null ? 1 : -1;
+      const c = KW_TEXT_COLS.has(key) ? KW_COLLATOR.compare(a.v, b.v) : a.v - b.v;
+      return c ? c * dir : a.i - b.i;
+    })
+    .map(x => x.r);
+}
+
+/** Başlık tıklaması: yeni sütun -> sayısal azalan / Keyword A→Z; aynı sütun -> yön tersine. */
+function bindSortHeaders(ths, state, rerender) {
+  ths.forEach(th => {
+    th.classList.add("sortable");
+    th.setAttribute("role", "button");
+    th.tabIndex = 0;
+    const go = () => {
+      const k = th.dataset.sort;
+      if (state.key === k) state.dir *= -1;
+      else { state.key = k; state.dir = KW_TEXT_COLS.has(k) ? 1 : -1; }
+      rerender();
+    };
+    th.addEventListener("click", go);
+    th.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } });
+  });
+}
+
+function markSortedHeaders(ths, state) {
+  ths.forEach(th => {
+    const on = th.dataset.sort === state.key;
+    th.classList.toggle("sorted", on);
+    th.dataset.dir = on ? (state.dir > 0 ? "asc" : "desc") : "";
+    th.setAttribute("aria-sort", on ? (state.dir > 0 ? "ascending" : "descending") : "none");
+  });
+}
+
+const kwvState = { filter: "all", query: "", sortKey: KW_SORT_DEFAULT.key, sortDir: KW_SORT_DEFAULT.dir, page: 1, perPage: 10 };
+function kwvResetSort() { kwvState.sortKey = KW_SORT_DEFAULT.key; kwvState.sortDir = KW_SORT_DEFAULT.dir; kwvState.page = 1; }
+const kwvSortState = { get key() { return kwvState.sortKey; }, set key(v) { kwvState.sortKey = v; },
+                       get dir() { return kwvState.sortDir; }, set dir(v) { kwvState.sortDir = v; } };
 
 function kwvMainRow(data) {
   const rows = data.keyword_rows || [];
@@ -1407,20 +1478,8 @@ function renderKeywordTable() {
     if (kwvState.filter === "lowacos" && !(r.acos != null && r.acos < 0.2)) return false;
     return true;
   });
-  if (kwvState.sortKey) {
-    const k = kwvState.sortKey, dir = kwvState.sortDir;
-    rows = [...rows].sort((a, b) => {
-      const av = a[k], bv = b[k];
-      if (av == null && bv == null) return 0;
-      if (av == null) return 1;
-      if (bv == null) return -1;
-      return (typeof av === "string" ? av.localeCompare(bv, "tr") : av - bv) * dir;
-    });
-  }
-  $$("#kwv-table th[data-sort]").forEach(th => {
-    th.classList.toggle("sorted", th.dataset.sort === kwvState.sortKey);
-    th.dataset.dir = th.dataset.sort === kwvState.sortKey ? (kwvState.sortDir > 0 ? "asc" : "desc") : "";
-  });
+  rows = sortKeywordRows(rows, kwvState.sortKey, kwvState.sortDir);
+  markSortedHeaders($$("#kwv-table th[data-sort]"), kwvSortState);
 
   const total = rows.length;
   const pages = Math.max(1, Math.ceil(total / kwvState.perPage));
@@ -1472,13 +1531,7 @@ function renderKeywordTable() {
   $("#kwv-minvol").addEventListener("input", () => { kwvState.page = 1; renderKeywordTable(); });
   $("#kwv-search").addEventListener("input", (e) => { kwvState.query = e.target.value.trim(); kwvState.page = 1; renderKeywordTable(); });
   bindSegment($("#kwv-filters"), "filter", (f) => { kwvState.filter = f; kwvState.page = 1; renderKeywordTable(); });
-  $$("#kwv-table th[data-sort]").forEach(th => th.addEventListener("click", () => {
-    const k = th.dataset.sort;
-    if (kwvState.sortKey === k) kwvState.sortDir *= -1;
-    else { kwvState.sortKey = k; kwvState.sortDir = k === "keyword" ? 1 : -1; }
-    kwvState.page = 1;
-    renderKeywordTable();
-  }));
+  bindSortHeaders($$("#kwv-table th[data-sort]"), kwvSortState, () => { kwvState.page = 1; renderKeywordTable(); });
   // Excel: mevcut /api/export/keywords ucu (payload değişmedi)
   $("#kwv-export").addEventListener("click", async (e) => {
     const data = lastAnalysis;
@@ -1490,7 +1543,8 @@ function renderKeywordTable() {
     try {
       const res = await apiFetch(`${API_BASE}/api/export/keywords`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ keyword: data.keyword, keyword_rows: data.keyword_rows || [] }),
+        // ekrandaki sırayla (aktif sütun/yön); satır kümesi önceki gibi analizin tüm keyword'leri
+        body: JSON.stringify({ keyword: data.keyword, keyword_rows: sortKeywordRows(data.keyword_rows || [], kwvState.sortKey, kwvState.sortDir) }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       await downloadBlob(res, `${data.keyword}_keywords.xlsx`);
