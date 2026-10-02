@@ -127,6 +127,12 @@ gerçek bir keyword'le test et (henüz denenmedi).
   sorgulayınca çöker. `database.py::_add_column_if_missing()` +
   `_migrate_schema()` bunu `init_db()` içinde otomatik halleder — yeni bir
   sütun eklersen buraya da ekle.
+- **Dosya adı başlıkları (Content-Disposition) latin-1 ile kodlanır** — Türkçe keyword'ü
+  doğrudan `filename="..."` içine yazmak ş/ğ/ı'da `UnicodeEncodeError` → 500 veriyordu (tüm Excel
+  export'ları). Dosya döndüren HER uçta `index.py::_content_disposition()` kullan: ASCII yedek
+  (ş→s, ğ→g, ı→i, İ→I, ç→c, ö→o, ü→u, kalan ASCII dışı → _) + RFC 5987 `filename*=UTF-8''...`.
+  Frontend `downloadBlob` adı istemcide kurar ve Türkçe harfleri korur. (Test notu: Chromium
+  `C` yerelinde ASCII dışı indirme adlarını "download"a çevirir — Playwright'ı `LC_ALL=C.UTF-8` ile çalıştır.)
 - **Yakalanmayan hatalar düz metin döner, JSON değil** — Vercel'in runtime'ı
   FastAPI'yi atlayıp kendi "Internal Server Error" sayfasını gösteriyor,
   frontend bunu JSON sanıp parse edince anlaşılmaz hata veriyor.

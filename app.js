@@ -829,7 +829,8 @@ async function downloadBlob(response, filename) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = filename.replace(/[^a-zA-Z0-9 _\-\.]/g, "_");
+  // Türkçe harfler korunur (sunucu da RFC 5987 filename* gönderiyor); yalnızca dosya sisteminde yasak karakterler _
+  a.download = filename.replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_");
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -1420,22 +1421,19 @@ function kwvVisibleRows(data) {
   return sortKeywordRows(rows, kwvState.sortKey, kwvState.sortDir);
 }
 
-/**
- * Aktif filtrelerin kısa notu (filtre yoksa ""). DOSYA ADINA eklenir, ASCII:
- * Excel başlığı sunucuda dosya adı başlığına (Content-Disposition, latin-1) da yazıldığı için
- * oraya ş/ğ/ı içeren metin göndermek 500'e yol açıyor — başlık bu yüzden değiştirilmiyor.
- */
-function kwvFilterNote() {
-  const ascii = (t) => t.replace(/[şŞ]/g, "s").replace(/[ğĞ]/g, "g").replace(/ı/g, "i").replace(/İ/g, "I")
-    .replace(/[çÇ]/g, "c").replace(/[öÖ]/g, "o").replace(/[üÜ]/g, "u").normalize("NFKD")
-    .replace(/[^A-Za-z0-9]+/g, "-").replace(/^-+|-+$/g, "").toLowerCase().slice(0, 24);
-  const parts = [];
-  if (kwvState.filter === "highvol") parts.push("yuksek-hacim");
-  if (kwvState.filter === "lowacos") parts.push("dusuk-acos");
+/** Aktif filtreler: Excel başlığı için Türkçe not ve dosya adı eki ({ title, file }); filtre yoksa null. */
+function kwvFilterNote(shown, total) {
+  const title = [], file = [];
+  if (kwvState.filter === "highvol") { title.push("Yüksek Hacim"); file.push("yüksek-hacim"); }
+  if (kwvState.filter === "lowacos") { title.push("Düşük ACOS"); file.push("düşük-acos"); }
   const minVol = parseFloat($("#kwv-minvol").value) || 0;
-  if (minVol) parts.push(`min-hacim-${Math.round(minVol)}`);
-  if (kwvState.query) parts.push(`arama-${ascii(kwvState.query) || "x"}`);
-  return parts.length ? `filtreli_${parts.join("_")}` : "";
+  if (minVol) { title.push(`min. hacim ${fmtNum(minVol)}`); file.push(`min-hacim-${Math.round(minVol)}`); }
+  if (kwvState.query) {
+    title.push(`arama: ${kwvState.query}`);
+    file.push(`arama-${kwvState.query.replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-+|-+$/g, "").slice(0, 24) || "x"}`);
+  }
+  if (!title.length) return null;
+  return { title: `filtreli: ${title.join(" · ")} (${shown}/${total} satır)`, file: `filtreli_${file.join("_")}` };
 }
 
 function renderKeywordView() {
@@ -1560,7 +1558,7 @@ function renderKeywordTable() {
     if (!data) return;
     const rows = kwvVisibleRows(data);
     if (!rows.length) { alert("Filtreye uyan keyword yok — indirilecek satır bulunmuyor."); return; }
-    const note = kwvFilterNote();
+    const note = kwvFilterNote(rows.length, (data.keyword_rows || []).length);
     const btn = e.currentTarget;
     const originalHtml = btn.innerHTML;
     btn.disabled = true;
@@ -1569,10 +1567,10 @@ function renderKeywordTable() {
       const res = await apiFetch(`${API_BASE}/api/export/keywords`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         // yalnızca filtreye uyan satırlar, ekrandaki sırayla (sayfalamadan bağımsız)
-        body: JSON.stringify({ keyword: data.keyword, keyword_rows: rows }),
+        body: JSON.stringify({ keyword: data.keyword, keyword_rows: rows, note: note ? note.title : null }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      await downloadBlob(res, `${data.keyword}_keywords${note ? `_${note}` : ""}.xlsx`);
+      await downloadBlob(res, `${data.keyword}_keywords${note ? `_${note.file}` : ""}.xlsx`);
     } catch (err) {
       alert(`Excel oluşturulamadı: ${err.message}`);
     } finally {

@@ -19,6 +19,7 @@ import time
 import json
 import re
 from datetime import datetime, timezone
+from urllib.parse import quote
 
 # Vercel'in Python runtime'ı bu dosyayı importlib ile dosya-yolu üzerinden
 # yüklüyor ve api/ klasörünü otomatik olarak sys.path'e eklemiyor — bu yüzden
@@ -619,6 +620,23 @@ def _safe_filename(keyword: str, suffix: str) -> str:
     return f"{safe or 'analiz'}_{suffix}.xlsx"
 
 
+_TR_ASCII = str.maketrans({"ş": "s", "Ş": "S", "ğ": "g", "Ğ": "G", "ı": "i", "İ": "I",
+                           "ç": "c", "Ç": "C", "ö": "o", "Ö": "O", "ü": "u", "Ü": "U"})
+
+
+def _content_disposition(filename: str) -> str:
+    """
+    RFC 5987/6266: Türkçe (ASCII dışı) dosya adları için.
+    Eskiden ad doğrudan filename="..." içine yazılıyordu; Starlette başlıkları latin-1
+    kodladığı için ş/ğ/ı içeren keyword'lerde (örn. "şemsiye") export uçları 500 veriyordu.
+    filename  = ASCII yedek (ş→s, ğ→g, ı→i, İ→I, ç→c, ö→o, ü→u; kalan ASCII dışı → _)
+    filename* = UTF-8 yüzde kodlu asıl ad (modern tarayıcılar bunu kullanır)
+    """
+    fallback = "".join(c if 32 <= ord(c) < 127 and c not in '"\\' else "_"
+                       for c in filename.translate(_TR_ASCII))
+    return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(filename, safe='')}"
+
+
 @app.post("/api/export/report")
 async def export_report(payload: dict, user: dict = Depends(require_auth)):
     """
@@ -634,27 +652,28 @@ async def export_report(payload: dict, user: dict = Depends(require_auth)):
     return Response(
         content=xlsx_bytes,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": _content_disposition(filename)},
     )
 
 
 class ExportKeywordsRequest(BaseModel):
     keyword: str
     keyword_rows: list[dict]
+    note: str | None = Field(None, max_length=300)   # panel filtre notu -> Excel başlığına
 
 
 @app.post("/api/export/keywords")
 async def export_keywords(req: ExportKeywordsRequest, user: dict = Depends(require_auth)):
     """Sadece Relevant Keywords tablosunu ayrı bir Excel dosyası olarak üretir."""
     try:
-        xlsx_bytes = excel_export.build_keywords_xlsx(req.keyword_rows, req.keyword)
+        xlsx_bytes = excel_export.build_keywords_xlsx(req.keyword_rows, req.keyword, req.note)
     except Exception as e:
         raise HTTPException(500, f"Excel oluşturulamadı: {e}")
     filename = _safe_filename(req.keyword, "keywords")
     return Response(
         content=xlsx_bytes,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": _content_disposition(filename)},
     )
 
 
