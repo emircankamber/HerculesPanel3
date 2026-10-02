@@ -1406,6 +1406,38 @@ function kwvMainRow(data) {
     || null;
 }
 
+/** Keyword Araştırma: filtrelere uyan TÜM satırlar, ekrandaki sırayla (sayfalamadan bağımsız). */
+function kwvVisibleRows(data) {
+  const minVol = parseFloat($("#kwv-minvol").value) || 0;
+  const q = kwvState.query.toLowerCase();
+  const rows = (data.keyword_rows || []).filter(r => {
+    if (minVol && (r.searches ?? 0) < minVol) return false;
+    if (q && !(r.keyword || "").toLowerCase().includes(q)) return false;
+    if (kwvState.filter === "highvol" && (r.searches ?? 0) < 10000) return false;
+    if (kwvState.filter === "lowacos" && !(r.acos != null && r.acos < 0.2)) return false;
+    return true;
+  });
+  return sortKeywordRows(rows, kwvState.sortKey, kwvState.sortDir);
+}
+
+/**
+ * Aktif filtrelerin kısa notu (filtre yoksa ""). DOSYA ADINA eklenir, ASCII:
+ * Excel başlığı sunucuda dosya adı başlığına (Content-Disposition, latin-1) da yazıldığı için
+ * oraya ş/ğ/ı içeren metin göndermek 500'e yol açıyor — başlık bu yüzden değiştirilmiyor.
+ */
+function kwvFilterNote() {
+  const ascii = (t) => t.replace(/[şŞ]/g, "s").replace(/[ğĞ]/g, "g").replace(/ı/g, "i").replace(/İ/g, "I")
+    .replace(/[çÇ]/g, "c").replace(/[öÖ]/g, "o").replace(/[üÜ]/g, "u").normalize("NFKD")
+    .replace(/[^A-Za-z0-9]+/g, "-").replace(/^-+|-+$/g, "").toLowerCase().slice(0, 24);
+  const parts = [];
+  if (kwvState.filter === "highvol") parts.push("yuksek-hacim");
+  if (kwvState.filter === "lowacos") parts.push("dusuk-acos");
+  const minVol = parseFloat($("#kwv-minvol").value) || 0;
+  if (minVol) parts.push(`min-hacim-${Math.round(minVol)}`);
+  if (kwvState.query) parts.push(`arama-${ascii(kwvState.query) || "x"}`);
+  return parts.length ? `filtreli_${parts.join("_")}` : "";
+}
+
 function renderKeywordView() {
   const data = lastAnalysis;
   $("#kwv-empty").classList.toggle("hidden", !!data);
@@ -1468,17 +1500,7 @@ function renderKeywordTable() {
   if (!data) return;
   const isAsin = data.analysis_mode === "asin";
   const main = kwvMainRow(data);
-  const minVol = parseFloat($("#kwv-minvol").value) || 0;
-  const q = kwvState.query.toLowerCase();
-
-  let rows = (data.keyword_rows || []).filter(r => {
-    if (minVol && (r.searches ?? 0) < minVol) return false;
-    if (q && !(r.keyword || "").toLowerCase().includes(q)) return false;
-    if (kwvState.filter === "highvol" && (r.searches ?? 0) < 10000) return false;
-    if (kwvState.filter === "lowacos" && !(r.acos != null && r.acos < 0.2)) return false;
-    return true;
-  });
-  rows = sortKeywordRows(rows, kwvState.sortKey, kwvState.sortDir);
+  const rows = kwvVisibleRows(data);
   markSortedHeaders($$("#kwv-table th[data-sort]"), kwvSortState);
 
   const total = rows.length;
@@ -1536,6 +1558,9 @@ function renderKeywordTable() {
   $("#kwv-export").addEventListener("click", async (e) => {
     const data = lastAnalysis;
     if (!data) return;
+    const rows = kwvVisibleRows(data);
+    if (!rows.length) { alert("Filtreye uyan keyword yok — indirilecek satır bulunmuyor."); return; }
+    const note = kwvFilterNote();
     const btn = e.currentTarget;
     const originalHtml = btn.innerHTML;
     btn.disabled = true;
@@ -1543,11 +1568,11 @@ function renderKeywordTable() {
     try {
       const res = await apiFetch(`${API_BASE}/api/export/keywords`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        // ekrandaki sırayla (aktif sütun/yön); satır kümesi önceki gibi analizin tüm keyword'leri
-        body: JSON.stringify({ keyword: data.keyword, keyword_rows: sortKeywordRows(data.keyword_rows || [], kwvState.sortKey, kwvState.sortDir) }),
+        // yalnızca filtreye uyan satırlar, ekrandaki sırayla (sayfalamadan bağımsız)
+        body: JSON.stringify({ keyword: data.keyword, keyword_rows: rows }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      await downloadBlob(res, `${data.keyword}_keywords.xlsx`);
+      await downloadBlob(res, `${data.keyword}_keywords${note ? `_${note}` : ""}.xlsx`);
     } catch (err) {
       alert(`Excel oluşturulamadı: ${err.message}`);
     } finally {
