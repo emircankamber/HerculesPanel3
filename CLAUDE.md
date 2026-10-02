@@ -289,7 +289,7 @@ yüzden backend'e hiç bağlanmamalı, sahte veri olur.
 ## Logo (`assets/hercullogo.svg`)
 
 Dosyayı DEĞİŞTİRME/optimize etme. Kırpma `#svgView(viewBox(...))` ile yapılıyor.
-**Tuzak:** "Inteligente" satırı `filterUnits="userSpaceOnUse"` ve bölgesi belirtilmemiş
+**Tuzak:** "Intelligent" satırı (v3; eskiden "Inteligente") `filterUnits="userSpaceOnUse"` ve bölgesi belirtilmemiş
 (varsayılan -%10/%120) bir gölge filtresi kullanıyor; viewBox ~361 birimden kısa ya da
 ~819 birimden darsa satır HİÇ çizilmiyor. Kenar çubuğunda viewBox bu boyutta tutulup alt
 satır kapsayıcının `overflow:hidden`'ı ile gizleniyor. Favicon: `assets/hercul-icon.svg`
