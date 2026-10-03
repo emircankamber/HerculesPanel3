@@ -2051,3 +2051,80 @@ async def launch_report(req: LaunchReportIn, user: dict = Depends(require_auth))
     return Response(content=html, media_type="text/html; charset=utf-8",
                     headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
 
+
+# ---------------------------------------------------------------------------
+# EKİP AKTİVİTESİ — yalnızca owner (admin/member 403). SALT OKUNUR: yazma ucu yok;
+# karar silme/temizleme uçları zaten yalnızca isteği yapanın KENDİ user_id'siyle çalışır.
+# MCP çağrısı yok; kayda tıklamak panelde runAnalysis ile CANLI yeni analiz başlatır.
+# ---------------------------------------------------------------------------
+TEAM_DECISIONS = ("Uygun", "Sınırda", "Elenmiş")
+TEAM_MAX_ROWS = 1000
+
+
+def _tr_fold(s: str) -> str:
+    return (s or "").replace("I", "ı").replace("İ", "i").lower()
+
+
+def _week_start_utc(now: int) -> int:
+    d = datetime.fromtimestamp(now, timezone.utc)
+    monday = d.replace(hour=0, minute=0, second=0, microsecond=0).timestamp() - d.weekday() * 86400
+    return int(monday)
+
+
+def _verdict_for(index: dict, uid, kw, mp, at):
+    """Kararın ön önerisi: aynı kişinin aynı keyword/pazar için karar anına kadarki SON sorgusunun önerisi
+    (karardan önce sorgu yoksa en son sorgusununki)."""
+    rows = index.get((uid, kw, mp)) or []
+    before = [r for r in rows if r[0] <= at]
+    pick = (before or rows)[-1] if rows else None
+    return pick[1] if pick else None
+
+
+@app.get("/api/team/activity")
+async def team_activity(user_id: int | None = Query(None, ge=0),
+                        since: int | None = Query(None, ge=0), until: int | None = Query(None, ge=0),
+                        decision: str | None = Query(None), q: str | None = Query(None, max_length=200),
+                        week_start: int | None = Query(None, ge=0),
+                        user: dict = Depends(require_owner)):
+    if decision and decision not in TEAM_DECISIONS:
+        raise HTTPException(422, "Geçersiz karar filtresi")
+    users = await db.list_users()
+    emails = {u["id"]: u["email"] for u in users}
+    queries = await db.team_queries(user_id, since, until)
+    decisions = await db.team_decisions(user_id, since, until, decision)
+    if q and q.strip():
+        needle = _tr_fold(q.strip())
+        queries = [r for r in queries if needle in _tr_fold(r["keyword"])]
+        decisions = [r for r in decisions if needle in _tr_fold(r["keyword"])]
+
+    vindex: dict = {}
+    for r in await db.team_verdict_log():
+        vindex.setdefault((r["user_id"], r["keyword"], r["marketplace"]), []).append((r["queried_at"], r["verdict"]))
+
+    def who(uid, email):
+        return email or emails.get(uid) or ("(oturumsuz kullanım)" if not uid else f"(silinmiş kullanıcı #{uid})")
+
+    q_out = [{"id": r["id"], "user_id": r["user_id"], "user": who(r["user_id"], r.get("email")),
+              "keyword": r["keyword"], "marketplace": r["marketplace"], "at": r["queried_at"],
+              "verdict": r.get("verdict")} for r in queries]
+    d_out = [{"id": r["id"], "user_id": r["user_id"], "user": who(r["user_id"], r.get("email")),
+              "keyword": r["keyword"], "marketplace": r["marketplace"], "at": r["decided_at"],
+              "decision": r["decision"], "note": r.get("note") or "",
+              "verdict": _verdict_for(vindex, r["user_id"], r["keyword"], r["marketplace"], r["decided_at"])}
+             for r in decisions]
+
+    ws = week_start if week_start is not None else _week_start_utc(int(time.time()))
+    counts = await db.team_counts_since(ws)
+    summary = [{"user_id": u["id"], "user": u["email"], "role": u["role"],
+                "week_queries": counts["queries"].get(u["id"], 0), "week_decisions": counts["decisions"].get(u["id"], 0)}
+               for u in users]
+    # Kullanıcı tablosunda olmayan (oturumsuz/silinmiş) kayıt sahipleri de özette görünsün
+    for uid in sorted((set(counts["queries"]) | set(counts["decisions"])) - set(emails)):
+        summary.append({"user_id": uid, "user": who(uid, None), "role": None,
+                        "week_queries": counts["queries"].get(uid, 0), "week_decisions": counts["decisions"].get(uid, 0)})
+
+    return {"week_start": ws, "users": [{"id": u["id"], "email": u["email"], "role": u["role"]} for u in users],
+            "summary": summary,
+            "queries": q_out[:TEAM_MAX_ROWS], "decisions": d_out[:TEAM_MAX_ROWS],
+            "totals": {"queries": len(q_out), "decisions": len(d_out)}, "truncated_at": TEAM_MAX_ROWS}
+

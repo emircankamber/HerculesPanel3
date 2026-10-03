@@ -151,6 +151,13 @@ gerçek bir keyword'le test et (henüz denenmedi).
   `user_query_log` tabloları `user_id` ile izole. Ham SellerSprite verisi
   (`keyword_analysis`) paylaşımlı kalabilirdi ama artık önbellek okunmadığı
   için bu ayrımın önemi kalmadı.
+- **İSTİSNA — Ekip Aktivitesi (yalnızca owner):** `GET /api/team/activity` (`require_owner`;
+  admin/member 403) tüm kullanıcıların `user_query_log` ve `market_decision` kayıtlarını
+  kişi/tarih/karar/keyword filtresi ve kişi başına haftalık özetle döner. SALT OKUNUR: bu
+  bölüm için yazma ucu yok; karar/geçmiş silme uçları zaten yalnızca isteği yapanın KENDİ
+  `user_id`'siyle çalışır. Kararın "ön öneri"si = aynı kişinin aynı keyword/pazar için karar anına
+  kadarki son sorgusunun verdict'i. Panelde kayda tıklamak `runAnalysis` ile CANLI analiz başlatır
+  (ASIN kayıtlarındaki `ASIN:` öneki ayıklanır). Giriş ekranı metni bunu kullanıcıya söylüyor.
 - **Giriş sistemi "ilk kullanıcı kaydolunca kilitlenir"** — hiç kullanıcı
   yokken `auth_required=false`, panel açık. İlk `/api/auth/register`'dan
   sonra herkes (kendisi dahil) giriş yapmak zorunda. `require_auth()`

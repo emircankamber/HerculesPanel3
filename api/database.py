@@ -334,6 +334,53 @@ async def clear_all_decisions(user_id: int):
 
 
 # ---------------------------------------------------------------------------
+# EKİP AKTİVİTESİ — yalnızca owner'lar (yetki index.py'de require_owner). SALT OKUNUR:
+# burada yazma/silme fonksiyonu yok; kayıtlar sahibinin kendi uçlarıyla (kendi user_id'si) değişir.
+# ---------------------------------------------------------------------------
+def _range_sql(col: str, user_id, since, until):
+    where, args = [], []
+    if user_id is not None:
+        where.append("q.user_id = ?"); args.append(user_id)
+    if since is not None:
+        where.append(f"q.{col} >= ?"); args.append(since)
+    if until is not None:
+        where.append(f"q.{col} < ?"); args.append(until)
+    return (" WHERE " + " AND ".join(where)) if where else "", args
+
+
+async def team_queries(user_id: int | None = None, since: int | None = None, until: int | None = None) -> list[dict]:
+    where, args = _range_sql("queried_at", user_id, since, until)
+    return await fetch_all(
+        "SELECT q.id, q.user_id, u.email, q.keyword, q.marketplace, q.queried_at, q.verdict "
+        f"FROM user_query_log q LEFT JOIN users u ON u.id = q.user_id{where} "
+        "ORDER BY q.queried_at DESC, q.id DESC", tuple(args))
+
+
+async def team_decisions(user_id: int | None = None, since: int | None = None, until: int | None = None,
+                         decision: str | None = None) -> list[dict]:
+    where, args = _range_sql("decided_at", user_id, since, until)
+    if decision:
+        where += (" AND " if where else " WHERE ") + "q.decision = ?"
+        args.append(decision)
+    return await fetch_all(
+        "SELECT q.id, q.user_id, u.email, q.keyword, q.marketplace, q.decision, q.note, q.decided_at "
+        f"FROM market_decision q LEFT JOIN users u ON u.id = q.user_id{where} "
+        "ORDER BY q.decided_at DESC, q.id DESC", tuple(args))
+
+
+async def team_verdict_log() -> list[dict]:
+    """Kararlara 'ön öneri' eşlemek için (user_id, keyword, marketplace) -> sorgu verdict'leri."""
+    return await fetch_all("SELECT user_id, keyword, marketplace, queried_at, verdict FROM user_query_log "
+                           "WHERE verdict IS NOT NULL ORDER BY queried_at")
+
+
+async def team_counts_since(since: int) -> dict:
+    q = await fetch_all("SELECT user_id, COUNT(*) AS c FROM user_query_log WHERE queried_at >= ? GROUP BY user_id", (since,))
+    d = await fetch_all("SELECT user_id, COUNT(*) AS c FROM market_decision WHERE decided_at >= ? GROUP BY user_id", (since,))
+    return {"queries": {r["user_id"]: r["c"] for r in q}, "decisions": {r["user_id"]: r["c"] for r in d}}
+
+
+# ---------------------------------------------------------------------------
 # SIGNAL ENGINE / PROOF / SERTİFİKA
 # ---------------------------------------------------------------------------
 async def save_product_signals(keyword: str, marketplace: str, stage: str, signals: dict):
