@@ -677,6 +677,37 @@ async def export_keywords(req: ExportKeywordsRequest, user: dict = Depends(requi
     )
 
 
+class ReportRow(BaseModel):
+    keyword: str = Field("", max_length=500)
+    marketplace: str = Field("", max_length=10)
+    decision: str | None = Field(None, max_length=40)
+    verdict: str | None = Field(None, max_length=40)
+    note: str | None = Field(None, max_length=5000)
+    decided_at: int | None = None
+    queried_at: int | None = None
+    decided_by: str | None = Field(None, max_length=300)
+
+
+class ExportReportsRequest(BaseModel):
+    rows: list[ReportRow] = Field(default_factory=list, max_length=10000)
+    tz_offset_min: int = Field(0, ge=-900, le=900)
+    filename: str = Field("pl_pazar_raporlari", max_length=120)
+
+
+@app.post("/api/export/reports")
+async def export_reports(req: ExportReportsRequest, user: dict = Depends(require_auth)):
+    """Raporlar sayfası listesini (eski CSV ile aynı sütunlar) Excel olarak döner. Metinler formül değil METİN yazılır."""
+    try:
+        xlsx_bytes = excel_export.build_reports_xlsx([r.model_dump() for r in req.rows], req.tz_offset_min)
+    except Exception as e:
+        raise HTTPException(500, f"Excel oluşturulamadı: {e}")
+    return Response(
+        content=xlsx_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": _content_disposition(f"{req.filename}.xlsx")},
+    )
+
+
 @app.get("/api/thresholds")
 async def thresholds(user: dict = Depends(require_auth)):
     """
@@ -2065,12 +2096,6 @@ def _tr_fold(s: str) -> str:
     return (s or "").replace("I", "ı").replace("İ", "i").lower()
 
 
-def _week_start_utc(now: int) -> int:
-    d = datetime.fromtimestamp(now, timezone.utc)
-    monday = d.replace(hour=0, minute=0, second=0, microsecond=0).timestamp() - d.weekday() * 86400
-    return int(monday)
-
-
 def _verdict_for(index: dict, uid, kw, mp, at):
     """Kararın ön önerisi: aynı kişinin aynı keyword/pazar için karar anına kadarki SON sorgusunun önerisi
     (karardan önce sorgu yoksa en son sorgusununki)."""
@@ -2084,7 +2109,6 @@ def _verdict_for(index: dict, uid, kw, mp, at):
 async def team_activity(user_id: int | None = Query(None, ge=0),
                         since: int | None = Query(None, ge=0), until: int | None = Query(None, ge=0),
                         decision: str | None = Query(None), q: str | None = Query(None, max_length=200),
-                        week_start: int | None = Query(None, ge=0),
                         user: dict = Depends(require_owner)):
     if decision and decision not in TEAM_DECISIONS:
         raise HTTPException(422, "Geçersiz karar filtresi")
@@ -2113,17 +2137,17 @@ async def team_activity(user_id: int | None = Query(None, ge=0),
               "verdict": _verdict_for(vindex, r["user_id"], r["keyword"], r["marketplace"], r["decided_at"])}
              for r in decisions]
 
-    ws = week_start if week_start is not None else _week_start_utc(int(time.time()))
-    counts = await db.team_counts_since(ws)
+    # Özet: seçili tarih aralığı (since/until), aralık yoksa TÜM ZAMANLAR. Kişi/karar/arama filtreleri özete uygulanmaz.
+    counts = await db.team_counts(since, until)
     summary = [{"user_id": u["id"], "user": u["email"], "role": u["role"],
-                "week_queries": counts["queries"].get(u["id"], 0), "week_decisions": counts["decisions"].get(u["id"], 0)}
+                "queries": counts["queries"].get(u["id"], 0), "decisions": counts["decisions"].get(u["id"], 0)}
                for u in users]
     # Kullanıcı tablosunda olmayan (oturumsuz/silinmiş) kayıt sahipleri de özette görünsün
     for uid in sorted((set(counts["queries"]) | set(counts["decisions"])) - set(emails)):
         summary.append({"user_id": uid, "user": who(uid, None), "role": None,
-                        "week_queries": counts["queries"].get(uid, 0), "week_decisions": counts["decisions"].get(uid, 0)})
+                        "queries": counts["queries"].get(uid, 0), "decisions": counts["decisions"].get(uid, 0)})
 
-    return {"week_start": ws, "users": [{"id": u["id"], "email": u["email"], "role": u["role"]} for u in users],
+    return {"range": {"since": since, "until": until}, "users": [{"id": u["id"], "email": u["email"], "role": u["role"]} for u in users],
             "summary": summary,
             "queries": q_out[:TEAM_MAX_ROWS], "decisions": d_out[:TEAM_MAX_ROWS],
             "totals": {"queries": len(q_out), "decisions": len(d_out)}, "truncated_at": TEAM_MAX_ROWS}

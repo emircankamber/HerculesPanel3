@@ -133,6 +133,11 @@ gerçek bir keyword'le test et (henüz denenmedi).
   (ş→s, ğ→g, ı→i, İ→I, ç→c, ö→o, ü→u, kalan ASCII dışı → _) + RFC 5987 `filename*=UTF-8''...`.
   Frontend `downloadBlob` adı istemcide kurar ve Türkçe harfleri korur. (Test notu: Chromium
   `C` yerelinde ASCII dışı indirme adlarını "download"a çevirir — Playwright'ı `LC_ALL=C.UTF-8` ile çalıştır.)
+- **Excel'de formül enjeksiyonu** — openpyxl "=" ile başlayan HER metni formül yazar. Tüm Excel
+  üreticileri sonunda `excel_export._neutralize_user_formulas(wb, kasıtlı_formüller)` çağırır:
+  kasıtlı olmayan formüller metne (`data_type='s'`) çevrilir, "=,+,-,@" ile başlayan metinlere
+  `quotePrefix` verilir. Yeni bir Excel üreticisi eklersen bunu ÇAĞIR; kasıtlı formülleri
+  (Kâr Analizi gibi) `allowed` kümesine ekle. Raporlar sayfası artık CSV değil `POST /api/export/reports`.
 - **Yakalanmayan hatalar düz metin döner, JSON değil** — Vercel'in runtime'ı
   FastAPI'yi atlayıp kendi "Internal Server Error" sayfasını gösteriyor,
   frontend bunu JSON sanıp parse edince anlaşılmaz hata veriyor.
@@ -153,7 +158,8 @@ gerçek bir keyword'le test et (henüz denenmedi).
   için bu ayrımın önemi kalmadı.
 - **İSTİSNA — Ekip Aktivitesi (yalnızca owner):** `GET /api/team/activity` (`require_owner`;
   admin/member 403) tüm kullanıcıların `user_query_log` ve `market_decision` kayıtlarını
-  kişi/tarih/karar/keyword filtresi ve kişi başına haftalık özetle döner. SALT OKUNUR: bu
+  kişi/tarih/karar/keyword filtresi ve kişi başına özetle döner (özet varsayılan TÜM ZAMANLAR;
+  since/until verilirse özet de listeler de yalnızca o aralık). SALT OKUNUR: bu
   bölüm için yazma ucu yok; karar/geçmiş silme uçları zaten yalnızca isteği yapanın KENDİ
   `user_id`'siyle çalışır. Kararın "ön öneri"si = aynı kişinin aynı keyword/pazar için karar anına
   kadarki son sorgusunun verdict'i. Panelde kayda tıklamak `runAnalysis` ile CANLI analiz başlatır
@@ -292,6 +298,18 @@ yüzden backend'e hiç bağlanmamalı, sahte veri olur.
   (`rel="noopener noreferrer"`).
 - Tablolar: `training_lessons`, `training_assignments`, `training_completions`
   (`completed_at` zaman damgası). Ders silinince atama/tamamlamalar da silinir.
+
+## Kâr analizi (Ürün Analizi → Kâr sekmesi)
+
+- **Referral ORAN olarak tutulur** (varsayılan %15, düzenlenebilir); dolar = oran × satış fiyatı,
+  fiyat değişince yeniden hesaplanır ve `/api/profit`'e DOLAR olarak gider (backend imzası aynı).
+  Excel Kâr Analizi'nde "Referral Oranı (%)" girdisi + `=oran*fiyat` canlı formülü
+  (`profit_analysis.inputs.ref_rate`; eski payload'larda oran $/fiyat'tan türetilir).
+- **Analiz öncesi maliyet** (arama kutusu altındaki "Maliyet gir (opsiyonel)": COGS, FBA, Genel
+  gider %): yalnızca DOLU alanlar Kâr bölümüne yazılır, Kriter 06 ve ön öneri ilk açılışta buna
+  göre gelir, "Analiz öncesi girilen maliyetler kullanıldı" notu çıkar. Boşsa eski varsayılanlar
+  (6.00 / 5.50 / %1). Değerler tarayıcıda (`localStorage: pl_pre_cost`) kalır, "Temizle" siler;
+  sunucuya gitmez. Not: kayıtlı ön öneri (`user_query_log.verdict`) sunucunun maliyetsiz önerisidir.
 
 ## Logo (`assets/hercullogo.svg`)
 

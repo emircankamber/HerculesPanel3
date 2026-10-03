@@ -57,6 +57,30 @@ def _kv_rows(ws, row, pairs, col_a=1, col_b=3, span=4):
     return row
 
 
+_FORMULA_LEAD = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _neutralize_user_formulas(wb, allowed: set | None = None):
+    """
+    FORMÜL ENJEKSİYONU KORUMASI: openpyxl "=" ile başlayan HER metni formül olarak yazar —
+    kullanıcı metni (keyword, not, marka...) "=HYPERLINK(...)" ise Excel'de çalışırdı.
+    Kasıtlı formüller (`allowed` = {(sayfa, hücre)}) dışındaki her formül metne çevrilir
+    (data_type 's' -> inlineStr). "=,+,-,@" ile başlayan metinlere quotePrefix verilir ki
+    hücre Excel'de düzenlenince de formüle dönmesin (CSV'deki "'" önekinin Excel karşılığı).
+    """
+    allowed = allowed or set()
+    for ws in wb.worksheets:
+        for row in ws.iter_rows():
+            for cell in row:
+                v = cell.value
+                if not isinstance(v, str) or not v.startswith(_FORMULA_LEAD):
+                    continue
+                if cell.data_type == "f" and (ws.title, cell.coordinate) in allowed:
+                    continue
+                cell.data_type = "s"
+                cell.quotePrefix = True
+
+
 def build_report_xlsx(data: dict) -> bytes:
     """
     Panelin /api/analyze yanıtından (frontend'in gösterdiği `data` objesi)
@@ -217,6 +241,7 @@ def build_report_xlsx(data: dict) -> bytes:
     row = _section(ws, row, 10, "KAR ANALİZİ  (sarı hücreler manuel — değiştirince otomatik yeniden hesaplanır)")
     profit = data.get("profit_analysis") or {}
     inputs = profit.get("inputs", {})
+    formulas: set = set()
     YELLOW = PatternFill("solid", fgColor="FFF2CC")
     INPUT_FONT = Font(name=ARIAL, size=10, color="0000FF")
     FORMULA_FONT = Font(name=ARIAL, size=10, color="000000")
@@ -238,6 +263,7 @@ def build_report_xlsx(data: dict) -> bytes:
 
     def _pformula(r, formula, fmt, bold=False):
         cell = ws.cell(r, 2, formula)
+        formulas.add((ws.title, cell.coordinate))  # kasıtlı formül — enjeksiyon temizliğinden muaf
         cell.font = Font(name=ARIAL, bold=bold, size=10, color="000000")
         cell.border = BORDER
         cell.number_format = fmt
@@ -246,7 +272,14 @@ def build_report_xlsx(data: dict) -> bytes:
     r_cogs = row; row = _plabel(row, "Alış Fiyatı / COGS ($)"); _pinput(r_cogs, inputs.get("cogs"), '$#,##0.00')
     r_sale = row; row = _plabel(row, "Satış Fiyatı ($)"); _pinput(r_sale, inputs.get("sale"), '$#,##0.00')
     r_fba = row; row = _plabel(row, "FBA Fee ($)"); _pinput(r_fba, inputs.get("fba"), '$#,##0.00')
-    r_ref = row; row = _plabel(row, "Referral Fee ($)"); _pinput(r_ref, inputs.get("ref"), '$#,##0.00')
+    # Referral ORAN olarak tutulur (kategoriye göre değişir; varsayılan %15); dolar = oran × satış fiyatı (canlı formül).
+    # Eski panel sürümleri yalnızca dolar gönderiyordu -> oranı ondan türet.
+    ref_rate = inputs.get("ref_rate")
+    if ref_rate is None:
+        ref_usd, sale_v = inputs.get("ref"), inputs.get("sale")
+        ref_rate = (ref_usd / sale_v * 100) if (ref_usd is not None and sale_v) else 15
+    r_refr = row; row = _plabel(row, "Referral Oranı (%)"); _pinput(r_refr, (ref_rate or 0) / 100, '0.0%')
+    r_ref = row; row = _plabel(row, "Referral Fee ($) = oran × fiyat"); _pformula(r_ref, f"=B{r_refr}*B{r_sale}", '$#,##0.00')
     r_acos = row; row = _plabel(row, "ACOS (%)"); _pinput(r_acos, (inputs.get("acos") or 0) / 100, '0.0%')
     r_ret = row; row = _plabel(row, "Return Rate (%)"); _pinput(r_ret, (inputs.get("ret") or 0) / 100, '0.0%')
     r_gen = row; row = _plabel(row, "Genel Gider (%)"); _pinput(r_gen, (inputs.get("gen") or 0) / 100, '0.0%')
@@ -263,6 +296,7 @@ def build_report_xlsx(data: dict) -> bytes:
     ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=10)
     ws.cell(row, 1, "Bu rapor PL Pazar Paneli tarafından canlı SellerSprite MCP verisiyle otomatik üretilmiştir.").font = NOTE
 
+    _neutralize_user_formulas(wb, formulas)
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
@@ -310,7 +344,60 @@ def build_keywords_xlsx(keyword_rows: list, seed_keyword: str = "", note: str | 
                 ws.cell(row, j).fill = GREY
         row += 1
 
+    _neutralize_user_formulas(wb)
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
     return buf.read()
+
+
+REPORT_COLUMNS = ["keyword", "pazar", "pazar_karari", "on_oneri", "not", "karar_tarihi", "son_sorgu", "karar_veren"]
+
+
+def build_reports_xlsx(rows: list, tz_offset_min: int = 0) -> bytes:
+    """
+    Raporlar sayfasının dışa aktarması (eski CSV ile AYNI sütunlar). Tarihler Excel tarih
+    hücresi (kullanıcının yerel saatine çevrilmiş: tz_offset_min = JS getTimezoneOffset()).
+    Tüm kullanıcı metinleri METİN olarak yazılır (bkz. _neutralize_user_formulas).
+    """
+    from datetime import datetime, timedelta, timezone
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Raporlar"
+    for col, w in zip("ABCDEFGH", (34, 8, 14, 12, 48, 18, 18, 28)):
+        ws.column_dimensions[col].width = w
+    for j, h in enumerate(REPORT_COLUMNS, 1):
+        c = ws.cell(1, j, h)
+        c.font = SEC_FONT
+        c.fill = BLUE
+        c.alignment = CENTER
+        c.border = BORDER
+    ws.freeze_panes = "A2"
+
+    def to_local(ts):
+        if not ts:
+            return None
+        return (datetime.fromtimestamp(int(ts), timezone.utc) - timedelta(minutes=tz_offset_min)).replace(tzinfo=None)
+
+    for i, r in enumerate(rows, start=2):
+        vals = [r.get("keyword"), r.get("marketplace"), r.get("decision") or "", r.get("verdict") or "",
+                r.get("note") or "", to_local(r.get("decided_at")), to_local(r.get("queried_at")), r.get("decided_by") or ""]
+        for j, v in enumerate(vals, 1):
+            cell = ws.cell(i, j)
+            if isinstance(v, datetime):
+                cell.value = v
+                cell.number_format = "yyyy-mm-dd hh:mm"
+            else:
+                cell.value = "" if v is None else str(v)
+                cell.data_type = "s"           # metin — asla formül değil
+            cell.font = LBL
+            cell.border = BORDER
+            if j == 5:
+                cell.alignment = Alignment(wrap_text=True, vertical="top")
+    ws.auto_filter.ref = f"A1:H{max(1, len(rows) + 1)}"
+    _neutralize_user_formulas(wb)
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.read()
+

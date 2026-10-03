@@ -600,6 +600,17 @@ function renderPanel(data) {
   if (marketAvgPrice) root.querySelector(".p-sale").value = marketAvgPrice.toFixed(2);
   if (mainRowForProfit?.acos != null) root.querySelector(".p-acos").value = (mainRowForProfit.acos * 100).toFixed(1);
   if (data.market_return_rate != null) root.querySelector(".p-ret").value = (data.market_return_rate * 100).toFixed(2);
+  // Analiz öncesi girilen maliyetler (opsiyonel): yalnızca DOLU alanlar Kâr bölümüne yazılır
+  const preCost = readPreCost();
+  const preUsed = [];
+  if (preCost.cogs != null) { root.querySelector(".p-cogs").value = preCost.cogs; preUsed.push(`COGS $${preCost.cogs.toFixed(2)}`); }
+  if (preCost.fba != null) { root.querySelector(".p-fba").value = preCost.fba; preUsed.push(`FBA $${preCost.fba.toFixed(2)}`); }
+  if (preCost.gen != null) { root.querySelector(".p-gen").value = preCost.gen; preUsed.push(`Genel gider %${preCost.gen}`); }
+  const preNote = root.querySelector(".profit-precost-note");
+  if (preNote && preUsed.length) {
+    preNote.textContent = `✓ Analiz öncesi girilen maliyetler kullanıldı — ${preUsed.join(" · ")}.`;
+    preNote.style.display = "";
+  }
   // Kaynağını panelde belirt (şeffaflık — hangi değerler gerçek, hangileri hâlâ manuel varsayım)
   const profitSourceNote = root.querySelector(".profit-source-note");
   if (profitSourceNote) {
@@ -607,13 +618,18 @@ function renderPanel(data) {
     if (marketAvgPrice) sources.push("Satış Fiyatı: pazar ortalaması");
     if (mainRowForProfit?.acos != null) sources.push("ACOS: bu keyword için hesaplanan");
     if (data.market_return_rate != null) sources.push("Return Rate: pazar ortalaması");
+    const manual = ["COGS", "FBA"].filter((_, i) => (i === 0 ? preCost.cogs : preCost.fba) == null);
     profitSourceNote.textContent = sources.length
-      ? `✓ Gerçek veriyle dolduruldu — ${sources.join(" · ")}. COGS/FBA/Referral Fee hâlâ manuel girilmeli.`
+      ? `✓ Gerçek veriyle dolduruldu — ${sources.join(" · ")}.${manual.length ? ` ${manual.join("/")} hâlâ manuel girilmeli.` : ""} Referral oranı kategoriye göre değiştirilebilir.`
       : "";
   }
   let lastProfitResult = null;  // Excel export'ta kullanılacak
+  const refUsdEl = root.querySelector(".p-ref-usd");
   const recalcProfit = async () => {
-    const [cogs, sale, fba, ref, acos, ret, gen] = profitInputs.map(i => parseFloat(i.value) || 0);
+    const [cogs, sale, fba, refRate, acos, ret, gen] = profitInputs.map(i => parseFloat(i.value) || 0);
+    // Referral ORAN olarak tutulur; dolar karşılığı = oran × satış fiyatı (fiyat değişince yeniden hesaplanır)
+    const ref = refRate / 100 * sale;   // Excel'deki =oran×fiyat formülüyle aynı (yuvarlamasız)
+    if (refUsdEl) refUsdEl.textContent = `= $${ref.toFixed(2)}`;
     try {
       const res = await apiFetch(`${API_BASE}/api/profit`, {
         method: "POST",
@@ -624,7 +640,7 @@ function renderPanel(data) {
         }),
       });
       const p = await res.json();
-      lastProfitResult = { ...p, inputs: { cogs, sale, fba, ref, acos, ret, gen } };
+      lastProfitResult = { ...p, inputs: { cogs, sale, fba, ref, ref_rate: refRate, acos, ret, gen } };
       root.querySelector(".o-adv").textContent = "$" + p.ad_cost.toFixed(2);
       root.querySelector(".o-retc").textContent = "$" + p.return_cost.toFixed(2);
       root.querySelector(".o-tot").textContent = "$" + p.total_cost.toFixed(2);
@@ -1921,33 +1937,32 @@ function renderReports() {
   });
 }
 
-/** CSV hücresi: tırnak kaçışı + formül enjeksiyonuna karşı (=,+,-,@ ile başlayanlar) önek */
-function csvCell(v) {
-  let s = String(v ?? "");
-  if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
-  return `"${s.replace(/"/g, '""')}"`;
-}
-
 (function bindReportsView() {
   $("#rep-search").addEventListener("input", (e) => { repState.query = e.target.value.trim(); renderReports(); });
   bindSegment($("#rep-status"), "status", (s) => { repState.status = s; renderReports(); });
   $("#rep-range").addEventListener("change", (e) => { repState.range = e.target.value; renderReports(); });
   $("#rep-market").addEventListener("change", (e) => { repState.market = e.target.value; renderReports(); });
-  $("#rep-csv").addEventListener("click", () => {
+  // Excel (.xlsx), eski CSV ile aynı sütunlar. Sunucu metinleri formül değil METİN yazar (formül enjeksiyonu koruması).
+  $("#rep-xlsx").addEventListener("click", async (e) => {
+    const btn = e.currentTarget, original = btn.innerHTML;
     const items = repFiltered();
-    const iso = (s) => s ? new Date(s * 1000).toISOString() : "";
-    const lines = [["keyword", "pazar", "pazar_karari", "on_oneri", "not", "karar_tarihi", "son_sorgu", "karar_veren"].map(csvCell).join(",")]
-      .concat(items.map(it => [it.keyword, it.marketplace, it.decision || "", it.verdict || "", it.note,
-        iso(it.decided_at), iso(it.queried_at), it.decided_by].map(csvCell).join(",")));
-    const blob = new Blob(["﻿" + lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `pl_pazar_raporlari_${new Date().toISOString().slice(0, 10)}.csv`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
+    const name = `pl_pazar_raporlari_${new Date().toISOString().slice(0, 10)}`;
+    btn.disabled = true; btn.textContent = "hazırlanıyor…";
+    try {
+      const res = await apiFetch(`${API_BASE}/api/export/reports`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          filename: name, tz_offset_min: new Date().getTimezoneOffset(),
+          rows: items.map(it => ({ keyword: it.keyword ?? "", marketplace: it.marketplace ?? "", decision: it.decision || "",
+            verdict: it.verdict || "", note: it.note ?? "", decided_at: it.decided_at || null, queried_at: it.queried_at || null,
+            decided_by: it.decided_by ?? "" })),
+        }),
+      });
+      if (!res.ok) { const b = await res.json().catch(() => ({})); throw new Error(apiErrorText(b, res.status)); }
+      await downloadBlob(res, `${name}.xlsx`);
+    } catch (err) {
+      alert(`Excel oluşturulamadı: ${err.message}`);
+    } finally { btn.disabled = false; btn.innerHTML = original; }
   });
 })();
 
@@ -3271,7 +3286,14 @@ const TM_VERDICT_CLASS = { "Uygun": "ok", "Sınırda": "warn", "Elenmiş": "bad"
 
 const tmDate = (ts) => ts ? new Date(ts * 1000).toLocaleString("tr-TR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }) : "—";
 function tmLocalDayStart(v) { if (!v) return null; const [y, m, d] = v.split("-").map(Number); return Math.floor(new Date(y, m - 1, d).getTime() / 1000); }
-function tmWeekStart() { const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); return Math.floor(d.getTime() / 1000); }
+/** Aktif tarih aralığı etiketi (yerel tarih); ikisi de boşsa "Tüm zamanlar". */
+function tmRangeLabel() {
+  const f = $("#tm-from").value, t = $("#tm-to").value;
+  const fmt = (v) => { const [y, m, d] = v.split("-"); return `${d}.${m}.${y}`; };
+  if (!f && !t) return "";
+  if (f && t) return `${fmt(f)} – ${fmt(t)}`;
+  return f ? `${fmt(f)} ve sonrası` : `${fmt(t)} ve öncesi`;
+}
 
 /** Kayıttaki anahtar -> runAnalysis'e verilecek değer ("ASIN:B0.." -> "B0.."; "B0.. — başlık" runAnalysis'te ayıklanır) */
 function tmAnalysisTarget(keyword) { return String(keyword || "").replace(/^ASIN:/i, "").trim(); }
@@ -3292,7 +3314,6 @@ async function loadTeam() {
   const untilDay = tmLocalDayStart($("#tm-to").value); if (untilDay != null) params.set("until", untilDay + 86400);
   const dec = $("#tm-decision").value; if (dec) params.set("decision", dec);
   const q = $("#tm-q").value.trim(); if (q) params.set("q", q);
-  params.set("week_start", tmWeekStart());
   const st = $("#tm-status"); st.textContent = "yükleniyor…"; st.className = "status-line mt-4 loading";
   try {
     const r = await apiFetch(`${API_BASE}/api/team/activity?${params}`);
@@ -3312,12 +3333,19 @@ function renderTeam() {
   sel.innerHTML = `<option value="">Tümü</option>` + people.map(p => `<option value="${esc(p.id)}">${esc(p.label)}</option>`).join("");
   sel.value = people.some(p => String(p.id) === cur) ? cur : "";
 
+  // Aktif aralık (özet + listeler aynı aralıkla süzülür)
+  const rl = tmRangeLabel();
+  $("#tm-range-label").textContent = rl ? `Aralık: ${rl}` : "Tüm zamanlar";
+  $("#tm-range-chip").className = `chip ${rl ? "warn" : "ok"}`;
+  $("#tm-sum-range").textContent = rl || "tüm zamanlar";
+  $("#tm-alltime").style.display = rl ? "" : "none";
+
   // Özet
   $("#tm-summary tbody").innerHTML = b.summary.length ? b.summary.map(s => `
     <tr class="tm-sum-row cursor-pointer" data-uid="${esc(s.user_id)}" title="Bu kişinin kayıtlarını göster">
       <td class="l"><span class="font-medium break-all">${esc(s.user)}</span></td>
       <td>${s.role ? `<span class="chip ${s.role === "owner" ? "ok" : s.role === "admin" ? "warn" : "na"}">${esc(ROLE_LABEL[s.role] || s.role)}</span>` : "—"}</td>
-      <td class="tabular">${fmtNum(s.week_queries)}</td><td class="tabular">${fmtNum(s.week_decisions)}</td></tr>`).join("")
+      <td class="tabular">${fmtNum(s.queries)}</td><td class="tabular">${fmtNum(s.decisions)}</td></tr>`).join("")
     : `<tr><td colspan="4" class="muted !text-center !py-6">Kullanıcı yok.</td></tr>`;
   $$("#tm-summary .tm-sum-row").forEach(tr => tr.addEventListener("click", () => { $("#tm-user").value = tr.dataset.uid; loadTeam(); }));
 
@@ -3357,6 +3385,7 @@ function tmReanalyze(keyword, marketplace) {
   ["#tm-user", "#tm-from", "#tm-to", "#tm-decision"].forEach(sel => $(sel).addEventListener("change", loadTeam));
   $("#tm-q").addEventListener("input", () => { clearTimeout(tmState.timer); tmState.timer = setTimeout(loadTeam, 300); });
   $("#tm-filters").addEventListener("submit", (e) => { e.preventDefault(); loadTeam(); });
+  $("#tm-alltime").addEventListener("click", () => { $("#tm-from").value = ""; $("#tm-to").value = ""; loadTeam(); });
   $("#tm-reset").addEventListener("click", () => { ["#tm-user", "#tm-from", "#tm-to", "#tm-decision", "#tm-q"].forEach(sel => { $(sel).value = ""; }); loadTeam(); });
   $$("#tm-tabs .tab-btn").forEach(btn => btn.addEventListener("click", () => {
     tmState.tab = btn.dataset.tab;
@@ -3364,5 +3393,46 @@ function tmReanalyze(keyword, marketplace) {
     $("#tm-pane-queries").style.display = tmState.tab === "queries" ? "" : "none";
     $("#tm-pane-decisions").style.display = tmState.tab === "decisions" ? "" : "none";
   }));
+})();
+
+// ===========================================================================
+// ANALİZ ÖNCESİ MALİYET (opsiyonel) — Ürün Analizi arama kutusunun altında.
+// Değerler kullanıcı değiştirene ya da "Temizle"ye basana kadar kalır (tarayıcıda; sunucuya gitmez).
+// ===========================================================================
+const PRE_COST_KEY = "pl_pre_cost";
+const PRE_COST_FIELDS = { cogs: "#pc-cogs", fba: "#pc-fba", gen: "#pc-gen" };
+
+/** Dolu ve geçerli (≥0) alanlar sayı, boş/geçersizler null. */
+function readPreCost() {
+  const out = {};
+  for (const [k, sel] of Object.entries(PRE_COST_FIELDS)) {
+    const el = $(sel); const v = el ? el.value.trim() : "";
+    const n = v === "" ? NaN : Number(v);
+    out[k] = Number.isFinite(n) && n >= 0 ? n : null;
+  }
+  return out;
+}
+
+function syncPreCostState() {
+  const pc = readPreCost();
+  const filled = Object.values(pc).filter(v => v != null).length;
+  const chip = $("#pc-state");
+  if (chip) { chip.textContent = filled ? `${filled}/3 dolu` : "boş"; chip.className = `chip ${filled ? "ok" : "na"} !text-[10px]`; }
+  try {
+    const raw = {}; for (const [k, sel] of Object.entries(PRE_COST_FIELDS)) raw[k] = $(sel).value;
+    if (Object.values(raw).some(v => v !== "")) localStorage.setItem(PRE_COST_KEY, JSON.stringify(raw)); else localStorage.removeItem(PRE_COST_KEY);
+  } catch (_) { /* depolama yoksa yalnızca bu oturumda kalır */ }
+}
+
+(function initPreCost() {
+  if (!$("#pre-cost")) return;
+  try {
+    const saved = JSON.parse(localStorage.getItem(PRE_COST_KEY) || "null");
+    if (saved) for (const [k, sel] of Object.entries(PRE_COST_FIELDS)) if (typeof saved[k] === "string") $(sel).value = saved[k];
+  } catch (_) {}
+  Object.values(PRE_COST_FIELDS).forEach(sel => $(sel).addEventListener("input", syncPreCostState));
+  $("#pc-clear").addEventListener("click", () => { Object.values(PRE_COST_FIELDS).forEach(sel => { $(sel).value = ""; }); syncPreCostState(); });
+  syncPreCostState();
+  if (Object.values(readPreCost()).some(v => v != null)) $("#pre-cost").open = true;
 })();
 

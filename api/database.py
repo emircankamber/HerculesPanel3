@@ -374,9 +374,16 @@ async def team_verdict_log() -> list[dict]:
                            "WHERE verdict IS NOT NULL ORDER BY queried_at")
 
 
-async def team_counts_since(since: int) -> dict:
-    q = await fetch_all("SELECT user_id, COUNT(*) AS c FROM user_query_log WHERE queried_at >= ? GROUP BY user_id", (since,))
-    d = await fetch_all("SELECT user_id, COUNT(*) AS c FROM market_decision WHERE decided_at >= ? GROUP BY user_id", (since,))
+async def team_counts(since: int | None = None, until: int | None = None) -> dict:
+    """Kişi başına arama/karar sayısı; aralık verilmezse TÜM ZAMANLAR."""
+    def rng(col):
+        where, args = [], []
+        if since is not None: where.append(f"{col} >= ?"); args.append(since)
+        if until is not None: where.append(f"{col} < ?"); args.append(until)
+        return (" WHERE " + " AND ".join(where)) if where else "", tuple(args)
+    wq, aq = rng("queried_at"); wd, ad = rng("decided_at")
+    q = await fetch_all(f"SELECT user_id, COUNT(*) AS c FROM user_query_log{wq} GROUP BY user_id", aq)
+    d = await fetch_all(f"SELECT user_id, COUNT(*) AS c FROM market_decision{wd} GROUP BY user_id", ad)
     return {"queries": {r["user_id"]: r["c"] for r in q}, "decisions": {r["user_id"]: r["c"] for r in d}}
 
 
