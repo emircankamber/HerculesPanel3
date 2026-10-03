@@ -188,7 +188,10 @@ select.field{padding-right:28px;}
 .ps-l{font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--secondary);}
 .ps-v{font-family:var(--font-display);font-size:28px;font-weight:500;letter-spacing:-.03em;margin-top:6px;font-variant-numeric:tabular-nums;}
 @media (max-width:640px){ .profit-outputs,.profit-summary{grid-template-columns:1fr;} }
-.profit-source-note{font-size:12px;color:var(--primary);}
+.profit-source-note,.profit-precost-note{font-size:12px;color:var(--primary);}
+.pre-cost>summary::-webkit-details-marker{display:none;}
+.pre-cost>summary{list-style:none;}
+.pre-cost[open]>summary{border-bottom:1px solid var(--outline-variant);}
 
 /* ---------- Signal engine ---------- */
 .signal-inputs-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px;}

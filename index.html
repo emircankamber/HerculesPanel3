@@ -220,6 +220,24 @@
                   <button type="submit" id="search-btn" class="btn btn-primary !h-12 flex-1 sm:flex-none px-6"><span class="material-symbols-outlined">auto_awesome</span>Analiz Et</button>
                 </div>
               </div>
+              <details id="pre-cost" class="pre-cost mt-4 rounded-lg border border-hairline">
+                <summary class="flex flex-wrap items-center gap-2 px-3 py-2 cursor-pointer select-none text-sm font-medium">
+                  <span class="material-symbols-outlined text-primary" style="font-size:18px" aria-hidden="true">payments</span>Maliyet gir (opsiyonel)
+                  <span id="pc-state" class="chip na !text-[10px]">boş</span>
+                </summary>
+                <div class="px-3 pb-3">
+                  <p class="text-xs text-secondary">Doluysa analiz bitince Kâr bölümü, Kriter 06 (Net Kâr Marjı) ve ön öneri bu değerlerle hesaplanır. Boş alanlar Kâr bölümündeki varsayılanla kalır; maliyet sonradan Kâr bölümünden de değiştirilebilir.</p>
+                  <div class="grid grid-cols-1 sm:grid-cols-[repeat(3,minmax(0,1fr))_auto] gap-3 mt-3 items-end">
+                    <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Alış maliyeti / COGS ($)</span>
+                      <input type="number" id="pc-cogs" class="field w-full mt-1" min="0" step="0.01" inputmode="decimal" placeholder="örn. 6.00"></label>
+                    <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">FBA ücreti ($)</span>
+                      <input type="number" id="pc-fba" class="field w-full mt-1" min="0" step="0.01" inputmode="decimal" placeholder="örn. 5.50"></label>
+                    <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Genel gider (%)</span>
+                      <input type="number" id="pc-gen" class="field w-full mt-1" min="0" max="100" step="0.1" inputmode="decimal" placeholder="örn. 1"></label>
+                    <button type="button" id="pc-clear" class="btn btn-outline"><span class="material-symbols-outlined">backspace</span>Temizle</button>
+                  </div>
+                </div>
+              </details>
               <div class="flex flex-col md:flex-row md:items-center gap-2 md:gap-3 mt-4">
                 <label for="category-override-input" class="eyebrow shrink-0">Kategori node override (opsiyonel)</label>
                 <input type="text" id="category-override-input" class="field !h-8 text-xs md:w-72" placeholder="örn. 2619525011:3741181:3741241:3741161">
@@ -684,7 +702,7 @@
               <p class="text-sm text-on-surface-variant mt-2 leading-relaxed">Analiz ettiğin pazarlar, ekip kararların ve algoritmik ön önerileri tek listede.</p>
             </div>
             <div class="flex flex-wrap md:flex-col gap-2 shrink-0">
-              <button type="button" id="rep-csv" class="btn btn-outline"><span class="material-symbols-outlined">download</span>Listeyi CSV Olarak İndir</button>
+              <button type="button" id="rep-xlsx" class="btn btn-outline"><span class="material-symbols-outlined">download</span>Listeyi Excel Olarak İndir</button>
               <button type="button" class="btn btn-primary" data-goto="search"><span class="material-symbols-outlined">add_chart</span>Yeni Analiz</button>
             </div>
           </div>
@@ -954,13 +972,17 @@
             <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Keyword / ASIN ara</span>
               <input id="tm-q" type="search" class="field w-full mt-1" maxlength="200" placeholder="örn. şemsiye"></label>
             <div class="sm:col-span-2 lg:col-span-5 flex flex-wrap items-center justify-between gap-2">
-              <span class="text-[11px] text-secondary">Karar filtresi yalnızca kararlar listesine uygulanır. Özet her zaman bu haftanın (Pazartesi'den bu yana) sayılarıdır.</span>
+              <div class="flex flex-wrap items-center gap-2 min-w-0">
+                <span class="chip ok" id="tm-range-chip"><span class="material-symbols-outlined !text-[14px]" aria-hidden="true">date_range</span><span id="tm-range-label">Tüm zamanlar</span></span>
+                <button type="button" id="tm-alltime" class="btn btn-outline btn-sm" style="display:none;"><span class="material-symbols-outlined">all_inclusive</span>Tüm zamanlar</button>
+              </div>
               <button type="button" id="tm-reset" class="btn btn-outline btn-sm"><span class="material-symbols-outlined">filter_alt_off</span>Filtreleri temizle</button>
+              <span class="sm:col-span-2 lg:col-span-5 text-[11px] text-secondary w-full">Tarih aralığı hem özete hem listelere uygulanır. Karar filtresi yalnızca kararlar listesine uygulanır.</span>
             </div>
           </form>
 
           <div class="card mt-4 overflow-hidden">
-            <div class="px-5 pt-4 pb-2"><h3 class="font-display font-semibold">Kişi başına özet <span class="text-xs text-secondary font-normal">· bu hafta</span></h3></div>
+            <div class="px-5 pt-4 pb-2"><h3 class="font-display font-semibold">Kişi başına özet <span class="text-xs text-secondary font-normal">· <span id="tm-sum-range">tüm zamanlar</span></span></h3></div>
             <div class="table-wrap"><table class="data-table" id="tm-summary">
               <thead><tr><th class="l">Kişi</th><th>Rol</th><th>Arama</th><th>Karar</th></tr></thead><tbody></tbody></table></div>
           </div>
@@ -1133,11 +1155,12 @@
       <div class="tab-pane" data-pane="profit">
         <div class="profit-card flex flex-col gap-5">
           <div class="profit-source-note"></div>
+          <div class="profit-precost-note" style="display:none;"></div>
           <div class="profit-inputs">
             <label>Alış / COGS ($)<input type="number" step="0.01" class="p-cogs field" value="6.00"></label>
             <label>Satış Fiyatı ($)<input type="number" step="0.01" class="p-sale field" value="37.75"></label>
             <label>FBA Fee ($)<input type="number" step="0.01" class="p-fba field" value="5.50"></label>
-            <label>Referral Fee ($)<input type="number" step="0.01" class="p-ref field" value="5.66"></label>
+            <label>Referral Fee (%)<input type="number" step="0.1" min="0" max="100" class="p-ref field" value="15" title="Kategoriye göre değişir; dolar karşılığı = oran × satış fiyatı"><span class="p-ref-usd text-[11px] text-secondary font-normal mt-0.5" aria-live="polite">= $—</span></label>
             <label>ACOS (%)<input type="number" step="0.1" class="p-acos field" value="40"></label>
             <label>Return Rate (%)<input type="number" step="0.1" class="p-ret field" value="3"></label>
             <label>Genel Gider (%)<input type="number" step="0.1" class="p-gen field" value="1"></label>
