@@ -46,6 +46,10 @@ async function checkAuthStatus() {
     const s = await res.json();
     authRequiredGlobal = !!s.auth_required;
     currentUser = { role: s.role || null, user_id: s.user_id || null, email: s.email || null };
+    // Ekip Aktivitesi menüsü yalnızca owner'a görünür (yetki yine sunucuda: diğerleri 403)
+    const teamNav = document.querySelector('.nav-btn[data-view="team"]');
+    if (teamNav) teamNav.style.display = currentUser.role === "owner" ? "" : "none";
+    if (currentUser.role !== "owner" && $("#view-team")?.classList.contains("active")) showView("home");
 
     // Paylaşımlı depolama uyarısı
     const warnEl = document.getElementById("storage-warning");
@@ -157,6 +161,7 @@ function showView(view) {
   if (view === "training") loadTraining();
   if (view === "checklists") loadChecklists();
   if (view === "launch") lrEnsureVars();
+  if (view === "team") loadTeam();
   if (view === "trends") updateTrendsStale();
   // Chart.js gizli (display:none) kapsayıcıda 0 boyutla çizer — veri
   // görünümleri yalnızca görünür olduklarında (yeniden) render edilir.
@@ -3255,5 +3260,109 @@ async function submitLaunchReport(e) {
   $("#lr-sv-on").addEventListener("change", (e) => { $("#lr-sv").style.display = e.target.checked ? "grid" : "none"; });
   form.addEventListener("submit", submitLaunchReport);
   lrEnsureVars();
+})();
+
+// ===========================================================================
+// EKİP AKTİVİTESİ (yalnızca owner; sunucu /api/team/activity -> require_owner, diğerleri 403)
+// Salt okunur. Kayda tıklamak runAnalysis ile CANLI yeni analiz başlatır (önbellek/kayıtlı sonuç yok).
+// ===========================================================================
+const tmState = { tab: "queries", data: null, timer: null };
+const TM_VERDICT_CLASS = { "Uygun": "ok", "Sınırda": "warn", "Elenmiş": "bad" };
+
+const tmDate = (ts) => ts ? new Date(ts * 1000).toLocaleString("tr-TR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }) : "—";
+function tmLocalDayStart(v) { if (!v) return null; const [y, m, d] = v.split("-").map(Number); return Math.floor(new Date(y, m - 1, d).getTime() / 1000); }
+function tmWeekStart() { const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); return Math.floor(d.getTime() / 1000); }
+
+/** Kayıttaki anahtar -> runAnalysis'e verilecek değer ("ASIN:B0.." -> "B0.."; "B0.. — başlık" runAnalysis'te ayıklanır) */
+function tmAnalysisTarget(keyword) { return String(keyword || "").replace(/^ASIN:/i, "").trim(); }
+function tmKeywordHtml(keyword) {
+  const k = String(keyword || "");
+  const asin = k.match(/^ASIN:(.+)$/i);
+  return asin ? `<span class="mono">${esc(asin[1])}</span> <span class="chip na !text-[10px]">ASIN</span>` : esc(k);
+}
+
+async function loadTeam() {
+  const owner = currentUser.role === "owner";
+  $("#tm-guest").style.display = owner ? "none" : "block";
+  $("#tm-body").style.display = owner ? "block" : "none";
+  if (!owner) { $("#tm-status").textContent = ""; return; }
+  const params = new URLSearchParams();
+  const uid = $("#tm-user").value; if (uid !== "") params.set("user_id", uid);
+  const since = tmLocalDayStart($("#tm-from").value); if (since != null) params.set("since", since);
+  const untilDay = tmLocalDayStart($("#tm-to").value); if (untilDay != null) params.set("until", untilDay + 86400);
+  const dec = $("#tm-decision").value; if (dec) params.set("decision", dec);
+  const q = $("#tm-q").value.trim(); if (q) params.set("q", q);
+  params.set("week_start", tmWeekStart());
+  const st = $("#tm-status"); st.textContent = "yükleniyor…"; st.className = "status-line mt-4 loading";
+  try {
+    const r = await apiFetch(`${API_BASE}/api/team/activity?${params}`);
+    const b = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(apiErrorText(b, r.status));
+    tmState.data = b;
+    renderTeam();
+    st.textContent = ""; st.className = "status-line mt-4";
+  } catch (err) { st.textContent = `Hata: ${err.message}`; st.className = "status-line mt-4 error"; }
+}
+
+function renderTeam() {
+  const b = tmState.data; if (!b) return;
+  // Kişi seçici (seçimi koru)
+  const sel = $("#tm-user"), cur = sel.value;
+  const people = b.summary.map(s => ({ id: s.user_id, label: s.user }));
+  sel.innerHTML = `<option value="">Tümü</option>` + people.map(p => `<option value="${esc(p.id)}">${esc(p.label)}</option>`).join("");
+  sel.value = people.some(p => String(p.id) === cur) ? cur : "";
+
+  // Özet
+  $("#tm-summary tbody").innerHTML = b.summary.length ? b.summary.map(s => `
+    <tr class="tm-sum-row cursor-pointer" data-uid="${esc(s.user_id)}" title="Bu kişinin kayıtlarını göster">
+      <td class="l"><span class="font-medium break-all">${esc(s.user)}</span></td>
+      <td>${s.role ? `<span class="chip ${s.role === "owner" ? "ok" : s.role === "admin" ? "warn" : "na"}">${esc(ROLE_LABEL[s.role] || s.role)}</span>` : "—"}</td>
+      <td class="tabular">${fmtNum(s.week_queries)}</td><td class="tabular">${fmtNum(s.week_decisions)}</td></tr>`).join("")
+    : `<tr><td colspan="4" class="muted !text-center !py-6">Kullanıcı yok.</td></tr>`;
+  $$("#tm-summary .tm-sum-row").forEach(tr => tr.addEventListener("click", () => { $("#tm-user").value = tr.dataset.uid; loadTeam(); }));
+
+  $(".tm-count-q").textContent = `(${fmtNum(b.totals.queries)})`;
+  $(".tm-count-d").textContent = `(${fmtNum(b.totals.decisions)})`;
+  const trunc = b.totals.queries > b.truncated_at || b.totals.decisions > b.truncated_at;
+  $("#tm-trunc").textContent = trunc ? `Her listede en yeni ${fmtNum(b.truncated_at)} kayıt gösteriliyor — daraltmak için filtre kullanın.` : "";
+
+  const vchip = (v) => `<span class="chip ${TM_VERDICT_CLASS[v] || "na"}">${esc(v ?? "—")}</span>`;
+  const rowAttrs = (r) => `class="tm-row cursor-pointer" tabindex="0" role="button" data-kw="${esc(r.keyword)}" data-mp="${esc(r.marketplace)}" title="Canlı yeniden analiz et"`;
+  $("#tm-queries tbody").innerHTML = b.queries.length ? b.queries.map(r => `
+    <tr ${rowAttrs(r)}><td class="l"><span class="break-all">${esc(r.user)}</span></td><td class="l font-medium"><span class="block min-w-[120px] max-w-[280px] whitespace-normal [overflow-wrap:anywhere]">${tmKeywordHtml(r.keyword)}</span></td>
+      <td>${esc(r.marketplace)}</td><td class="whitespace-nowrap">${esc(tmDate(r.at))}</td><td>${vchip(r.verdict)}</td></tr>`).join("")
+    : `<tr><td colspan="5" class="muted !text-center !py-8">Filtreye uyan arama yok.</td></tr>`;
+  $("#tm-decisions tbody").innerHTML = b.decisions.length ? b.decisions.map(r => `
+    <tr ${rowAttrs(r)}><td class="l"><span class="break-all">${esc(r.user)}</span></td><td class="l font-medium"><span class="block min-w-[120px] max-w-[280px] whitespace-normal [overflow-wrap:anywhere]">${tmKeywordHtml(r.keyword)}</span></td>
+      <td>${esc(r.marketplace)}</td><td class="whitespace-nowrap">${esc(tmDate(r.at))}</td><td>${vchip(r.verdict)}</td>
+      <td>${vchip(r.decision)}</td><td class="l"><span class="block min-w-[160px] max-w-[320px] whitespace-normal [overflow-wrap:anywhere] text-xs">${esc(r.note || "")}</span></td></tr>`).join("")
+    : `<tr><td colspan="7" class="muted !text-center !py-8">Filtreye uyan karar yok.</td></tr>`;
+  $$("#view-team .tm-row").forEach(tr => {
+    const go = () => tmReanalyze(tr.dataset.kw, tr.dataset.mp);
+    tr.addEventListener("click", go);
+    tr.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } });
+  });
+}
+
+/** Geçmiş'teki gibi: mevcut runAnalysis ile CANLI analiz (önbellek okunmaz; /api/analyze her zaman MCP'ye gider). */
+function tmReanalyze(keyword, marketplace) {
+  const target = tmAnalysisTarget(keyword);
+  if (!target) return;
+  showView("search");
+  runAnalysis(target, marketplace || "US");
+}
+
+(function initTeam() {
+  if (!$("#tm-filters")) return;
+  ["#tm-user", "#tm-from", "#tm-to", "#tm-decision"].forEach(sel => $(sel).addEventListener("change", loadTeam));
+  $("#tm-q").addEventListener("input", () => { clearTimeout(tmState.timer); tmState.timer = setTimeout(loadTeam, 300); });
+  $("#tm-filters").addEventListener("submit", (e) => { e.preventDefault(); loadTeam(); });
+  $("#tm-reset").addEventListener("click", () => { ["#tm-user", "#tm-from", "#tm-to", "#tm-decision", "#tm-q"].forEach(sel => { $(sel).value = ""; }); loadTeam(); });
+  $$("#tm-tabs .tab-btn").forEach(btn => btn.addEventListener("click", () => {
+    tmState.tab = btn.dataset.tab;
+    $$("#tm-tabs .tab-btn").forEach(b => b.classList.toggle("active", b === btn));
+    $("#tm-pane-queries").style.display = tmState.tab === "queries" ? "" : "none";
+    $("#tm-pane-decisions").style.display = tmState.tab === "decisions" ? "" : "none";
+  }));
 })();
 
