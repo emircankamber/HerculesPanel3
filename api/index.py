@@ -35,7 +35,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from mcp_client import call_tool
-from scoring import calc_keyword_ad_metrics, calc_profit, pre_assessment, DEFAULT_THRESHOLDS, verdict_rule
+from scoring import calc_keyword_ad_metrics, calc_profit, pre_assessment, DEFAULT_THRESHOLDS, verdict_rule, weighted_top_acos
 import signal_engine as se
 
 # Bayesian (scipy) ve Portfolio (ortools) opsiyonel — Vercel deploy boyutunu
@@ -460,15 +460,15 @@ async def analyze(req: AnalyzeRequest, user: dict = Depends(require_auth)):
                 bid=main_row.get("bid"), avg_price=main_row.get("avgPrice"),
                 impressions=main_row.get("impressions"), searches=main_row.get("searches"),
             )}
-        main_acos = main_row["acos"] if main_row else None
-
         # Tabloda ana keyword'ün satırını da EXACT veriyle değiştir (broad değil) —
         # kullanıcı tabloda ve ön değerlendirmede tutarlı, tam eşleşmiş veri görsün.
         if main_row:
             replaced = False
             for i, r in enumerate(keyword_rows):
                 if r.get("keyword", "").lower() == req.keyword.lower():
-                    keyword_rows[i] = main_row
+                    # Exact satır geniş satırın yerine geçer; exact yanıtta olmayan alanlar
+                    # (ör. relevancy — Kriter 03'ün sıralaması buna dayanır) geniş satırdan korunur.
+                    keyword_rows[i] = {**r, **main_row}
                     replaced = True
                     break
             if not replaced:
@@ -496,10 +496,13 @@ async def analyze(req: AnalyzeRequest, user: dict = Depends(require_auth)):
         # pre_assessment zaten DEFAULT_THRESHOLDS'a düşer (bkz. scoring.py).
         user_thresholds = await db.get_user_thresholds(uid)
 
+        # Kriter 03: relevancy'si en yüksek 5 keyword'ün ağırlıklı ACOS'u (her keyword kendi avgPrice'ıyla)
+        acos_detail = weighted_top_acos(keyword_rows, "relevancy", lambda r: r.get("avgPrice"))
         assessment = pre_assessment(
             avg_price=stats_data.get("avgPrice"),
             gross_margin=gross_margin,
-            acos=main_acos,
+            acos=acos_detail["value"],
+            acos_detail=acos_detail,
             top_brand_share=top_brand_share,
             strong_new_brands=strong_new_brands_count,  # top 10 rakip availableDate proxy'si (bkz. yukarıdaki not)
             net_margin=None,
@@ -1372,7 +1375,8 @@ async def analyze_asin(req: AnalyzeAsinRequest, user: dict = Depends(require_aut
 
         # Ana satır = en yüksek trafik payına sahip keyword
         main_row = max(keyword_rows, key=lambda r: r.get("trafficPercentage") or 0, default=None)
-        main_acos = main_row.get("acos") if main_row else None
+        # Kriter 03: trafik payı en yüksek 5 keyword'ün ağırlıklı ACOS'u (fiyat = ürünün kendi fiyatı)
+        acos_detail = weighted_top_acos(keyword_rows, "trafficPercentage", lambda r: asin_price)
 
         # 3) Pazar analizi (ürünün kendi kategorisiyle)
         market_stats = brand_conc = price_dist = launch_dist = demand_trend = {}
@@ -1425,7 +1429,8 @@ async def analyze_asin(req: AnalyzeAsinRequest, user: dict = Depends(require_aut
 
         user_thresholds = await db.get_user_thresholds(uid)
         assessment = pre_assessment(
-            avg_price=stats_data.get("avgPrice"), gross_margin=gross_margin, acos=main_acos,
+            avg_price=stats_data.get("avgPrice"), gross_margin=gross_margin,
+            acos=acos_detail["value"], acos_detail=acos_detail,
             top_brand_share=top_brand_share, strong_new_brands=strong_new_brands_count, net_margin=None,
             thresholds=user_thresholds)
 
