@@ -14,6 +14,7 @@ manuel sabit" ve ekiple birlikte kalibre edilmelidir. Aşağıda her yerde
 "# VARSAYIM" yorumuyla işaretlendi.
 """
 import math
+from scoring import ELIMINATE_AT
 from dataclasses import dataclass, field
 
 
@@ -243,10 +244,11 @@ def opportunity_score(market: float, demand: float, truth: float, risk: float,
 def stage1_gate(opp_score: float, team_verdict: str, compliance_review_required: bool) -> dict:
     """
     Doküman kuralı: OpportunityScore >= 60 VE mevcut eşik kuralları (0 olumsuz).
-    UYARI: Ekip daha önce eşik kuralını "4+ olumsuz = Elenmiş" olacak şekilde
-    değiştirdi (bkz scoring.py ELIMINATE_AT). Doküman literal "0 olumsuz" diyor.
-    Burada PRAGMATİK karar: ekip eşiğiyle çelişmemek için "mevcut eşik kuralı"nı
-    team_verdict != 'Elenmiş' olarak yorumluyoruz (yani 0-3 olumsuz kabul).
+    UYARI: Ekibin ön öneri kuralı dokümandan farklı (tek kaynak: scoring.py
+    UYGUN_MAX_NEGATIVE / ELIMINATE_AT).
+    Doküman literal "0 olumsuz" diyor. Burada PRAGMATİK karar: ekip kuralıyla
+    çelişmemek için "mevcut eşik kuralı"nı team_verdict != 'Elenmiş' olarak
+    yorumluyoruz (yani ELIMINATE_AT'in altındaki her olumsuz sayısı kabul).
     Bu bir TASARIM KARARI — ekiple netleştirilmeli, doküman "0 olumsuz" derken
     değişikliği bilmiyor olabilir.
     """
@@ -262,4 +264,4 @@ def stage1_gate(opp_score: float, team_verdict: str, compliance_review_required:
     if not veto_ok:
         reasons.append("Compliance veto aktif — danışman onayı gerekli")
     return {"passed": passed, "reasons": reasons,
-            "note": "Eşik yorumu: takım eşiği (4+ olumsuz=Elenmiş) ile uyumlu — doküman literal '0 olumsuz' ile netleştirilmeli"}
+            "note": f"Eşik yorumu: ekip kuralı ({ELIMINATE_AT}+ olumsuz=Elenmiş) ile uyumlu — doküman literal '0 olumsuz' ile netleştirilmeli"}

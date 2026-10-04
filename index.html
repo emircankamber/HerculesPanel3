@@ -887,9 +887,9 @@
             <span class="material-symbols-outlined text-primary">filter_alt_off</span>
             <div class="flex-1 text-[13px]">
               <div class="font-semibold">Otomatik eleme kuralı</div>
-              <div class="text-secondary text-xs mt-0.5">0 olumsuz = Uygun · 1–3 = Sınırda · 4 ve üzeri olumsuz = Elenmiş. Bu kural backend'de sabittir, buradan değiştirilemez.</div>
+              <div class="text-secondary text-xs mt-0.5" id="set-rule-text">Kural yükleniyor…</div>
             </div>
-            <span class="chip bad shrink-0">4+ olumsuz → Elenmiş</span>
+            <span class="chip bad shrink-0" id="set-rule-chip">—</span>
           </div>
         </div>
 
@@ -1045,7 +1045,7 @@
           <span class="verdict-badge"></span>
           <span class="verdict-hint text-xs text-secondary"></span>
         </div>
-        <p class="text-[13.5px] text-on-surface-variant leading-relaxed mt-4">Algoritmik ön öneri 6 kritere dayanır: 0 olumsuz = Uygun, 1–3 = Sınırda, 4+ = Elenmiş. Tek bir olumsuz kriter tek başına eleme sebebi değildir.</p>
+        <p class="text-[13.5px] text-on-surface-variant leading-relaxed mt-4">Algoritmik ön öneri 6 kritere dayanır: <span class="verdict-rule-text"></span>. Tek bir olumsuz kriter tek başına eleme sebebi değildir.</p>
       </div>
 
       <div class="card card-pad">
@@ -1075,7 +1075,7 @@
       <div class="flex flex-wrap items-center justify-between gap-2 mb-4">
         <div class="flex flex-wrap items-center gap-3">
           <h3 class="section-title">Ön Değerlendirme</h3>
-          <span class="neg-chip chip bad"><span class="neg-count"></span>/6 olumsuz · 4+ = Elenmiş</span>
+          <span class="neg-chip chip bad"><span class="neg-count"></span>/6 olumsuz<span class="neg-rule"></span></span>
         </div>
         <span class="text-xs text-secondary">6 temel private label fizibilite kriteri</span>
       </div>

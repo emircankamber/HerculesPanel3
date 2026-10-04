@@ -16,8 +16,37 @@ DEFAULT_THRESHOLDS = {
     "min_net_margin": 0.15,       # kar analizindeki net marj >= %15
 }
 
-# Eleme eşiği: kaç olumsuz kriter varsa "Elenmiş" olsun
-ELIMINATE_AT = 4   # 4 ve üzeri olumsuz -> Elenmiş; 0 -> Uygun; 1-3 -> Sınırda
+# ---------------------------------------------------------------------------
+# ÖN ÖNERİ KURALI — TEK KAYNAK. Başka hiçbir yerde sayı yazma: sunucu bu sınırları
+# analiz yanıtında (`pre_assessment.rule`) ve `/api/verdict-rule`'da gönderir; panel
+# (canlı yeniden hesaplama, özet metni, açıklamalar) yalnızca bu değerleri kullanır.
+#   olumsuz <= UYGUN_MAX_NEGATIVE          -> Uygun
+#   UYGUN_MAX_NEGATIVE < olumsuz < ELIMINATE_AT -> Sınırda
+#   olumsuz >= ELIMINATE_AT                -> Elenmiş
+# (Geçmiş kayıtlardaki ön öneriler kaydedildikleri andaki kurala göredir; yeniden hesaplanmaz.)
+# ---------------------------------------------------------------------------
+UYGUN_MAX_NEGATIVE = 1   # 0-1 olumsuz -> Uygun
+ELIMINATE_AT = 4         # 4 ve üzeri olumsuz -> Elenmiş; arası (2-3) -> Sınırda
+
+
+def verdict_for(negative_count: int) -> str:
+    if negative_count <= UYGUN_MAX_NEGATIVE:
+        return "Uygun"
+    if negative_count < ELIMINATE_AT:
+        return "Sınırda"
+    return "Elenmiş"
+
+
+def _span(lo: int, hi: int) -> str:
+    return str(lo) if lo == hi else f"{lo}–{hi}"
+
+
+def verdict_rule() -> dict:
+    """Panelin kullandığı kural tanımı (sınırlar + hazır açıklama metni)."""
+    uygun = _span(0, UYGUN_MAX_NEGATIVE)
+    sinirda = _span(UYGUN_MAX_NEGATIVE + 1, ELIMINATE_AT - 1) if ELIMINATE_AT - 1 > UYGUN_MAX_NEGATIVE else None
+    parts = [f"{uygun} olumsuz = Uygun"] + ([f"{sinirda} = Sınırda"] if sinirda else []) + [f"{ELIMINATE_AT}+ = Elenmiş"]
+    return {"uygun_max_negative": UYGUN_MAX_NEGATIVE, "eliminate_at": ELIMINATE_AT, "text": " · ".join(parts)}
 
 
 def calc_keyword_ad_metrics(clicks: int, purchases: int, bid: float, avg_price: float,
@@ -80,7 +109,7 @@ def pre_assessment(avg_price: float | None, gross_margin: float | None, acos: fl
                     net_margin: float | None, thresholds: dict = None) -> dict:
     """
     Excel'deki 6 kriterli ön değerlendirme panelinin Python karşılığı.
-    Tek başına bir olumsuz kriter elemez; eleme eşiği ELIMINATE_AT.
+    Ön öneri `verdict_for` ile (kural yukarıdaki sabitlerde: UYGUN_MAX_NEGATIVE, ELIMINATE_AT).
     """
     th = {**DEFAULT_THRESHOLDS, **(thresholds or {})}
 
@@ -109,16 +138,11 @@ def pre_assessment(avg_price: float | None, gross_margin: float | None, acos: fl
     ]
 
     negative_count = sum(1 for c in criteria if c.flag == "OLUMSUZ")
-    if negative_count == 0:
-        verdict = "Uygun"
-    elif negative_count < ELIMINATE_AT:
-        verdict = "Sınırda"
-    else:
-        verdict = "Elenmiş"
 
     return {
         "criteria": [asdict(c) for c in criteria],
         "negative_count": negative_count,
-        "verdict": verdict,
+        "verdict": verdict_for(negative_count),
         "eliminate_at": ELIMINATE_AT,
+        "rule": verdict_rule(),   # panel canlı yeniden hesaplamada bu sınırları kullanır
     }

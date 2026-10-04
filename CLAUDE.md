@@ -299,6 +299,17 @@ yüzden backend'e hiç bağlanmamalı, sahte veri olur.
 - Tablolar: `training_lessons`, `training_assignments`, `training_completions`
   (`completed_at` zaman damgası). Ders silinince atama/tamamlamalar da silinir.
 
+## Ön öneri kuralı (Uygun / Sınırda / Elenmiş)
+
+- **TEK kaynak:** `scoring.py` → `UYGUN_MAX_NEGATIVE`, `ELIMINATE_AT`, `verdict_for()`,
+  `verdict_rule()`. Sayıları başka hiçbir yere (JS, HTML metni, doküman) yazma.
+- Sunucu kuralı analiz yanıtında `pre_assessment.rule` ({uygun_max_negative, eliminate_at, text})
+  ve `GET /api/verdict-rule`'da gönderir. Panelin canlı yeniden hesaplaması (kâr hesaplayıcı →
+  Kriter 06 → ön öneri), sade dille özet, rozet ve açıklama metinleri (panel + Ayarlar) bunu kullanır.
+  `n/a` kriterler olumsuz sayılmaz.
+- Geçmiş kayıtlardaki (`user_query_log.verdict`, `keyword_analysis.verdict`) ön öneriler
+  kaydedildikleri andaki kurala göredir; yeniden hesaplanmaz.
+
 ## Kâr analizi (Ürün Analizi → Kâr sekmesi)
 
 - **Referral ORAN olarak tutulur** (varsayılan %15, düzenlenebilir); dolar = oran × satış fiyatı,
