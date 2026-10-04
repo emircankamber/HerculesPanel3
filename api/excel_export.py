@@ -117,8 +117,12 @@ def build_report_xlsx(data: dict) -> bytes:
 
     row = _section(ws, row, 10, "ÖN DEĞERLENDİRME")
     crit_start = row
+    acos_n = (pa.get("acos_detail") or {}).get("count")
     for crit in pa.get("criteria", []):
-        ws.cell(row, 1, crit["label"]).font = LBL
+        label = crit["label"]
+        if label == "ACOS":   # Kriter 03 = ilk 5 keyword'ün ağırlıklı ACOS'u (panelle aynı ad)
+            label = "ACOS (ilk 5 keyword, ağırlıklı, hesaplanan)" + (f" — {acos_n} keyword" if acos_n else "")
+        ws.cell(row, 1, label).font = LBL
         ws.cell(row, 1).border = BORDER
         val = crit.get("value")
         # Panelle AYNI hata Excel'de de vardı: büyüklüğe bakıp tahmin ediyordu,

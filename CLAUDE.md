@@ -310,6 +310,23 @@ yüzden backend'e hiç bağlanmamalı, sahte veri olur.
 - Geçmiş kayıtlardaki (`user_query_log.verdict`, `keyword_analysis.verdict`) ön öneriler
   kaydedildikleri andaki kurala göredir; yeniden hesaplanmaz.
 
+## Kriter 03 — ACOS (ilk 5 keyword, ağırlıklı, hesaplanan)
+
+- **Yalnızca SUNUCUDA:** `scoring.weighted_top_acos()` → `ACOS = Σ(bid × clicks) ÷ Σ(purchases × fiyat)`
+  (5 keyword'e birlikte reklam verilse toplam harcama ÷ toplam satış). Hem `/api/analyze` hem
+  `/api/analyze-asin`; sonuç `pre_assessment.acos_detail` (value, count, keywords[{keyword, rank, bid,
+  clicks, purchases, price, spend, sales, acos}], total_spend, total_sales, no_sales, skipped).
+- **Hangi 5:** keyword modunda `relevancy` en yüksek 5 (exact ana satır geniş satırın yerine geçerken
+  relevancy korunur), ASIN modunda `trafficPercentage` en yüksek 5. **Fiyat:** keyword modunda her
+  keyword'ün kendi `avgPrice`'ı, ASIN modunda ürünün kendi fiyatı.
+- **Eksik veri:** bid/clicks/purchases/fiyat'tan biri yoksa keyword atlanır, sıradaki alınır. Satışı 0
+  olan keyword harcamaya eklenir. <5 geçerli → olanlarla hesaplanır, kartta "N keyword". Hiç yoksa
+  "Veri Yok" (n/a). Harcama var ama toplam satış 0 → değer yok, kriter OLUMSUZ.
+- Kriter etiketi (`label`) iç anahtar olarak "ACOS" kaldı (eşikler, özet, eski kayıtlar); kartta ve Excel'de
+  gösterilen ad "ACOS (ilk 5 keyword, ağırlıklı, hesaplanan)". Kâr hesaplayıcının ACOS ön değeri bu sayı.
+- Keyword tablolarındaki satır bazlı ACOS (madde 8'deki `calc_keyword_ad_metrics`) ve **Lansman
+  Raporu** (skill gereği ana keyword + kendi fiyatımız) bundan ETKİLENMEZ.
+
 ## Kâr analizi (Ürün Analizi → Kâr sekmesi)
 
 - **Referral ORAN olarak tutulur** (varsayılan %15, düzenlenebilir); dolar = oran × satış fiyatı,

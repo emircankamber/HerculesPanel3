@@ -127,6 +127,9 @@ select.field{padding-right:28px;}
 .crit-marker{position:absolute;top:-4px;width:2px;height:13px;background:var(--on-surface);border-radius:2px;opacity:.55;}
 .crit-foot{display:flex;justify-content:space-between;align-items:center;margin-top:10px;font-size:11.5px;color:var(--secondary);}
 .crit-more{background:none;border:0;color:var(--primary);font-size:11.5px;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;gap:2px;padding:0;}
+.crit{min-width:0;}
+.acos-detail{max-width:100%;}
+.acos-detail .data-table th,.acos-detail .data-table td{padding:4px 6px;}
 .crit-help{display:none;font-size:12px;color:var(--on-surface-variant);line-height:1.5;margin-top:10px;padding-top:10px;border-top:1px dashed var(--hairline);}
 .crit.open .crit-help{display:block;}
 .crit.open .crit-more .material-symbols-outlined{transform:rotate(180deg);}

@@ -338,7 +338,7 @@ function renderPanel(data) {
     const REASON = {
       "Ort. Satış Fiyatı": "ortalama fiyat düşük (kar marjı sıkışır)",
       "Gross Margin": "pazarın brüt kar marjı hedefin altında",
-      "ACOS": "reklam maliyeti yüksek",
+      "ACOS": "en ilgili 5 keyword'de reklam maliyeti yüksek",
       "En Büyük Marka Payı": "tek bir marka pazara hakim",
       "Güçlü Yeni Marka (1 yıl)": "son 1 yılda pazara girip tutunabilen marka çok az",
       "Net Kar Marjı (kar analizi)": "girdiğiniz maliyetlerle net kar marjı yetersiz",
@@ -433,7 +433,7 @@ function renderPanel(data) {
         <span>Eşik: ${dirLabel} ${fmtCrit(c.threshold, unit)}</span>
         <button type="button" class="crit-more">Detay Gör <span class="material-symbols-outlined" style="font-size:16px">expand_more</span></button>
       </div>
-      <div class="crit-help">${esc(CRIT_HELP[c.label] || "")}${isNetMargin
+      <div class="crit-help">${esc(CRIT_HELP[c.label] || "")}${typeof ctx.detail === "function" ? ctx.detail(c) : ""}${isNetMargin
         ? ` <button type="button" class="crit-goto-profit crit-more">Kâr hesaplayıcıyı aç <span class="material-symbols-outlined" style="font-size:15px">arrow_forward</span></button>` : ""}</div>`;
     div.querySelector(".crit-more").addEventListener("click", () => div.classList.toggle("open"));
     const gotoProfit = div.querySelector(".crit-goto-profit");
@@ -601,12 +601,12 @@ function renderPanel(data) {
   const profitInputs = ["cogs", "sale", "fba", "ref", "acos", "ret", "gen"].map(k => root.querySelector(`.p-${k}`));
 
   // Gerçek pazar verisiyle önceden doldur (kullanıcı hâlâ istediği gibi değiştirebilir)
-  const mainRowForProfit = (data.keyword_rows || []).find(
-    r => (r.keyword || "").toLowerCase() === data.keyword.toLowerCase()
-  );
   const marketAvgPrice = data.market_stats?.avgPrice;
   if (marketAvgPrice) root.querySelector(".p-sale").value = marketAvgPrice.toFixed(2);
-  if (mainRowForProfit?.acos != null) root.querySelector(".p-acos").value = (mainRowForProfit.acos * 100).toFixed(1);
+  // ACOS ön değeri = Kriter 03 (ilk 5 keyword ağırlıklı, sunucu hesabı); düzenlenebilir
+  const acosCrit = (pa.criteria || []).find(c => c.label === "ACOS");
+  const weightedAcos = typeof acosCrit?.value === "number" ? acosCrit.value : null;
+  if (weightedAcos != null) root.querySelector(".p-acos").value = (weightedAcos * 100).toFixed(1);
   if (data.market_return_rate != null) root.querySelector(".p-ret").value = (data.market_return_rate * 100).toFixed(2);
   // Analiz öncesi girilen maliyetler (opsiyonel): yalnızca DOLU alanlar Kâr bölümüne yazılır
   const preCost = readPreCost();
@@ -624,7 +624,7 @@ function renderPanel(data) {
   if (profitSourceNote) {
     const sources = [];
     if (marketAvgPrice) sources.push("Satış Fiyatı: pazar ortalaması");
-    if (mainRowForProfit?.acos != null) sources.push("ACOS: bu keyword için hesaplanan");
+    if (weightedAcos != null) sources.push(`ACOS: ilk ${pa.acos_detail?.count ?? 5} keyword ağırlıklı (hesaplanan)`);
     if (data.market_return_rate != null) sources.push("Return Rate: pazar ortalaması");
     const manual = ["COGS", "FBA"].filter((_, i) => (i === 0 ? preCost.cogs : preCost.fba) == null);
     profitSourceNote.textContent = sources.length
@@ -879,7 +879,7 @@ function fmtCompact(v) {
 const CRIT_HELP = {
   "Ort. Satış Fiyatı": "Pazardaki ürünlerin ortalama satış fiyatı. Düşük fiyatlı pazarlarda kar marjı sıkışır.",
   "Gross Margin": "Pazardaki ürünlerin ortalama brüt kar marjı. Yüksek olması, fiyatlandırma alanı olduğunu gösterir.",
-  "ACOS": "Ana kelimede reklam maliyetinin satış gelirine oranı. Yüksekse reklamla satmak pahalı demek.",
+  "ACOS": "En ilgili 5 keyword'e (ASIN modunda trafik payı en yüksek 5) birlikte reklam verilse oluşacak toplam harcamanın toplam satışa oranı: Σ(bid × tık) ÷ Σ(satış × fiyat). Yüksekse reklamla satmak pahalı demek.",
   "En Büyük Marka Payı": "Pazarın en büyük markasının ciro payı. Tek marka baskınsa girmek zordur.",
   "Güçlü Yeni Marka (1 yıl)": "Son 1 yılda pazara girip üst sıralara çıkabilmiş marka sayısı. Az ise pazar yeni girenlere kapalı demek.",
   "Net Kar Marjı (kar analizi)": "Aşağıdaki kar analizi hesaplayıcısına girdiğiniz maliyetlere göre hesaplanan net kar marjınız.",
@@ -945,17 +945,30 @@ function buildCriterionContext(data) {
       sub: "Kategori ortalaması (avgProfit)",
       viz: (c) => typeof c.value === "number" ? ringSvg(c.value, flagColor(c)) : "",
     },
+    // Kriter 03 — sunucu hesaplar (scoring.weighted_top_acos): Σ(bid×clicks) ÷ Σ(purchases×fiyat), ilk 5 keyword
     "ACOS": {
-      title: "ACOS (hesaplanan)",
-      sub: "Ana keyword · reklam maliyeti / satış",
-      viz: (c) => {
-        const row = (data.keyword_rows || []).find(r => typeof c.value === "number" && r.acos === c.value);
-        if (!row) return typeof c.value === "number" ? ringSvg(c.value, flagColor(c)) : "";
-        return `<div class="text-right text-[11.5px] leading-5 text-secondary">
-          <div>Bid <b class="text-on-surface">${row.bid != null ? "$" + row.bid.toFixed(2) : "n/a"}</b></div>
-          <div>CVR <b class="text-on-surface">${row.click_cvr != null ? (row.click_cvr * 100).toFixed(1) + "%" : "n/a"}</b></div>
-          <div>CPA <b class="text-on-surface">${row.cpa != null ? "$" + row.cpa.toFixed(2) : "n/a"}</b></div>
-        </div>`;
+      title: "ACOS (ilk 5 keyword, ağırlıklı, hesaplanan)",
+      sub: (() => {
+        const d = data.pre_assessment?.acos_detail;
+        if (!d || !d.count) return "";
+        const base = `${d.count} keyword · toplam harcama ÷ toplam satış`;
+        return d.no_sales ? `${base} · satış yok (harcama ${fmtUsd(d.total_spend)})` : base;
+      })(),
+      viz: (c) => typeof c.value === "number" && c.value <= 1 ? ringSvg(c.value, flagColor(c)) : "",   // %100 üstünde halka yanıltır
+      detail: () => {
+        const d = data.pre_assessment?.acos_detail;
+        if (!d || !d.count) return "";
+        const rankLbl = d.rank_field === "trafficPercentage" ? "Trafik payı" : "Relevancy";
+        const rankFmt = (v) => v == null ? "—" : d.rank_field === "trafficPercentage" ? `%${(v * 100).toFixed(1)}` : esc(v);
+        const rows = d.keywords.map(k => `<tr><td class="l"><span class="block min-w-[90px] max-w-[160px] whitespace-normal [overflow-wrap:anywhere]">${esc(k.keyword ?? "")}</span></td>
+          <td class="font-semibold ${k.acos == null ? "text-error" : ""}">${k.acos == null ? "satış yok" : fmtPct(k.acos)}</td>
+          <td>${fmtUsd(k.bid)}</td><td>${fmtNum(k.clicks)}</td><td>${fmtNum(k.purchases)}</td><td>${fmtUsd(k.price)}</td><td>${rankFmt(k.rank)}</td></tr>`).join("");
+        return `<div class="acos-detail mt-2 overflow-x-auto">
+          <div class="text-[11px] font-semibold text-on-surface">Kullanılan ${d.count} keyword${d.count < d.n ? ` (geçerli verisi olan ${d.count} keyword bulundu)` : ""}</div>
+          <table class="data-table text-[11.5px] mt-1"><thead><tr><th class="l">Keyword</th><th>ACOS</th><th>Bid</th><th>Tık</th><th>Satış</th><th>Fiyat</th><th>${rankLbl}</th></tr></thead>
+          <tbody>${rows}<tr class="font-semibold"><td class="l">Toplam</td><td>${d.value == null ? "—" : fmtPct(d.value)}</td>
+          <td></td><td></td><td></td><td></td><td></td></tr></tbody></table>
+          <div class="text-[11px] text-secondary mt-1">Harcama ${fmtUsd(d.total_spend)} ÷ satış ${fmtUsd(d.total_sales)}. Eksik verili keyword'ler atlanır.</div></div>`;
       },
     },
     "En Büyük Marka Payı": {
@@ -1431,8 +1444,8 @@ const kwvSortState = { get key() { return kwvState.sortKey; }, set key(v) { kwvS
 function kwvMainRow(data) {
   const rows = data.keyword_rows || [];
   return rows.find(r => (r.keyword || "").toLowerCase() === String(data.keyword || "").toLowerCase())
-    // ASIN modunda ana satır = ön değerlendirmedeki ACOS'un geldiği satır
-    || rows.find(r => r.acos != null && r.acos === (data.pre_assessment?.criteria || []).find(c => c.label === "ACOS")?.value)
+    // ASIN modunda ana satır = trafik payı en yüksek keyword (sunucudaki ana satır kuralı)
+    || (data.analysis_mode === "asin" ? rows.reduce((best, r) => (r.trafficPercentage ?? -1) > (best?.trafficPercentage ?? -1) ? r : best, null) : null)
     || null;
 }
 

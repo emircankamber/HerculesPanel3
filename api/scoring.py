@@ -37,6 +37,63 @@ def verdict_for(negative_count: int) -> str:
     return "Elenmiş"
 
 
+# ---------------------------------------------------------------------------
+# KRİTER 03 — İLK 5 KEYWORD'ÜN AĞIRLIKLI ACOS'U (yalnızca SUNUCUDA hesaplanır)
+#   ACOS = Σ(bid × clicks) ÷ Σ(purchases × fiyat)
+#   = 5 keyword'e birlikte reklam verilse oluşacak toplam harcama ÷ toplam satış.
+# Sıralama: keyword modunda relevancy, ASIN modunda trafficPercentage (büyükten küçüğe;
+# eşitlikte orijinal sıra). bid/clicks/purchases/fiyat'tan biri eksik ya da geçersizse
+# keyword atlanır, sıradaki alınır. Satışı 0 olan keyword harcamaya eklenir.
+# (Lansman Raporu bunu KULLANMAZ — orada skill gereği ana keyword + kendi fiyatımız.)
+# ---------------------------------------------------------------------------
+TOP_ACOS_N = 5
+
+
+def _num(v):
+    if isinstance(v, bool) or v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return float(v) if v == v and v not in (float("inf"), float("-inf")) else None
+    try:
+        f = float(str(v).replace(",", "").strip())
+        return f if f == f and f not in (float("inf"), float("-inf")) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def weighted_top_acos(rows: list, rank_field: str, price_of=None, n: int = TOP_ACOS_N) -> dict:
+    """
+    rows: keyword satırları; rank_field: "relevancy" (keyword modu) ya da "trafficPercentage" (ASIN).
+    price_of(row) -> fiyat (keyword modunda satırın avgPrice'ı, ASIN modunda ürünün fiyatı).
+    Dönüş: value (oran ya da None), count, keywords[{keyword, rank, bid, clicks, purchases, price,
+    spend, sales, acos}], total_spend, total_sales, no_sales (harcama var satış yok), skipped.
+    """
+    price_of = price_of or (lambda r: r.get("avgPrice"))
+    indexed = list(enumerate(rows or []))
+    def rank_key(item):
+        i, r = item
+        rv = _num(r.get(rank_field))
+        return (0 if rv is not None else 1, -(rv or 0), i)   # sayısal sıralama değeri olmayanlar sona
+    used, skipped = [], []
+    for _, r in sorted(indexed, key=rank_key):
+        if len(used) >= n:
+            break
+        bid, clicks, purch, price = _num(r.get("bid")), _num(r.get("clicks")), _num(r.get("purchases")), _num(price_of(r))
+        if None in (bid, clicks, purch, price) or bid < 0 or clicks < 0 or purch < 0 or price <= 0:
+            skipped.append(r.get("keyword"))
+            continue
+        spend, sales = bid * clicks, purch * price
+        used.append({"keyword": r.get("keyword"), "rank": _num(r.get(rank_field)), "bid": bid, "clicks": clicks,
+                     "purchases": purch, "price": price, "spend": spend, "sales": sales,
+                     "acos": (spend / sales) if sales > 0 else None})
+    total_spend = sum(u["spend"] for u in used)
+    total_sales = sum(u["sales"] for u in used)
+    value = (total_spend / total_sales) if total_sales > 0 else None
+    return {"value": value, "count": len(used), "n": n, "rank_field": rank_field, "keywords": used,
+            "total_spend": total_spend, "total_sales": total_sales,
+            "no_sales": bool(used) and total_sales <= 0 and total_spend > 0, "skipped": skipped}
+
+
 def _span(lo: int, hi: int) -> str:
     return str(lo) if lo == hi else f"{lo}–{hi}"
 
@@ -56,9 +113,11 @@ def calc_keyword_ad_metrics(clicks: int, purchases: int, bid: float, avg_price: 
     NOT: SellerSprite UI'daki "Conversion Rate" (ABA 3-tık payı) ile birebir
     AYNI DEĞİLDİR — farklı metodoloji. Panelde "(hesaplanan)" etiketiyle gösterilir.
     """
-    click_cvr = (purchases / clicks) if clicks else None
-    ctr = (clicks / impressions) if impressions else None
-    search_cvr = (purchases / searches) if searches else None
+    # Eksik (null) alanlar hesabı düşürmesin: tek bir keyword'de purchases/clicks None gelirse
+    # eskiden TypeError tüm analizi 502'ye çeviriyordu -> ilgili metrik None olur.
+    click_cvr = (purchases / clicks) if (clicks and purchases is not None) else None
+    ctr = (clicks / impressions) if (impressions and clicks is not None) else None
+    search_cvr = (purchases / searches) if (searches and purchases is not None) else None
     cpa = (bid / click_cvr) if (bid and click_cvr) else None
     acos = (bid / (click_cvr * avg_price)) if (bid and click_cvr and avg_price) else None
     return {
@@ -106,7 +165,7 @@ class PreAssessmentCriterion:
 
 def pre_assessment(avg_price: float | None, gross_margin: float | None, acos: float | None,
                     top_brand_share: float | None, strong_new_brands: int | None,
-                    net_margin: float | None, thresholds: dict = None) -> dict:
+                    net_margin: float | None, thresholds: dict = None, acos_detail: dict | None = None) -> dict:
     """
     Excel'deki 6 kriterli ön değerlendirme panelinin Python karşılığı.
     Ön öneri `verdict_for` ile (kural yukarıdaki sabitlerde: UYGUN_MAX_NEGATIVE, ELIMINATE_AT).
@@ -124,8 +183,11 @@ def pre_assessment(avg_price: float | None, gross_margin: float | None, acos: fl
                                 flag(avg_price, th["min_avg_price"], ">="), unit="usd"),
         PreAssessmentCriterion("Gross Margin", gross_margin, th["min_gross_margin"], ">=",
                                 flag(gross_margin, th["min_gross_margin"], ">="), unit="percent"),
+        # Kriter 03: ilk 5 keyword'ün ağırlıklı ACOS'u (weighted_top_acos). Harcama var ama hiç satış
+        # yoksa ACOS sonsuzdur -> değer yok ama kriter OLUMSUZ.
         PreAssessmentCriterion("ACOS", acos, th["max_acos"], "<=",
-                                flag(acos, th["max_acos"], "<="), unit="percent"),
+                                "OLUMSUZ" if (acos is None and (acos_detail or {}).get("no_sales"))
+                                else flag(acos, th["max_acos"], "<="), unit="percent"),
         PreAssessmentCriterion("En Büyük Marka Payı", top_brand_share, th["max_brand_share"], "<=",
                                 flag(top_brand_share, th["max_brand_share"], "<="), unit="percent"),
         # KRİTİK: bu bir ORAN değil, DÜZ SAYI (kaç marka) — frontend'de yanlışlıkla
@@ -145,4 +207,5 @@ def pre_assessment(avg_price: float | None, gross_margin: float | None, acos: fl
         "verdict": verdict_for(negative_count),
         "eliminate_at": ELIMINATE_AT,
         "rule": verdict_rule(),   # panel canlı yeniden hesaplamada bu sınırları kullanır
+        "acos_detail": acos_detail,  # Kriter 03'ün kullandığı keyword'ler ve her birinin ACOS'u
     }
