@@ -35,7 +35,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from mcp_client import call_tool
-from scoring import calc_keyword_ad_metrics, calc_profit, pre_assessment, DEFAULT_THRESHOLDS
+from scoring import calc_keyword_ad_metrics, calc_profit, pre_assessment, DEFAULT_THRESHOLDS, verdict_rule
 import signal_engine as se
 
 # Bayesian (scipy) ve Portfolio (ortools) opsiyonel — Vercel deploy boyutunu
@@ -706,6 +706,12 @@ async def export_reports(req: ExportReportsRequest, user: dict = Depends(require
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": _content_disposition(f"{req.filename}.xlsx")},
     )
+
+
+@app.get("/api/verdict-rule")
+async def get_verdict_rule(user: dict = Depends(require_auth)):
+    """Ön öneri kuralı (tek kaynak: scoring.py) — panelin açıklama metinleri bunu kullanır."""
+    return verdict_rule()
 
 
 @app.get("/api/thresholds")

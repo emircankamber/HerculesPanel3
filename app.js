@@ -315,17 +315,24 @@ function renderPanel(data) {
   const verdictHint = root.querySelector(".verdict-hint");
   const VERDICT_CLASS = { "Uygun": "uygun", "Sınırda": "sinirda", "Elenmiş": "elenmis" };
   const VERDICT_HINT = { "Uygun": "İlk bakışta girilebilir", "Sınırda": "Yüksek dikkat gerektirir", "Elenmiş": "Zorlu pazar" };
+  // Ön öneri kuralı SUNUCUDAN gelir (tek kaynak: scoring.py UYGUN_MAX_NEGATIVE / ELIMINATE_AT).
+  // Kural yoksa (beklenmedik eski yanıt) panel yeniden hesaplamaz, sunucunun önerisini gösterir.
+  const rule = pa.rule && Number.isFinite(pa.rule.uygun_max_negative) && Number.isFinite(pa.rule.eliminate_at) ? pa.rule : null;
+  const verdictFor = (n) => !rule ? null : n <= rule.uygun_max_negative ? "Uygun" : n < rule.eliminate_at ? "Sınırda" : "Elenmiş";
+  const NEG_CHIP = { "Uygun": "ok", "Sınırda": "warn", "Elenmiş": "bad" };
   function setVerdict(verdict, negCount) {
     badge.textContent = verdict || "—";
     badge.className = `verdict-badge ${VERDICT_CLASS[verdict] || "sinirda"}`;
     verdictHint.textContent = VERDICT_HINT[verdict] || "";
     root.querySelector(".neg-count").textContent = negCount ?? "—";
-    root.querySelector(".neg-chip").className = `neg-chip chip ${negCount ? "bad" : "ok"}`;
+    root.querySelector(".neg-chip").className = `neg-chip chip ${NEG_CHIP[verdict] || "na"}`;
   }
   setVerdict(pa.verdict, pa.negative_count);
+  root.querySelector(".neg-rule").textContent = rule ? ` · ${rule.eliminate_at}+ = Elenmiş` : "";
+  root.querySelector(".verdict-rule-text").textContent = rule ? rule.text : "";
 
   // --- Sade dille özet: neden bu karar? ---
-  function buildPlainSummary(criteria) {
+  function buildPlainSummary(criteria, verdict) {
     const negatives = criteria.filter(c => c.flag === "OLUMSUZ");
     const naCount = criteria.filter(c => c.flag === "n/a").length;
     const REASON = {
@@ -341,9 +348,10 @@ function renderPanel(data) {
       txt = "Tüm kriterler olumlu. Bu pazar ilk bakışta girilebilir görünüyor.";
     } else {
       const reasons = negatives.map(c => REASON[c.label] || c.label).join("; ");
-      txt = negatives.length >= 4
-        ? `${negatives.length} kriter olumsuz — bu pazar zorlu görünüyor: ${reasons}.`
-        : `${negatives.length} kriter olumsuz (tek başına eleme sebebi değil): ${reasons}.`;
+      const head = `${negatives.length} kriter olumsuz, genel değerlendirme ${verdict || "—"}`;
+      txt = verdict === "Elenmiş" ? `${head} — bu pazar zorlu görünüyor: ${reasons}.`
+        : verdict === "Uygun" ? `${head} (tek başına eleme sebebi değil): ${reasons}.`
+        : `${head}: ${reasons}.`;
     }
     if (naCount) txt += ` ${naCount} kriter için veri yok.`;
     return `<div class="font-medium">${esc(txt)}</div><div class="text-xs text-secondary mt-1">Son karar sizindir — aşağıdaki kriter kartlarını ve verileri inceleyip Pazar Kararı'nı işaretleyin.</div>`;
@@ -440,7 +448,7 @@ function renderPanel(data) {
     renderCriterion(div, c, idx);
     critGrid.appendChild(div);
   });
-  if (summaryEl) summaryEl.innerHTML = buildPlainSummary(criteria);
+  if (summaryEl) summaryEl.innerHTML = buildPlainSummary(criteria, pa.verdict);
 
   // --- Ön değerlendirmeyi kar analizindeki net marjla güncelle (canlı) ---
   function updateNetMarginCriterion(marginValue) {
@@ -454,11 +462,11 @@ function renderPanel(data) {
     renderCriterion(card, c, idx);
     if (wasOpen) card.classList.add("open");
 
-    // Toplam olumsuz sayısını ve ön öneriyi yeniden hesapla
+    // Toplam olumsuz sayısını ve ön öneriyi SUNUCUNUN kuralıyla yeniden hesapla
     const negCount = criteria.filter(x => x.flag === "OLUMSUZ").length;
-    const newVerdict = negCount === 0 ? "Uygun" : (negCount < 4 ? "Sınırda" : "Elenmiş");
+    const newVerdict = verdictFor(negCount) ?? pa.verdict;
     setVerdict(newVerdict, negCount);
-    if (summaryEl) summaryEl.innerHTML = buildPlainSummary(criteria);
+    if (summaryEl) summaryEl.innerHTML = buildPlainSummary(criteria, newVerdict);
   }
 
   // --- Detay sekmeleri ---
@@ -2099,6 +2107,11 @@ async function loadSettings() {
   $("#set-dirty-chip").className = "chip na";
   $("#set-dirty-chip").textContent = "Yükleniyor…";
   try {
+    apiFetch(`${API_BASE}/api/verdict-rule`).then(r => r.ok ? r.json() : null).then(rule => {
+      if (!rule) return;
+      $("#set-rule-text").textContent = `${rule.text}. Bu kural backend'de sabittir, buradan değiştirilemez.`;
+      $("#set-rule-chip").textContent = `${rule.eliminate_at}+ olumsuz → Elenmiş`;
+    }).catch(() => {});
     const res = await apiFetch(`${API_BASE}/api/thresholds`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const body = await res.json();
