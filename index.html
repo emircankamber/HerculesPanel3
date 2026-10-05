@@ -42,7 +42,7 @@
     <div class="login-error" id="login-error"></div>
     <button id="login-btn" class="btn btn-primary">Giriş Yap</button>
     <button id="register-btn" class="btn btn-outline">Yeni Hesap Oluştur</button>
-    <div class="login-note">Geçmişin ve kararların ekip arkadaşlarına görünmez; panel yöneticileri (owner) ekip aktivitesini görebilir. Aynı kelimeyi başkası da arayabilir. İlk kullanıcı kaydolduğunda panel kilitlenir.</div>
+    <div class="login-note">Geçmişin ve kararların ekip arkadaşlarına görünmez; ekibe eklenirsen panel yöneticileri (owner) aramalarını ve kararlarını görebilir. Aynı kelimeyi başkası da arayabilir. İlk kullanıcı kaydolduğunda panel kilitlenir.</div>
     <button id="dismiss-login-btn" class="btn btn-outline" style="display:none;">Vazgeç, girişsiz devam et</button>
   </div>
 </div>
@@ -850,8 +850,9 @@
           </section>
 
           <section id="trn-roles" class="card card-pad" style="display:none;">
-            <div><div class="eyebrow">Yalnızca owner'lar</div><h3 class="font-display text-lg font-semibold mt-1">Rol Yönetimi</h3>
-              <p class="text-xs text-secondary mt-1">Owner'lar rolleri yönetir (birden fazla owner olabilir); admin'ler ders ekler, atar ve ilerlemeyi görür. Son kalan owner düşürülemez.</p></div>
+            <div><div class="eyebrow">Yalnızca owner'lar</div><h3 class="font-display text-lg font-semibold mt-1">Kullanıcı &amp; Rol Yönetimi</h3>
+              <p class="text-xs text-secondary mt-1">Owner'lar rolleri yönetir (birden fazla owner olabilir); admin'ler ders ekler, atar ve ilerlemeyi görür. Son kalan owner düşürülemez.</p>
+              <p class="text-xs text-secondary mt-1">Ekip üyeliği rolden ayrıdır: yeni kayıtlar ekip dışı başlar ve paneli normal kullanır. Ekip Aktivitesi, eğitim ve başkalarının kontrol listeleri yalnızca ekip üyelerini kapsar. Owner/admin rolü yalnızca ekip üyelerine verilir; owner/admin ekipten çıkarılamaz. "Üyeliği sil" hesabı ve kişiye ait tüm kayıtları kalıcı olarak siler.</p></div>
             <div class="table-wrap mt-4">
               <table class="data-table"><thead><tr><th class="l">Kullanıcı</th><th class="l hidden sm:table-cell">Rol</th><th class="!text-center">Rol / Değiştir</th></tr></thead>
                 <tbody id="trn-roles-tbody"></tbody></table>
@@ -951,7 +952,7 @@
           <div class="max-w-2xl">
             <div class="flex flex-wrap items-center gap-2"><span class="chip chip-dot ok">Yalnızca owner</span><span class="text-xs text-secondary">salt okunur</span></div>
             <h1 class="font-display text-[26px] sm:text-[32px] font-semibold tracking-tight leading-tight mt-3">Ekip Aktivitesi</h1>
-            <p class="text-sm text-on-surface-variant mt-2 leading-relaxed">Ekibin tüm aramaları ve pazar kararları. Kayıtlar değiştirilemez veya silinemez. Bir kayda tıklamak o keyword/ASIN için <b>canlı</b> yeni analiz başlatır (kayıtlı sonuç gösterilmez, MCP kotası kullanılır).</p>
+            <p class="text-sm text-on-surface-variant mt-2 leading-relaxed">Şu an ekipte olan kişilerin aramaları ve pazar kararları (ekip dışı kişiler görünmez). Kayıtlar değiştirilemez veya silinemez. Bir kayda tıklamak o keyword/ASIN için <b>canlı</b> yeni analiz başlatır (kayıtlı sonuç gösterilmez, MCP kotası kullanılır).</p>
           </div>
         </div>
         <div id="tm-status" class="status-line mt-4"></div>

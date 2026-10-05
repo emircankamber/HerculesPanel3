@@ -1639,10 +1639,10 @@ async def _clean_lesson(req: LessonIn) -> dict:
     else:
         data["due_date"] = None
     if not data["assign_all"]:
-        valid_ids = {u["id"] for u in await db.list_users()}
+        valid_ids = await db.team_member_ids()   # eğitim yalnızca ekip üyelerine atanır
         unknown = sorted(set(data["assignee_ids"]) - valid_ids)
         if unknown:
-            raise HTTPException(422, f"Bilinmeyen kullanıcı id: {unknown}")
+            raise HTTPException(422, f"Ekip üyesi olmayan ya da bilinmeyen kullanıcı id: {unknown}")
         if not data["assignee_ids"]:
             raise HTTPException(422, "Seçilen kişilere atama için en az bir kişi seçin")
     else:
@@ -1703,15 +1703,17 @@ async def training_complete(lesson_id: int, req: CompletionIn, user: dict = Depe
 
 @app.get("/api/training/progress")
 async def training_progress(user: dict = Depends(require_staff)):
-    """Kişi × ders tamamlama tablosu (yalnızca owner/admin)."""
-    users = await db.list_users()
+    """Kişi × ders tamamlama tablosu (yalnızca owner/admin). Yalnızca ŞU AN ekipte olanlar."""
+    users = [u for u in await db.list_users() if u["in_team"]]
     lessons = await db.list_lessons_all()
     all_ids = [u["id"] for u in users]
+    team = set(all_ids)
     return {
         "users": users,
         "lessons": [{"id": l["id"], "title": l["title"], "sort_order": l["sort_order"], "due_date": l.get("due_date"),
-                     "assignee_ids": all_ids if l["assign_all"] else l["assignee_ids"]} for l in lessons],
-        "completions": await db.all_completions(),
+                     "assignee_ids": all_ids if l["assign_all"] else [i for i in l["assignee_ids"] if i in team]}
+                    for l in lessons],
+        "completions": [c for c in await db.all_completions() if c["user_id"] in team],
     }
 
 
@@ -1740,8 +1742,57 @@ async def users_set_role(target_id: int, req: RoleIn, user: dict = Depends(requi
         raise HTTPException(409, str(e))
     except db.LastOwnerError as e:
         raise HTTPException(409, str(e))
+    except db.TeamRuleError as e:
+        raise HTTPException(409, str(e))
     return {"ok": True, "id": target_id, "role": await db.get_user_role(target_id),
             "self_changed": target_id == user["user_id"]}
+
+
+class TeamIn(BaseModel):
+    in_team: bool
+
+
+@app.post("/api/users/{target_id}/team")
+async def users_set_team(target_id: int, req: TeamIn, user: dict = Depends(require_owner)):
+    """
+    Ekibe ekle / ekipten çıkar (yalnızca owner). Ekip üyeliği rolden ayrıdır: Ekip Aktivitesi, eğitim
+    ataması/ilerlemesi ve owner/admin'in başkalarının kontrol listelerini görmesi yalnızca ekip üyelerini
+    kapsar. Owner ya da admin olan biri ekipten çıkarılamaz (409) — önce rolü düşürülmeli.
+    """
+    if await db.get_user_role(target_id) is None:
+        raise HTTPException(404, "Kullanıcı bulunamadı")
+    try:
+        await db.set_team_membership(target_id, req.in_team)
+    except db.TeamRuleError as e:
+        raise HTTPException(409, str(e))
+    return {"ok": True, "id": target_id, "in_team": await db.is_in_team(target_id)}
+
+
+class DeleteUserIn(BaseModel):
+    confirm_email: str = Field(..., max_length=320)
+
+
+@app.post("/api/users/{target_id}/delete")
+async def users_delete(target_id: int, req: DeleteUserIn, user: dict = Depends(require_owner)):
+    """
+    Hesabı KALICI olarak siler (yalnızca owner, geri alınamaz): hesap, oturumlar, eşikler, arama geçmişi,
+    kararlar, kendi kontrol listeleri, eğitim tamamlamaları. Başkalarının kayıtlarındaki referanslar
+    silinmez, kişi alanı boşaltılır (panelde "—"). Onay için hesabın e-postası yazılmalı (422).
+    Kendi hesabı, kalıcı owner (OWNER_EMAILS) ve son owner silinemez (409).
+    """
+    target = next((u for u in await db.list_users() if u["id"] == target_id), None)
+    if not target:
+        raise HTTPException(404, "Kullanıcı bulunamadı")
+    if (req.confirm_email or "").strip().lower() != (target["email"] or "").strip().lower():
+        raise HTTPException(422, "Onay için hesabın e-posta adresini aynen yazın")
+    if target_id == user["user_id"]:
+        raise HTTPException(409, "Kendi hesabınızı silemezsiniz")
+    if target["permanent"]:
+        raise HTTPException(409, "Kalıcı owner (OWNER_EMAILS) silinemez")
+    if target["role"] == "owner" and await db.owner_count() <= 1:
+        raise HTTPException(409, "Son kalan owner silinemez — önce başka birini owner yapın")
+    result = await db.delete_user_completely(target_id)
+    return {"ok": True, "id": target_id, "deleted_checklists": result["deleted_checklists"]}
 
 
 
@@ -1836,7 +1887,10 @@ def _checklist_out(cl: dict, items: list[dict], user: dict, detail: bool = True,
 
 async def _get_checklist_for(cid: int, user: dict) -> dict:
     cl = await db.get_checklist(cid)
-    if not cl or (user["role"] not in ("owner", "admin") and cl["user_id"] != user["user_id"]):
+    # owner/admin başkalarının listelerini yalnızca liste sahibi ŞU AN ekipteyse görür
+    visible = cl and (cl["user_id"] == user["user_id"]
+                      or (user["role"] in ("owner", "admin") and await db.is_in_team(cl["user_id"])))
+    if not visible:
         raise HTTPException(404, "Kontrol listesi bulunamadı")  # member başkasının listesinin varlığını bile göremez
     return cl
 
@@ -1909,6 +1963,9 @@ async def checklist_create(req: ChecklistCreate, user: dict = Depends(require_us
 async def checklist_list(user: dict = Depends(require_user)):
     staff = user["role"] in ("owner", "admin")
     lists = await db.list_checklists(None if staff else user["user_id"])
+    if staff:   # başkalarının listeleri yalnızca sahibi ekipteyse
+        team = await db.team_member_ids()
+        lists = [c for c in lists if c["user_id"] == user["user_id"] or c["user_id"] in team]
     items = await db.items_for_checklists([c["id"] for c in lists])
     return {"role": user["role"], "checklists": [_checklist_out(c, items.get(c["id"], []), user, detail=False) for c in lists]}
 
@@ -2123,10 +2180,13 @@ async def team_activity(user_id: int | None = Query(None, ge=0),
                         user: dict = Depends(require_owner)):
     if decision and decision not in TEAM_DECISIONS:
         raise HTTPException(422, "Geçersiz karar filtresi")
-    users = await db.list_users()
+    # Yalnızca ŞU AN ekipte olanlar: ekip dışı / çıkarılmış kişilerin (ve oturumsuz kullanımın) kayıtları
+    # hiç görünmez; tekrar ekibe eklenince kayıtları silinmediği için geri gelir.
+    users = [u for u in await db.list_users() if u["in_team"]]
     emails = {u["id"]: u["email"] for u in users}
-    queries = await db.team_queries(user_id, since, until)
-    decisions = await db.team_decisions(user_id, since, until, decision)
+    team = set(emails)
+    queries = [r for r in await db.team_queries(user_id, since, until) if r["user_id"] in team]
+    decisions = [r for r in await db.team_decisions(user_id, since, until, decision) if r["user_id"] in team]
     if q and q.strip():
         needle = _tr_fold(q.strip())
         queries = [r for r in queries if needle in _tr_fold(r["keyword"])]
@@ -2137,7 +2197,7 @@ async def team_activity(user_id: int | None = Query(None, ge=0),
         vindex.setdefault((r["user_id"], r["keyword"], r["marketplace"]), []).append((r["queried_at"], r["verdict"]))
 
     def who(uid, email):
-        return email or emails.get(uid) or ("(oturumsuz kullanım)" if not uid else f"(silinmiş kullanıcı #{uid})")
+        return emails.get(uid) or email or "—"
 
     q_out = [{"id": r["id"], "user_id": r["user_id"], "user": who(r["user_id"], r.get("email")),
               "keyword": r["keyword"], "marketplace": r["marketplace"], "at": r["queried_at"],
@@ -2153,10 +2213,6 @@ async def team_activity(user_id: int | None = Query(None, ge=0),
     summary = [{"user_id": u["id"], "user": u["email"], "role": u["role"],
                 "queries": counts["queries"].get(u["id"], 0), "decisions": counts["decisions"].get(u["id"], 0)}
                for u in users]
-    # Kullanıcı tablosunda olmayan (oturumsuz/silinmiş) kayıt sahipleri de özette görünsün
-    for uid in sorted((set(counts["queries"]) | set(counts["decisions"])) - set(emails)):
-        summary.append({"user_id": uid, "user": who(uid, None), "role": None,
-                        "queries": counts["queries"].get(uid, 0), "decisions": counts["decisions"].get(uid, 0)})
 
     return {"range": {"since": since, "until": until}, "users": [{"id": u["id"], "email": u["email"], "role": u["role"]} for u in users],
             "summary": summary,

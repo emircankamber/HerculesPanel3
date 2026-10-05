@@ -157,7 +157,7 @@ gerçek bir keyword'le test et (henüz denenmedi).
   (`keyword_analysis`) paylaşımlı kalabilirdi ama artık önbellek okunmadığı
   için bu ayrımın önemi kalmadı.
 - **İSTİSNA — Ekip Aktivitesi (yalnızca owner):** `GET /api/team/activity` (`require_owner`;
-  admin/member 403) tüm kullanıcıların `user_query_log` ve `market_decision` kayıtlarını
+  admin/member 403) ŞU AN ekipte olan kullanıcıların `user_query_log` ve `market_decision` kayıtlarını
   kişi/tarih/karar/keyword filtresi ve kişi başına özetle döner (özet varsayılan TÜM ZAMANLAR;
   since/until verilirse özet de listeler de yalnızca o aralık). SALT OKUNUR: bu
   bölüm için yazma ucu yok; karar/geçmiş silme uçları zaten yalnızca isteği yapanın KENDİ
@@ -298,6 +298,28 @@ yüzden backend'e hiç bağlanmamalı, sahte veri olur.
   (`rel="noopener noreferrer"`).
 - Tablolar: `training_lessons`, `training_assignments`, `training_completions`
   (`completed_at` zaman damgası). Ders silinince atama/tamamlamalar da silinir.
+
+## Ekip üyeliği & kalıcı hesap silme (yalnızca owner)
+
+- **Ekip üyeliği rolden AYRI:** `users.in_team` (`_migrate_schema` → `_add_column_if_missing`). Migrasyonda
+  sütundan önce var olan TÜM kullanıcılar ekip üyesi (`NULL → 1`; idempotent, sonradan çıkarılanı geri eklemez).
+  Yeni kayıt ekip DIŞI başlar (owner olarak kaydolan — ilk kullanıcı / `OWNER_EMAILS` — hariç) ve paneli
+  normal kullanır (analiz, karar, kendi geçmişi, kendi kontrol listeleri).
+- **Ekip yalnızca şunları kapsar** (filtre SUNUCUDA, `db.team_member_ids()` / `db.is_in_team()`): Ekip Aktivitesi
+  (arama, karar, özet — ekip dışı ve oturumsuz kayıtlar görünmez; tekrar eklenince kayıtlar silinmediği için geri
+  gelir), eğitim ("herkese ata" yalnızca ekip, kişisel atama ekip dışı id'ye 422, ilerleme tablosu yalnızca ekip;
+  ekip dışı kişi ders görmez/tamamlayamaz), owner/admin'in BAŞKALARININ kontrol listelerini görmesi (sahibi
+  ekipte değilse 404; kişi kendi listesini her zaman görür).
+- **Kurallar:** owner/admin rolü yalnızca ekip üyelerine (`TeamRuleError` → 409); owner/admin (ve kalıcı owner)
+  ekipten çıkarılamaz → 409, önce rol düşürülür. Koşullar UPDATE'lerin içinde de var. Uç:
+  `POST /api/users/{id}/team {in_team}` (`require_owner`; admin/member 403).
+- **Kalıcı silme:** `POST /api/users/{id}/delete {confirm_email}` (`require_owner`). Onay e-postası tutmazsa 422;
+  kendi hesabı, kalıcı owner, son owner → 409. `db.delete_user_completely`: oturumlar, eşikler, arama geçmişi,
+  kararlar, kendi kontrol listeleri (madde + olaylarıyla), eğitim tamamlama/atamaları ve hesap SİLİNİR;
+  yer tutucu ("silinmiş üye") YOK. Başkalarının kayıtlarındaki referanslar silinmez, alan NULL'lanır
+  (`EMAIL_REF_COLUMNS` + `checklist_events.details_json` + `training_lessons.created_by`) → panelde "—".
+  **Kişi e-postası/id'si yazan yeni bir sütun eklersen `EMAIL_REF_COLUMNS` / `USER_ID_TABLES`'a da ekle.**
+  Aynı e-posta sonra yeni (ekip dışı, member) bir hesap olarak kaydolabilir.
 
 ## Ön öneri kuralı (Uygun / Sınırda / Elenmiş)
 

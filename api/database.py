@@ -163,6 +163,12 @@ async def _migrate_schema():
     await execute(
         "UPDATE users SET role = 'owner' WHERE id = (SELECT MIN(id) FROM users) "
         "AND NOT EXISTS (SELECT 1 FROM users WHERE role = 'owner')")
+    # EKİP ÜYELİĞİ (rolden ayrı): sütun eklenmeden önce var olan TÜM kullanıcılar ekip üyesi
+    # sayılır (NULL -> 1). Yeni kayıtlar her zaman açıkça 0/1 yazılır, bu yüzden bu satır
+    # idempotenttir ve sonradan ekipten çıkarılanları geri eklemez. Owner/admin her zaman ekipte.
+    await _add_column_if_missing("users", "in_team", "INTEGER")
+    await execute("UPDATE users SET in_team = 1 WHERE in_team IS NULL")
+    await execute("UPDATE users SET in_team = 1 WHERE role IN ('owner', 'admin') AND in_team <> 1")
 
 
 async def init_db():
@@ -190,9 +196,10 @@ async def create_user(email: str, password: str) -> dict:
     salt = secrets.token_hex(16)
     pw_hash = _hash_password(password, salt)
     role = "owner" if email in permanent_owner_emails() or await user_count() == 0 else "member"
+    in_team = 1 if role == "owner" else 0   # yeni kayıt ekip DIŞI başlar (owner hariç)
     user_id = await execute_returning_id(
-        "INSERT INTO users (email, password_hash, salt, created_at, role) VALUES (?, ?, ?, ?, ?)",
-        (email, pw_hash, salt, int(time.time()), role))
+        "INSERT INTO users (email, password_hash, salt, created_at, role, in_team) VALUES (?, ?, ?, ?, ?, ?)",
+        (email, pw_hash, salt, int(time.time()), role, in_team))
     return {"id": user_id, "email": email}
 
 
@@ -655,10 +662,40 @@ async def owner_count() -> int:
 
 
 async def list_users() -> list[dict]:
-    rows = await fetch_all("SELECT id, email, role, created_at FROM users ORDER BY id")
+    rows = await fetch_all("SELECT id, email, role, created_at, in_team FROM users ORDER BY id")
     return [{"id": r["id"], "email": r["email"], "created_at": r["created_at"],
              "role": "owner" if _is_permanent(r["email"]) else _norm_role(r.get("role")),
-             "permanent": _is_permanent(r["email"])} for r in rows]
+             "permanent": _is_permanent(r["email"]),
+             "in_team": bool(r.get("in_team")) or _is_permanent(r["email"])} for r in rows]
+
+
+class TeamRuleError(Exception):
+    """Ekip üyeliği kuralı ihlali (owner/admin yalnızca ekipte; owner/admin ekipten çıkarılamaz)."""
+
+
+async def is_in_team(user_id: int) -> bool:
+    row = await fetch_one("SELECT in_team, email FROM users WHERE id = ?", (user_id,))
+    return bool(row) and (bool(row.get("in_team")) or _is_permanent(row.get("email")))
+
+
+async def team_member_ids() -> set[int]:
+    return {u["id"] for u in await list_users() if u["in_team"]}
+
+
+async def set_team_membership(user_id: int, in_team: bool):
+    """Ekibe ekle / ekipten çıkar. Owner ya da admin olan biri çıkarılamaz (önce rolü düşürülmeli);
+    kural UPDATE'in içinde de var (eşzamanlı rol değişikliğine karşı)."""
+    row = await fetch_one("SELECT id, email FROM users WHERE id = ?", (user_id,))
+    if not row:
+        raise ValueError("Kullanıcı bulunamadı")
+    if in_team:
+        await execute("UPDATE users SET in_team = 1 WHERE id = ?", (user_id,))
+        return
+    if _is_permanent(row["email"]) or await get_user_role(user_id) in ("owner", "admin"):
+        raise TeamRuleError("Owner ya da admin ekipten çıkarılamaz — önce rolünü üyeye düşürün")
+    await execute("UPDATE users SET in_team = 0 WHERE id = ? AND role NOT IN ('owner', 'admin')", (user_id,))
+    if await is_in_team(user_id):
+        raise TeamRuleError("Owner ya da admin ekipten çıkarılamaz — önce rolünü üyeye düşürün")
 
 
 async def set_user_role(user_id: int, role: str):
@@ -673,6 +710,8 @@ async def set_user_role(user_id: int, role: str):
     current = await get_user_role(user_id)
     if current is None:
         raise ValueError("Kullanıcı bulunamadı")
+    if role in ("owner", "admin") and not await is_in_team(user_id):
+        raise TeamRuleError("Owner ve admin rolü yalnızca ekip üyelerine verilebilir — önce ekibe ekleyin")
     if role != "owner":
         row = await fetch_one("SELECT email FROM users WHERE id = ?", (user_id,))
         if row and _is_permanent(row["email"]):
@@ -688,8 +727,76 @@ async def set_user_role(user_id: int, role: str):
             raise LastOwnerError("Son kalan owner düşürülemez — önce başka birini owner yapın")
         if await get_user_role(user_id) == "owner":
             raise LastOwnerError("Son kalan owner düşürülemez — önce başka birini owner yapın")
+    elif role in ("owner", "admin"):
+        # eşzamanlı "ekipten çıkar"a karşı koşul UPDATE'in içinde
+        await execute("UPDATE users SET role = ? WHERE id = ? AND in_team = 1", (role, user_id))
+        if await get_user_role(user_id) != role:
+            raise TeamRuleError("Owner ve admin rolü yalnızca ekip üyelerine verilebilir — önce ekibe ekleyin")
     else:
         await execute("UPDATE users SET role = ? WHERE id = ?", (role, user_id))
+
+
+# ---------------------------------------------------------------------------
+# HESABI KALICI SİLME (owner) — iz bırakmadan
+# ---------------------------------------------------------------------------
+# Başkalarına ait kayıtlarda kişiyi e-postayla anan alanlar: satır SİLİNMEZ, alan NULL yapılır
+# (panelde "—"). Yeni bir tabloya kişi e-postası yazan bir sütun eklersen BURAYA DA EKLE.
+EMAIL_REF_COLUMNS = [
+    ("market_decision", "decided_by"),
+    ("checklist_items", "checked_by"), ("checklist_items", "created_by"),
+    ("checklists", "locked_by"), ("checklist_events", "by_email"),
+    ("checklist_template", "updated_by"), ("keyword_analysis", "fetched_by"),
+    ("proof_assets", "approved_by"), ("portfolio_runs", "run_by"), ("learning_events", "recorded_by"),
+    ("supplier_scores", "scored_by"), ("creative_deliverables", "owner"), ("launch_checkpoints", "entered_by"),
+]
+# Kişinin KENDİ satırları (user_id ile) — tamamen silinir.
+USER_ID_TABLES = ["sessions", "user_thresholds", "user_query_log", "market_decision",
+                  "training_completions", "training_assignments"]
+
+
+def _scrub_json(value, email: str):
+    if isinstance(value, dict):
+        return {k: _scrub_json(v, email) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_scrub_json(v, email) for v in value]
+    if isinstance(value, str) and value.strip().lower() == email:
+        return None
+    return value
+
+
+async def delete_user_completely(user_id: int) -> dict:
+    """
+    Hesabı ve kişiye ait her şeyi siler: oturumlar, eşikler, arama geçmişi, kararlar, kendi
+    kontrol listeleri (maddeleri + olayları), eğitim tamamlamaları/atamaları, hesap. Başkalarının
+    kayıtlarındaki referanslar (onaylar, eklediği dersler, olay kayıtları) NULL'lanır; yer tutucu yok.
+    Koruma kuralları (kalıcı owner, son owner, kendi hesabı) çağıran tarafta (index.py) uygulanır.
+    """
+    row = await fetch_one("SELECT id, email FROM users WHERE id = ?", (user_id,))
+    if not row:
+        raise ValueError("Kullanıcı bulunamadı")
+    email = (row["email"] or "").strip().lower()
+    # önce oturumlar: silme sürerken giriş yapılamasın
+    await execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+    own_lists = [r["id"] for r in await fetch_all("SELECT id FROM checklists WHERE user_id = ?", (user_id,))]
+    for cid in own_lists:
+        await execute("DELETE FROM checklist_items WHERE checklist_id = ?", (cid,))
+        await execute("DELETE FROM checklist_events WHERE checklist_id = ?", (cid,))
+    await execute("DELETE FROM checklists WHERE user_id = ?", (user_id,))
+    for t in USER_ID_TABLES:
+        await execute(f"DELETE FROM {t} WHERE user_id = ?", (user_id,))
+    await execute("UPDATE training_lessons SET created_by = NULL WHERE created_by = ?", (user_id,))
+    for t, col in EMAIL_REF_COLUMNS:
+        await execute(f"UPDATE {t} SET {col} = NULL WHERE LOWER({col}) = ?", (email,))
+    # olay ayrıntılarındaki (JSON) e-posta referansları, ör. kilit açma olayındaki "önceki onaylayan"
+    for ev in await fetch_all("SELECT id, details_json FROM checklist_events WHERE LOWER(details_json) LIKE ?",
+                              (f"%{email}%",)):
+        try:
+            cleaned = json.dumps(_scrub_json(json.loads(ev["details_json"]), email), ensure_ascii=False)
+        except (TypeError, ValueError):
+            cleaned = None
+        await execute("UPDATE checklist_events SET details_json = ? WHERE id = ?", (cleaned, ev["id"]))
+    await execute("DELETE FROM users WHERE id = ?", (user_id,))
+    return {"id": user_id, "email": email, "deleted_checklists": len(own_lists)}
 
 
 # ---------------------------------------------------------------------------
@@ -718,6 +825,9 @@ async def list_lessons_all() -> list[dict]:
 
 async def list_lessons_for_user(user_id: int) -> list[dict]:
     """Yalnızca kullanıcıya atanmış dersler (herkese atananlar + kişisel atamalar)."""
+    # Eğitim yalnızca EKİP üyeleri içindir: ekip dışı kişi hiçbir ders görmez.
+    if not await is_in_team(user_id):
+        return []
     return await fetch_all(
         """SELECT l.* FROM training_lessons l
            WHERE l.assign_all = 1
@@ -726,6 +836,8 @@ async def list_lessons_for_user(user_id: int) -> list[dict]:
 
 
 async def is_lesson_assigned(lesson_id: int, user_id: int) -> bool:
+    if not await is_in_team(user_id):
+        return False
     row = await fetch_one(
         """SELECT 1 AS ok FROM training_lessons l
            WHERE l.id = ? AND (l.assign_all = 1

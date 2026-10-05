@@ -2630,9 +2630,10 @@ function renderTraining() {
 function renderUserPicker(selected = []) {
   const box = $("#trn-f-users");
   const sel = new Set(selected);
-  box.innerHTML = trnState.users.map(u => `
+  // Eğitim yalnızca ekip üyelerine atanır (sunucu da ekip dışı id'yi 422 ile reddeder)
+  box.innerHTML = trnState.users.filter(u => u.in_team).map(u => `
     <label><input type="checkbox" value="${u.id}" ${sel.has(u.id) ? "checked" : ""}><span title="${esc(u.email)}">${esc(u.email)}</span>
-      <span class="chip na !text-[10px]">${esc(ROLE_LABEL[u.role] || u.role)}</span></label>`).join("") || `<span class="text-xs text-secondary">Kullanıcı yok.</span>`;
+      <span class="chip na !text-[10px]">${esc(ROLE_LABEL[u.role] || u.role)}</span></label>`).join("") || `<span class="text-xs text-secondary">Ekip üyesi yok.</span>`;
 }
 
 function resetLessonForm() {
@@ -2755,9 +2756,25 @@ function renderRoles() {
     const locked = perm || lastOwner;
     const lockMsg = perm ? "Kalıcı owner — düşürülemez" : lastOwner ? "Son owner — düşürülemez" : "";
     const isMe = u.id === currentUser.user_id;
-    const opts = ["owner", "admin", "member"].map(r => `<option value="${r}" ${u.role === r ? "selected" : ""}>${ROLE_LABEL[r]}</option>`).join("");
+    // Owner/admin rolü yalnızca ekip üyelerine verilebilir (sunucu 409 verir)
+    const opts = ["owner", "admin", "member"].map(r => `<option value="${r}" ${u.role === r ? "selected" : ""} ${!u.in_team && r !== "member" ? "disabled" : ""}>${ROLE_LABEL[r]}</option>`).join("");
+    const staffRole = u.role === "owner" || u.role === "admin";
+    // Silinemez: kendi hesabı, kalıcı owner, son owner (sunucu da 409 verir)
+    const noDelete = isMe ? "Kendi hesabını silemezsin" : perm ? "Kalıcı owner silinemez" : lastOwner ? "Son owner silinemez" : "";
     tr.innerHTML = `<td class="l"><div class="font-medium truncate max-w-[150px] sm:max-w-[260px]" title="${esc(u.email)}">${esc(u.email)}${isMe ? ' <span class="chip na !text-[10px]">sen</span>' : ""}</div>
-        ${perm ? '<div class="mt-0.5"><span class="chip ok !text-[10px] trn-perm" title="OWNER_EMAILS ortam değişkeninde tanımlı"><span class="material-symbols-outlined !text-[12px]" aria-hidden="true">lock</span>kalıcı owner</span></div>' : ""}</td>
+        <div class="mt-0.5 flex flex-wrap gap-1">${perm ? '<span class="chip ok !text-[10px] trn-perm" title="OWNER_EMAILS ortam değişkeninde tanımlı"><span class="material-symbols-outlined !text-[12px]" aria-hidden="true">lock</span>kalıcı owner</span>' : ""}
+          <span class="chip ${u.in_team ? "ok" : "na"} !text-[10px] trn-team-chip">${u.in_team ? "Ekipte" : "Ekip dışı"}</span></div>
+        <div class="mt-1.5 flex flex-wrap gap-1.5">
+          <button type="button" class="btn btn-outline !h-7 !px-2 !text-[11px] trn-team-btn" ${u.in_team && staffRole ? `disabled title="Owner/admin ekipten çıkarılamaz — önce rolünü üyeye düşür"` : ""}>${u.in_team ? "Ekipten çıkar" : "Ekibe ekle"}</button>
+          <button type="button" class="btn btn-danger !h-7 !px-2 !text-[11px] trn-del-btn" ${noDelete ? `disabled title="${esc(noDelete)}"` : ""}>Üyeliği sil</button>
+        </div>
+        <div class="trn-del-box hidden mt-2 p-2 rounded border border-error/40 max-w-[260px] whitespace-normal">
+          <div class="text-[11px] text-error leading-snug">Kalıcı silme — geri alınamaz. Hesap, oturumlar, eşikler, arama geçmişi, kararlar, kendi kontrol listeleri ve eğitim tamamlamaları silinir. Onay için e-postayı yaz:</div>
+          <input type="text" class="field !h-8 text-xs mt-1.5 w-full trn-del-input" autocomplete="off" spellcheck="false" aria-label="Onay için e-posta" placeholder="${esc(u.email)}">
+          <div class="mt-1.5 flex gap-1.5"><button type="button" class="btn btn-danger !h-7 !px-2 !text-[11px] trn-del-go" disabled>Kalıcı olarak sil</button>
+            <button type="button" class="btn btn-outline !h-7 !px-2 !text-[11px] trn-del-cancel">Vazgeç</button></div>
+        </div>
+        <div class="trn-act-msg text-[11px] mt-1 text-error whitespace-normal"></div></td>
       <td class="l hidden sm:table-cell"><span class="chip ${u.role === "owner" ? "ok" : u.role === "admin" ? "warn" : "na"}">${esc(ROLE_LABEL[u.role] || u.role)}</span></td>
       <td class="!text-center">
         <select class="field !h-8 text-xs trn-role-sel" aria-label="Rol" ${locked ? `disabled title="${esc(lockMsg)}"` : ""}>${opts}</select>
@@ -2765,6 +2782,36 @@ function renderRoles() {
       </td>`;
     const sel = tr.querySelector(".trn-role-sel");
     const msg = tr.querySelector(".trn-role-msg");
+    const actMsg = tr.querySelector(".trn-act-msg");
+    const teamBtn = tr.querySelector(".trn-team-btn");
+    teamBtn.addEventListener("click", async () => {
+      teamBtn.disabled = true; actMsg.textContent = "";
+      try {
+        const r = await apiFetch(`${API_BASE}/api/users/${encodeURIComponent(u.id)}/team`, {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ in_team: !u.in_team }),
+        });
+        const b = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(apiErrorText(b, r.status));
+        await loadTraining();
+      } catch (err) { teamBtn.disabled = false; actMsg.textContent = err.message; }
+    });
+    const delBox = tr.querySelector(".trn-del-box"), delInput = tr.querySelector(".trn-del-input"), delGo = tr.querySelector(".trn-del-go");
+    const norm = v => String(v || "").trim().toLowerCase();
+    tr.querySelector(".trn-del-btn").addEventListener("click", () => { delBox.classList.toggle("hidden"); delInput.value = ""; delGo.disabled = true; delInput.focus(); });
+    tr.querySelector(".trn-del-cancel").addEventListener("click", () => { delBox.classList.add("hidden"); delInput.value = ""; });
+    delInput.addEventListener("input", () => { delGo.disabled = norm(delInput.value) !== norm(u.email); });
+    delGo.addEventListener("click", async () => {
+      if (norm(delInput.value) !== norm(u.email)) return;
+      delGo.disabled = true; actMsg.textContent = "";
+      try {
+        const r = await apiFetch(`${API_BASE}/api/users/${encodeURIComponent(u.id)}/delete`, {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirm_email: delInput.value }),
+        });
+        const b = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(apiErrorText(b, r.status));
+        await loadTraining();
+      } catch (err) { delGo.disabled = false; actMsg.textContent = err.message; }
+    });
     sel.addEventListener("change", async () => {
       const next = sel.value;
       if (isMe && u.role === "owner" && next !== "owner" &&
@@ -2913,7 +2960,7 @@ function renderChecklistDetail() {
   let approval;
   if (locked) {
     approval = `<div class="flex items-center gap-2 text-sm"><span class="material-symbols-outlined text-primary">lock</span><span>Onaylandı ve kilitlendi</span></div>
-      <div class="text-xs text-secondary mt-1">${esc(c.locked_by || "")} · ${esc(fmtStamp(c.locked_at))}</div>
+      <div class="text-xs text-secondary mt-1">${esc(c.locked_by || "—")} · ${esc(fmtStamp(c.locked_at))}</div>
       ${c.overridden_count ? `<div class="mt-3"><span class="chip warn">${c.overridden_count} otomatik madde gerekçeyle geçildi</span></div>` : ""}
       ${c.approval_reason ? `<div class="text-xs mt-2"><span class="text-secondary">Onay gerekçesi:</span> <span class="italic break-words">"${esc(c.approval_reason)}"</span></div>` : ""}`;
     if (c.can_unlock) approval += `<div class="border-t border-outline-variant/40 mt-4 pt-3">
@@ -2936,7 +2983,7 @@ function renderChecklistDetail() {
       <ol class="flex flex-col gap-3">${c.events.slice().reverse().map(e => {
         const [ico, label] = evLabel[e.kind] || ["history", e.kind];
         return `<li class="text-xs"><div class="flex items-center gap-1.5 font-semibold"><span class="material-symbols-outlined !text-[16px] ${e.kind === "unlock" ? "text-tertiary" : "text-primary"}">${ico}</span>${esc(label)}</div>
-          <div class="text-secondary mt-0.5 break-words">${esc(e.by || "")} · ${esc(fmtStamp(e.at))}</div>
+          <div class="text-secondary mt-0.5 break-words">${esc(e.by || "—")} · ${esc(fmtStamp(e.at))}</div>
           ${e.reason ? `<div class="italic mt-0.5 break-words">"${esc(e.reason)}"</div>` : ""}
           ${(e.overridden || []).length ? `<div class="text-secondary mt-0.5 break-words">Gerekçeyle geçilen: ${e.overridden.map(o => esc(o.text)).join("; ")}</div>` : ""}</li>`;
       }).join("")}</ol></div>` : "";
@@ -3067,7 +3114,7 @@ function ckItemHtml(it, c) {
     <div class="min-w-0 flex-1">
       <div class="flex flex-wrap items-center gap-2"><span class="ck-text text-[13.5px] ${it.checked ? "text-secondary" : "font-medium"}">${esc(it.text)}</span>
         ${it.kind === "custom" ? '<span class="chip warn !text-[10px]">özel</span>' : ""}</div>
-      ${it.checked ? `<div class="text-[11px] text-primary mt-1">✓ ${esc(it.checked_by || "")} · ${esc(fmtStamp(it.checked_at))}</div>` : ""}
+      ${it.checked ? `<div class="text-[11px] text-primary mt-1">✓ ${esc(it.checked_by || "—")} · ${esc(fmtStamp(it.checked_at))}</div>` : ""}
       ${edit ? `<div class="flex gap-2 mt-2"><input type="text" class="field ck-note flex-1 min-w-0" maxlength="1000" placeholder="not (opsiyonel)" value="${esc(it.note || "")}">
           <button type="button" class="ck-note-save btn btn-outline btn-sm !h-[30px]">Notu kaydet</button></div>`
         : it.note ? `<div class="text-xs text-on-surface-variant italic mt-1 break-words">"${esc(it.note)}"</div>` : ""}
