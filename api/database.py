@@ -7,7 +7,8 @@ import os
 import time
 import hashlib
 import secrets
-from db_adapter import execute, execute_returning_id, fetch_all, fetch_one, storage_info, USE_POSTGRES
+from db_adapter import execute, execute_returning_id, execute_fetch, fetch_all, fetch_one, storage_info, USE_POSTGRES
+import forum
 
 CACHE_TTL_SECONDS = 24 * 3600
 
@@ -73,6 +74,30 @@ _SCHEMAS = [
     """CREATE TABLE IF NOT EXISTS sessions (
         id INTEGER PRIMARY KEY AUTOINCREMENT, token TEXT NOT NULL UNIQUE,
         user_id INTEGER NOT NULL, email TEXT NOT NULL, created_at INTEGER NOT NULL)""",
+    # ÇOKLU EKİP: bir kişi birden fazla ekipte olabilir; hiçbir ekipte olmayan "ekip dışı".
+    """CREATE TABLE IF NOT EXISTS teams (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, created_at INTEGER NOT NULL)""",
+    """CREATE TABLE IF NOT EXISTS team_members (
+        team_id INTEGER NOT NULL, user_id INTEGER NOT NULL, added_at INTEGER NOT NULL,
+        PRIMARY KEY (team_id, user_id))""",
+    # Davet: kod YALNIZCA sha256 olarak saklanır (düz kod bir kez, oluşturulurken döner).
+    # max_uses NULL = çok kullanımlık. created_by = kullanıcı id (hesap silinince NULL).
+    """CREATE TABLE IF NOT EXISTS team_invites (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, team_id INTEGER NOT NULL, code_hash TEXT NOT NULL UNIQUE,
+        created_by INTEGER, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+        max_uses INTEGER, uses INTEGER NOT NULL DEFAULT 0, revoked_at INTEGER)""",
+    # Derslerin ekip ataması (assign_mode='teams'): DİNAMİK — üyelik o an hesaplanır.
+    """CREATE TABLE IF NOT EXISTS training_lesson_teams (
+        lesson_id INTEGER NOT NULL, team_id INTEGER NOT NULL, PRIMARY KEY (lesson_id, team_id))""",
+    # Tek seferlik migrasyon işaretleri (ör. "Genel" ekibinin ilk kurulumu; ekipler sonradan
+    # silinse bile migrasyon onu yeniden oluşturup herkesi eklemesin diye).
+    # YETKİNLİK FORMU: kişi başına tek kayıt. Yalnızca kişinin kendisi ve owner'lar okur (index.py).
+    # status: draft | submitted. Hesap silinince satır da silinir (USER_ID_TABLES).
+    """CREATE TABLE IF NOT EXISTS competency_forms (
+        user_id INTEGER PRIMARY KEY, answers_json TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'draft',
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, submitted_at INTEGER)""",
+    """CREATE TABLE IF NOT EXISTS schema_flags (
+        key TEXT PRIMARY KEY, value TEXT, set_at INTEGER NOT NULL)""",
     """CREATE TABLE IF NOT EXISTS product_signals (
         id INTEGER PRIMARY KEY AUTOINCREMENT, keyword TEXT NOT NULL, marketplace TEXT NOT NULL,
         stage TEXT NOT NULL, market_score REAL, demand_score REAL, truth_score REAL,
@@ -163,10 +188,60 @@ async def _migrate_schema():
     await execute(
         "UPDATE users SET role = 'owner' WHERE id = (SELECT MIN(id) FROM users) "
         "AND NOT EXISTS (SELECT 1 FROM users WHERE role = 'owner')")
+    # Eğitim ataması: all | teams | users (eski kayıtlar assign_all'dan türetilir)
+    await _add_column_if_missing("training_lessons", "assign_mode", "TEXT")
+    await execute("UPDATE training_lessons SET assign_mode = CASE WHEN assign_all = 1 THEN 'all' ELSE 'users' END "
+                  "WHERE assign_mode IS NULL OR assign_mode NOT IN ('all', 'teams', 'users')")
+    # EKİP HİYERARŞİSİ (iki seviye): parent_id NULL = ana ekip. Mevcut ekipler ana ekip kalır, üyelik değişmez.
+    await _add_column_if_missing("teams", "parent_id", "INTEGER")
+    await _seed_teams_once()
+    await _ensure_staff_in_team()
+    # PROFİL: ad/soyad (kayıtta zorunlu; mevcut kullanıcılar girene kadar panel kapalı — index.require_auth),
+    # kullanıcı adı (benzersiz, girişi DEĞİŞTİRMEZ), unvan, telefon.
+    for col in ("first_name", "last_name", "username", "title", "phone"):
+        await _add_column_if_missing("users", col, "TEXT")
+    try:
+        await execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_users_username ON users (LOWER(username))")
+    except Exception:
+        pass  # benzersizlik ayrıca kodda denetlenir
+    await forum.seed_once()   # forum varsayılan kategorileri (bir kez)
+
+
+async def _seed_teams_once():
+    """
+    ÇOKLU EKİP ilk kurulumu (bir kez): "Genel" ekibi oluşturulur ve MEVCUT tüm kullanıcılar eklenir.
+    Önceki tekli `users.in_team` alanı varsa ona göre dönüştürülür (1/NULL -> Genel, 0 -> ekip dışı).
+    İşaret satırı ÖNCE yazılır (PRIMARY KEY): aynı anda açılan iki sunucusuz örnekten yalnızca biri
+    kurar; ekipler sonradan silinse bile migrasyon "Genel"i yeniden oluşturup herkesi eklemez.
+    """
+    if await fetch_one("SELECT 1 AS ok FROM schema_flags WHERE key = 'teams_seeded'"):
+        return
+    now = int(time.time())
+    try:
+        await execute("INSERT INTO schema_flags (key, value, set_at) VALUES ('teams_seeded', '1', ?)", (now,))
+    except Exception:
+        return  # başka bir örnek kuruyor
+    gid = await execute_returning_id("INSERT INTO teams (name, created_at) VALUES (?, ?)", ("Genel", now))
+    try:
+        rows = await fetch_all("SELECT id, in_team FROM users")
+        ids = [r["id"] for r in rows if r.get("in_team") is None or int(r["in_team"]) != 0]
+    except Exception:   # in_team sütunu hiç yok (tekli ekip işi bu veritabanında çalışmadı) -> herkes
+        ids = [r["id"] for r in await fetch_all("SELECT id FROM users")]
+    for uid in ids:
+        await _add_member(gid, uid)
+
+
+async def _ensure_staff_in_team():
+    """Owner/admin (ve OWNER_EMAILS) en az bir ekipte olmalı; değilse varsayılan ekibe eklenir."""
+    rows = await fetch_all("SELECT id, email, role FROM users u WHERE NOT EXISTS "
+                           "(SELECT 1 FROM team_members m WHERE m.user_id = u.id)")
+    for r in rows:
+        if _norm_role(r.get("role")) in ("owner", "admin") or _is_permanent(r.get("email")):
+            await _add_member(await _default_team_id(), r["id"])
 
 
 async def init_db():
-    for schema in _SCHEMAS:
+    for schema in _SCHEMAS + forum.SCHEMAS:
         await execute(schema)
     await _migrate_schema()
 
@@ -182,7 +257,15 @@ def _hash_password(password: str, salt: str) -> str:
     return hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 120_000).hex()
 
 
-async def create_user(email: str, password: str) -> dict:
+async def create_user(email: str, password: str, invite_code: str | None = None,
+                      first_name: str = "", last_name: str = "") -> dict:
+    """
+    Yeni kayıt HİÇBİR ekipte olmadan başlar (ekip dışı) — iki istisna:
+    owner olarak kaydolan (ilk kullanıcı / OWNER_EMAILS) varsayılan ekibe girer (owner en az bir ekipte
+    olmalı); geçerli bir davet koduyla kaydolan davetin ekibine katılır. Geçersiz/süresi dolmuş/iptal
+    edilmiş davet kaydı ENGELLEMEZ, kişi ekip dışı başlar. Davet hesap oluşturulduktan SONRA kullanılır
+    (e-posta zaten kayıtlıysa tek kullanımlık davet boşa harcanmasın).
+    """
     email = email.strip().lower()
     existing = await fetch_one("SELECT id FROM users WHERE email = ?", (email,))
     if existing:
@@ -191,9 +274,19 @@ async def create_user(email: str, password: str) -> dict:
     pw_hash = _hash_password(password, salt)
     role = "owner" if email in permanent_owner_emails() or await user_count() == 0 else "member"
     user_id = await execute_returning_id(
-        "INSERT INTO users (email, password_hash, salt, created_at, role) VALUES (?, ?, ?, ?, ?)",
-        (email, pw_hash, salt, int(time.time()), role))
-    return {"id": user_id, "email": email}
+        "INSERT INTO users (email, password_hash, salt, created_at, role, first_name, last_name) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (email, pw_hash, salt, int(time.time()), role, first_name or None, last_name or None))
+    if role == "owner":
+        await _add_member(await _default_team_id(), user_id)
+    invite = None
+    if invite_code:
+        team = await redeem_invite(invite_code)
+        if team:
+            await _add_member(team["id"], user_id)
+            invite = {"status": "joined", "team": team["name"]}
+        else:
+            invite = {"status": "invalid"}
+    return {"id": user_id, "email": email, "invite": invite}
 
 
 async def verify_user(email: str, password: str) -> dict | None:
@@ -215,9 +308,11 @@ async def create_session(user: dict) -> str:
 
 
 async def get_session(token: str) -> dict | None:
+    """Oturum + kullanıcının ad/soyadı (ad soyad kapısı için tek sorgu)."""
     if not token:
         return None
-    return await fetch_one("SELECT * FROM sessions WHERE token = ?", (token,))
+    return await fetch_one("SELECT s.*, u.first_name, u.last_name FROM sessions s "
+                           "LEFT JOIN users u ON u.id = s.user_id WHERE s.token = ?", (token,))
 
 
 async def delete_session(token: str):
@@ -655,10 +750,426 @@ async def owner_count() -> int:
 
 
 async def list_users() -> list[dict]:
-    rows = await fetch_all("SELECT id, email, role, created_at FROM users ORDER BY id")
+    rows = await fetch_all("SELECT id, email, role, created_at, first_name, last_name, username, title FROM users ORDER BY id")
+    teams = await _memberships()
+    parent = await _parents()
     return [{"id": r["id"], "email": r["email"], "created_at": r["created_at"],
+             "first_name": r.get("first_name") or "", "last_name": r.get("last_name") or "",
+             "name": display_name(r), "username": r.get("username") or "", "title": r.get("title") or "",
              "role": "owner" if _is_permanent(r["email"]) else _norm_role(r.get("role")),
-             "permanent": _is_permanent(r["email"])} for r in rows]
+             "permanent": _is_permanent(r["email"]),
+             # team_ids = ETKİN üyelik (doğrudan + alt ekip üzerinden ana ekip); direct_team_ids = kayıtlı satırlar
+             "team_ids": _effective(teams.get(r["id"], []), parent),
+             "direct_team_ids": sorted(teams.get(r["id"], [])),
+             "in_team": bool(teams.get(r["id"]))} for r in rows]
+
+
+def display_name(row: dict | None) -> str:
+    """Panelde e-posta yerine gösterilen ad: "Ad Soyad" (girilmemişse boş)."""
+    if not row:
+        return ""
+    return " ".join(x for x in ((row.get("first_name") or "").strip(), (row.get("last_name") or "").strip()) if x)
+
+
+async def email_name_map() -> dict[str, str]:
+    """Kayıtlarda e-postayla anılan kişileri (onaylayan, işaretleyen…) ada çevirmek için: e-posta -> Ad Soyad."""
+    rows = await fetch_all("SELECT email, first_name, last_name FROM users")
+    return {(r["email"] or "").strip().lower(): display_name(r) for r in rows}
+
+
+# ---------------------------------------------------------------------------
+# PROFİL (yalnızca kişinin kendisi)
+# ---------------------------------------------------------------------------
+class UsernameTakenError(ValueError):
+    pass
+
+
+async def get_profile(user_id: int) -> dict | None:
+    r = await fetch_one("SELECT id, email, role, created_at, first_name, last_name, username, title, phone "
+                        "FROM users WHERE id = ?", (user_id,))
+    if not r:
+        return None
+    labels = {t["id"]: t["label"] for t in await list_teams()}
+    return {"id": r["id"], "email": r["email"], "created_at": r["created_at"],
+            "first_name": r.get("first_name") or "", "last_name": r.get("last_name") or "", "name": display_name(r),
+            "username": r.get("username") or "", "title": r.get("title") or "", "phone": r.get("phone") or "",
+            "teams": [{"id": t, "name": labels[t]} for t in await user_team_ids(user_id) if t in labels]}
+
+
+async def update_profile(user_id: int, fields: dict):
+    """Yalnızca verilen alanlar güncellenir. Kullanıcı adı büyük/küçük harf duyarsız benzersiz (UsernameTakenError);
+    benzersiz indeks yarışa karşı ikinci güvence."""
+    if "username" in fields and fields["username"]:
+        row = await fetch_one("SELECT id FROM users WHERE LOWER(username) = ? AND id <> ?",
+                              (fields["username"].lower(), user_id))
+        if row:
+            raise UsernameTakenError("Bu kullanıcı adı başka biri tarafından kullanılıyor")
+    cols = [c for c in ("first_name", "last_name", "username", "title", "phone") if c in fields]
+    if not cols:
+        return
+    try:
+        await execute(f"UPDATE users SET {', '.join(c + ' = ?' for c in cols)} WHERE id = ?",
+                      tuple((fields[c] or None) for c in cols) + (user_id,))
+    except Exception as e:
+        if "username" in cols and ("unique" in str(e).lower() or "ux_users_username" in str(e)):
+            raise UsernameTakenError("Bu kullanıcı adı başka biri tarafından kullanılıyor")
+        raise
+
+
+async def change_password(user_id: int, current: str, new: str, keep_token: str) -> bool:
+    """Mevcut şifre doğruysa değiştirir ve bu oturum DIŞINDAKİ tüm oturumları kapatır."""
+    user = await fetch_one("SELECT password_hash, salt FROM users WHERE id = ?", (user_id,))
+    if not user or _hash_password(current, user["salt"]) != user["password_hash"]:
+        return False
+    salt = secrets.token_hex(16)
+    await execute("UPDATE users SET password_hash = ?, salt = ? WHERE id = ?", (_hash_password(new, salt), salt, user_id))
+    await execute("DELETE FROM sessions WHERE user_id = ? AND token <> ?", (user_id, keep_token))
+    return True
+
+
+# ---------------------------------------------------------------------------
+# YETKİNLİK FORMU
+# ---------------------------------------------------------------------------
+async def get_competency(user_id: int) -> dict | None:
+    r = await fetch_one("SELECT * FROM competency_forms WHERE user_id = ?", (user_id,))
+    if not r:
+        return None
+    r["answers"] = json.loads(r.pop("answers_json") or "{}")
+    return r
+
+
+async def save_competency(user_id: int, answers: dict):
+    now = int(time.time())
+    await execute(
+        "INSERT INTO competency_forms (user_id, answers_json, status, created_at, updated_at) VALUES (?, ?, 'draft', ?, ?) "
+        "ON CONFLICT (user_id) DO UPDATE SET answers_json = excluded.answers_json, updated_at = excluded.updated_at",
+        (user_id, json.dumps(answers, ensure_ascii=False), now, now))
+
+
+async def submit_competency(user_id: int) -> int:
+    now = int(time.time())
+    await execute("UPDATE competency_forms SET status = 'submitted', submitted_at = ? WHERE user_id = ?", (now, user_id))
+    return now
+
+
+async def all_competency() -> dict[int, dict]:
+    out = {}
+    for r in await fetch_all("SELECT * FROM competency_forms"):
+        r["answers"] = json.loads(r.pop("answers_json") or "{}")
+        out[r["user_id"]] = r
+    return out
+
+
+class TeamRuleError(Exception):
+    """Ekip kuralı ihlali (owner/admin yalnızca en az bir ekipte; son ekibinden çıkarılamaz)."""
+
+
+class TeamNameError(ValueError):
+    """Ekip adı boş/uzun ya da başka bir ekiple aynı."""
+
+
+STAFF_ROLES = ("owner", "admin")
+
+
+# ---------------------------------------------------------------------------
+# ÇOKLU EKİP
+# ---------------------------------------------------------------------------
+async def _add_member(team_id: int, user_id: int):
+    await execute("INSERT INTO team_members (team_id, user_id, added_at) VALUES (?, ?, ?) "
+                  "ON CONFLICT (team_id, user_id) DO NOTHING", (team_id, user_id, int(time.time())))
+
+
+async def _default_team_id() -> int:
+    """En eski ekip; hiç ekip yoksa "Genel" oluşturulur (owner'ın girebileceği bir ekip her zaman olsun)."""
+    row = await fetch_one("SELECT id FROM teams ORDER BY id LIMIT 1")
+    if row:
+        return row["id"]
+    return await execute_returning_id("INSERT INTO teams (name, created_at) VALUES (?, ?)", ("Genel", int(time.time())))
+
+
+async def _memberships() -> dict[int, list[int]]:
+    out: dict[int, list[int]] = {}
+    for r in await fetch_all("SELECT team_id, user_id FROM team_members"):
+        out.setdefault(r["user_id"], []).append(r["team_id"])
+    return out
+
+
+async def _parents() -> dict[int, int | None]:
+    return {r["id"]: r.get("parent_id") for r in await fetch_all("SELECT id, parent_id FROM teams")}
+
+
+def _effective(direct: list[int], parent: dict) -> list[int]:
+    """Alt ekip üyeliği ana ekip üyeliğini de içerir (kalıtım; ayrı satır yazılmaz)."""
+    out = set(direct)
+    out.update(parent[t] for t in direct if parent.get(t))
+    return sorted(out)
+
+
+async def user_team_ids(user_id: int) -> list[int]:
+    return sorted(r["team_id"] for r in await fetch_all("SELECT team_id FROM team_members WHERE user_id = ?", (user_id,)))
+
+
+async def is_in_team(user_id: int) -> bool:
+    return bool(await fetch_one("SELECT 1 AS ok FROM team_members WHERE user_id = ? LIMIT 1", (user_id,)))
+
+
+async def team_member_ids(team_id: int | None = None) -> set[int]:
+    """team_id verilirse o ekibin ETKİN üyeleri: ana ekipte doğrudan üyeler + tüm alt ekiplerinin üyeleri,
+    alt ekipte yalnızca kendi üyeleri. Verilmezse EN AZ BİR ekipte olan herkes (ekip dışı = hiç satırı yok)."""
+    if team_id is None:
+        rows = await fetch_all("SELECT DISTINCT user_id FROM team_members")
+    else:
+        rows = await fetch_all("SELECT m.user_id FROM team_members m JOIN teams t ON t.id = m.team_id "
+                               "WHERE t.id = ? OR t.parent_id = ?", (team_id, team_id))
+    return {r["user_id"] for r in rows}
+
+
+async def get_team(team_id: int) -> dict | None:
+    return await fetch_one("SELECT id, name, parent_id, created_at FROM teams WHERE id = ?", (team_id,))
+
+
+TEAM_SEP = " › "
+
+
+async def list_teams() -> list[dict]:
+    """Ağaç sırasıyla (ana ekip, ardından alt ekipleri). label = "Ana › Alt". Sayılar: direct_count = doğrudan üye,
+    member_count = ETKİN üye (ana ekipte doğrudan + alt ekipler, tekil kişi)."""
+    rows = await fetch_all("SELECT id, name, parent_id, created_at FROM teams ORDER BY id")
+    members: dict[int, set] = {}
+    for m in await fetch_all("SELECT team_id, user_id FROM team_members"):
+        members.setdefault(m["team_id"], set()).add(m["user_id"])
+    by_id = {r["id"]: r for r in rows}
+    roots = [r for r in rows if not r.get("parent_id") or r["parent_id"] not in by_id]
+    out = []
+    for root in sorted(roots, key=lambda r: (r["name"].casefold(), r["id"])):
+        kids = sorted([r for r in rows if r.get("parent_id") == root["id"]], key=lambda r: (r["name"].casefold(), r["id"]))
+        total = set(members.get(root["id"], set()))
+        for k in kids:
+            total |= members.get(k["id"], set())
+        out.append({**root, "parent_id": None, "label": root["name"], "children": [k["id"] for k in kids],
+                    "direct_count": len(members.get(root["id"], set())), "member_count": len(total)})
+        for k in kids:
+            n = len(members.get(k["id"], set()))
+            out.append({**k, "label": root["name"] + TEAM_SEP + k["name"], "children": [],
+                        "direct_count": n, "member_count": n})
+    return out
+
+
+def _clean_team_name(name: str) -> str:
+    name = " ".join((name or "").split())
+    if not name:
+        raise TeamNameError("Ekip adı boş olamaz")
+    if len(name) > 60:
+        raise TeamNameError("Ekip adı en fazla 60 karakter olabilir")
+    return name
+
+
+async def _check_name_free(name: str, parent_id: int | None, except_id: int | None = None):
+    """Ad, aynı düzeydeki (aynı ana ekibin altındaki ya da ana ekipler arasındaki) ekipler arasında benzersiz."""
+    for t in await fetch_all("SELECT id, name, parent_id FROM teams"):
+        if t["id"] != except_id and (t.get("parent_id") or None) == (parent_id or None) and t["name"].casefold() == name.casefold():
+            raise TeamNameError("Bu düzeyde aynı adla bir ekip zaten var")
+
+
+async def _check_parent(team_id: int | None, parent_id: int | None):
+    """İki seviye kuralı: ana ekip mevcut ve kendisi ana ekip olmalı; alt ekipleri olan ekip başka ekibin altına
+    taşınamaz; ekip kendi altına alınamaz."""
+    if parent_id is None:
+        return
+    parent = await get_team(parent_id)
+    if not parent:
+        raise ValueError("Ana ekip bulunamadı")
+    if parent.get("parent_id"):
+        raise TeamRuleError("Alt ekibin altına ekip açılamaz — yalnızca iki seviye (ana ekip › alt ekip) var")
+    if team_id is not None:
+        if parent_id == team_id:
+            raise TeamRuleError("Ekip kendi altına taşınamaz")
+        if await fetch_one("SELECT 1 AS ok FROM teams WHERE parent_id = ? LIMIT 1", (team_id,)):
+            raise TeamRuleError("Alt ekipleri olan bir ana ekip başka bir ekibin altına taşınamaz — önce alt ekiplerini taşıyın")
+
+
+async def create_team(name: str, parent_id: int | None = None) -> int:
+    name = _clean_team_name(name)
+    await _check_parent(None, parent_id)
+    await _check_name_free(name, parent_id)
+    return await execute_returning_id("INSERT INTO teams (name, parent_id, created_at) VALUES (?, ?, ?)",
+                                      (name, parent_id, int(time.time())))
+
+
+async def update_team(team_id: int, name: str | None = None, move: bool = False, parent_id: int | None = None):
+    """Yeniden adlandır ve/veya taşı (move=True: parent_id None -> ana ekip yap). Kurallar _check_parent'ta."""
+    team = await get_team(team_id)
+    new_parent = parent_id if move else team.get("parent_id")
+    if move:
+        await _check_parent(team_id, parent_id)
+    new_name = _clean_team_name(name) if name is not None else team["name"]
+    await _check_name_free(new_name, new_parent, team_id)
+    if move and parent_id is not None:
+        # yarışa karşı: alt ekibi olan ekip ya da alt ekip olan hedef — koşul UPDATE'in içinde de
+        await execute("UPDATE teams SET name = ?, parent_id = ? WHERE id = ? "
+                      "AND NOT EXISTS (SELECT 1 FROM teams c WHERE c.parent_id = ?) "
+                      "AND EXISTS (SELECT 1 FROM teams p WHERE p.id = ? AND p.parent_id IS NULL)",
+                      (new_name, parent_id, team_id, team_id, parent_id))
+        if (await get_team(team_id)).get("parent_id") != parent_id:
+            raise TeamRuleError("Taşınamadı — ekip yapısı bu arada değişti, tekrar deneyin")
+    else:
+        await execute("UPDATE teams SET name = ?, parent_id = ? WHERE id = ?", (new_name, new_parent, team_id))
+
+
+async def rename_team(team_id: int, name: str):
+    await update_team(team_id, name=name)
+
+
+async def staff_only_in_team(team_id: int) -> list[dict]:
+    """Bu ekip, TEK ekibi olan owner/admin'ler (ekip silinirse ekipsiz kalırlardı)."""
+    out = []
+    for u in await list_users():
+        if u["role"] in STAFF_ROLES and u["direct_team_ids"] == [team_id]:
+            out.append({"id": u["id"], "email": u["email"], "name": u["name"], "role": u["role"]})
+    return out
+
+
+async def lessons_only_for_team(team_id: int) -> list[dict]:
+    """Yalnızca bu ekibe atanmış dersler (ekip silinirse kimseye görünmez olurlar)."""
+    return await fetch_all(
+        "SELECT l.id, l.title FROM training_lessons l WHERE l.assign_mode = 'teams' "
+        "AND EXISTS (SELECT 1 FROM training_lesson_teams lt WHERE lt.lesson_id = l.id AND lt.team_id = ?) "
+        "AND NOT EXISTS (SELECT 1 FROM training_lesson_teams lt WHERE lt.lesson_id = l.id AND lt.team_id <> ?) "
+        "ORDER BY l.sort_order, l.id", (team_id, team_id))
+
+
+async def delete_team(team_id: int):
+    """Ekibi siler: yalnızca ÜYELİKLER, ders-ekip atamaları ve ekibin davetleri kalkar. Kullanıcılar ve
+    verileri (geçmiş, karar, liste, tamamlama) SİLİNMEZ. Owner/admin'in tek ekibiyse TeamRuleError."""
+    if await fetch_one("SELECT 1 AS ok FROM teams WHERE parent_id = ? LIMIT 1", (team_id,)):
+        raise TeamRuleError("Alt ekipleri olan ana ekip silinemez — önce alt ekipleri taşıyın ya da silin")
+    blockers = await staff_only_in_team(team_id)
+    if blockers:
+        raise TeamRuleError("Bu ekip şu owner/admin'lerin tek ekibi: " + ", ".join(b["name"] or b["email"] for b in blockers)
+                            + " — önce onları başka bir ekibe ekleyin ya da rollerini üyeye düşürün")
+    await execute("DELETE FROM team_members WHERE team_id = ?", (team_id,))
+    await execute("DELETE FROM training_lesson_teams WHERE team_id = ?", (team_id,))
+    await execute("DELETE FROM team_invites WHERE team_id = ?", (team_id,))
+    await execute("DELETE FROM teams WHERE id = ?", (team_id,))
+    await _ensure_staff_in_team()   # eşzamanlı bir rol değişikliği araya girdiyse owner/admin ekipsiz kalmasın
+
+
+async def set_user_teams(user_id: int, team_ids: list[int]):
+    """Kişinin ekiplerini verilen kümeye eşitler (çoklu ekle/çıkar). Owner/admin (ve kalıcı owner)
+    son ekibinden çıkarılamaz — boş küme reddedilir; koşul yarışa karşı sonradan da denetlenir."""
+    row = await fetch_one("SELECT id, email FROM users WHERE id = ?", (user_id,))
+    if not row:
+        raise LookupError("Kullanıcı bulunamadı")
+    wanted = set(team_ids)
+    existing = {t["id"] for t in await fetch_all("SELECT id FROM teams")}
+    unknown = sorted(wanted - existing)
+    if unknown:
+        raise ValueError(f"Bilinmeyen ekip id: {unknown}")
+    staff = _is_permanent(row["email"]) or await get_user_role(user_id) in STAFF_ROLES
+    if staff and not wanted:
+        raise TeamRuleError("Owner ya da admin son ekibinden çıkarılamaz — önce rolünü üyeye düşürün")
+    current = set(await user_team_ids(user_id))
+    for tid in sorted(wanted - current):
+        await _add_member(tid, user_id)
+    removed = sorted(current - wanted)
+    for tid in removed:
+        await execute("DELETE FROM team_members WHERE team_id = ? AND user_id = ?", (tid, user_id))
+    if removed and not await is_in_team(user_id) and (
+            _is_permanent(row["email"]) or await get_user_role(user_id) in STAFF_ROLES):
+        for tid in removed:   # bu arada owner/admin yapıldı -> geri al
+            await _add_member(tid, user_id)
+        raise TeamRuleError("Owner ya da admin son ekibinden çıkarılamaz — önce rolünü üyeye düşürün")
+
+
+async def add_user_to_team(user_id: int, team_id: int):
+    if not await fetch_one("SELECT id FROM users WHERE id = ?", (user_id,)):
+        raise LookupError("Kullanıcı bulunamadı")
+    if not await get_team(team_id):
+        raise ValueError("Ekip bulunamadı")
+    await _add_member(team_id, user_id)
+
+
+async def remove_user_from_team(user_id: int, team_id: int) -> list[int]:
+    """Ekipten çıkarır. Ana ekipten çıkarılan kişi o ana ekibin TÜM alt ekiplerinden de çıkar.
+    Owner/admin hiçbir ekipte kalmayacaksa TeamRuleError (geri alınır). Kaldırılan ekip id'lerini döner."""
+    row = await fetch_one("SELECT id, email FROM users WHERE id = ?", (user_id,))
+    if not row:
+        raise LookupError("Kullanıcı bulunamadı")
+    team = await get_team(team_id)
+    if not team:
+        raise ValueError("Ekip bulunamadı")
+    targets = {team_id}
+    if not team.get("parent_id"):
+        targets |= {r["id"] for r in await fetch_all("SELECT id FROM teams WHERE parent_id = ?", (team_id,))}
+    current = set(await user_team_ids(user_id))
+    removed = sorted(current & targets)
+    staff = _is_permanent(row["email"]) or await get_user_role(user_id) in STAFF_ROLES
+    if staff and current and not (current - targets):
+        raise TeamRuleError("Owner ya da admin son ekibinden çıkarılamaz — önce rolünü üyeye düşürün")
+    for tid in removed:
+        await execute("DELETE FROM team_members WHERE team_id = ? AND user_id = ?", (tid, user_id))
+    if removed and staff and not await is_in_team(user_id):
+        for tid in removed:
+            await _add_member(tid, user_id)
+        raise TeamRuleError("Owner ya da admin son ekibinden çıkarılamaz — önce rolünü üyeye düşürün")
+    return removed
+
+
+async def new_outsider_count(days: int = 7) -> int:
+    """Son N günde kaydolan ve hiçbir ekipte olmayan hesap sayısı (owner menü rozeti)."""
+    row = await fetch_one("SELECT COUNT(*) AS c FROM users u WHERE u.created_at >= ? AND NOT EXISTS "
+                          "(SELECT 1 FROM team_members m WHERE m.user_id = u.id)", (int(time.time()) - days * 86400,))
+    return int((row or {}).get("c") or 0)
+
+
+# --- Davetler -------------------------------------------------------------
+def _invite_hash(code: str) -> str:
+    return hashlib.sha256((code or "").strip().encode()).hexdigest()
+
+
+async def create_invite(team_id: int, created_by: int, multi_use: bool, days: int) -> dict:
+    code = secrets.token_urlsafe(24)
+    now = int(time.time())
+    iid = await execute_returning_id(
+        "INSERT INTO team_invites (team_id, code_hash, created_by, created_at, expires_at, max_uses, uses) "
+        "VALUES (?, ?, ?, ?, ?, ?, 0)",
+        (team_id, _invite_hash(code), created_by, now, now + days * 86400, None if multi_use else 1))
+    return {"id": iid, "code": code, "expires_at": now + days * 86400}
+
+
+async def list_active_invites() -> list[dict]:
+    now = int(time.time())
+    rows = await fetch_all(
+        "SELECT i.id, i.team_id, t.name AS team_name, i.created_at, i.expires_at, i.max_uses, i.uses, "
+        "u.email AS created_by_email, u.first_name, u.last_name FROM team_invites i JOIN teams t ON t.id = i.team_id "
+        "LEFT JOIN users u ON u.id = i.created_by "
+        "WHERE i.revoked_at IS NULL AND i.expires_at > ? AND (i.max_uses IS NULL OR i.uses < i.max_uses) "
+        "ORDER BY i.created_at DESC, i.id DESC", (now,))
+    labels = {t["id"]: t["label"] for t in await list_teams()}
+    for r in rows:
+        r["team_name"] = labels.get(r["team_id"], r["team_name"])
+        r["created_by_name"] = display_name(r)
+        r.pop("first_name", None); r.pop("last_name", None)
+    return rows
+
+
+async def revoke_invite(invite_id: int) -> bool:
+    rows = await execute_fetch("UPDATE team_invites SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL RETURNING id",
+                               (int(time.time()), invite_id))
+    return bool(rows)
+
+
+async def redeem_invite(code: str) -> dict | None:
+    """Geçerli davetin kullanım sayısını TEK ifadede artırır (tek kullanımlık davet iki kez kullanılamaz)
+    ve ekibi döner; geçersiz/süresi dolmuş/iptal/tükenmiş ya da ekibi silinmişse None."""
+    if not code or len(code) > 200:
+        return None
+    rows = await execute_fetch(
+        "UPDATE team_invites SET uses = uses + 1 WHERE code_hash = ? AND revoked_at IS NULL AND expires_at > ? "
+        "AND (max_uses IS NULL OR uses < max_uses) "
+        "AND EXISTS (SELECT 1 FROM teams t WHERE t.id = team_invites.team_id) RETURNING team_id",
+        (_invite_hash(code), int(time.time())))
+    return await get_team(rows[0]["team_id"]) if rows else None
 
 
 async def set_user_role(user_id: int, role: str):
@@ -673,6 +1184,8 @@ async def set_user_role(user_id: int, role: str):
     current = await get_user_role(user_id)
     if current is None:
         raise ValueError("Kullanıcı bulunamadı")
+    if role in ("owner", "admin") and not await is_in_team(user_id):
+        raise TeamRuleError("Owner ve admin rolü yalnızca en az bir ekipte olan kişiye verilebilir — önce bir ekibe ekleyin")
     if role != "owner":
         row = await fetch_one("SELECT email FROM users WHERE id = ?", (user_id,))
         if row and _is_permanent(row["email"]):
@@ -688,8 +1201,81 @@ async def set_user_role(user_id: int, role: str):
             raise LastOwnerError("Son kalan owner düşürülemez — önce başka birini owner yapın")
         if await get_user_role(user_id) == "owner":
             raise LastOwnerError("Son kalan owner düşürülemez — önce başka birini owner yapın")
+    elif role in ("owner", "admin"):
+        # eşzamanlı "son ekibinden çıkar"a karşı koşul UPDATE'in içinde
+        await execute("UPDATE users SET role = ? WHERE id = ? AND EXISTS "
+                      "(SELECT 1 FROM team_members m WHERE m.user_id = users.id)", (role, user_id))
+        if await get_user_role(user_id) != role:
+            raise TeamRuleError("Owner ve admin rolü yalnızca en az bir ekipte olan kişiye verilebilir — önce bir ekibe ekleyin")
     else:
         await execute("UPDATE users SET role = ? WHERE id = ?", (role, user_id))
+
+
+# ---------------------------------------------------------------------------
+# HESABI KALICI SİLME (owner) — iz bırakmadan
+# ---------------------------------------------------------------------------
+# Başkalarına ait kayıtlarda kişiyi e-postayla anan alanlar: satır SİLİNMEZ, alan NULL yapılır
+# (panelde "—"). Yeni bir tabloya kişi e-postası yazan bir sütun eklersen BURAYA DA EKLE.
+EMAIL_REF_COLUMNS = [
+    ("market_decision", "decided_by"),
+    ("checklist_items", "checked_by"), ("checklist_items", "created_by"),
+    ("checklists", "locked_by"), ("checklist_events", "by_email"),
+    ("checklist_template", "updated_by"), ("keyword_analysis", "fetched_by"),
+    ("proof_assets", "approved_by"), ("portfolio_runs", "run_by"), ("learning_events", "recorded_by"),
+    ("supplier_scores", "scored_by"), ("creative_deliverables", "owner"), ("launch_checkpoints", "entered_by"),
+]
+# Kişinin KENDİ satırları (user_id ile) — tamamen silinir.
+USER_ID_TABLES = ["sessions", "user_thresholds", "user_query_log", "market_decision",
+                  "training_completions", "training_assignments", "team_members", "competency_forms"]
+# Başkalarına ait kayıtlarda kişiyi id ile anan alanlar: NULL yapılır.
+ID_REF_COLUMNS = [("training_lessons", "created_by"), ("team_invites", "created_by")]
+
+
+def _scrub_json(value, email: str):
+    if isinstance(value, dict):
+        return {k: _scrub_json(v, email) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_scrub_json(v, email) for v in value]
+    if isinstance(value, str) and value.strip().lower() == email:
+        return None
+    return value
+
+
+async def delete_user_completely(user_id: int) -> dict:
+    """
+    Hesabı ve kişiye ait her şeyi siler: oturumlar, eşikler, arama geçmişi, kararlar, kendi
+    kontrol listeleri (maddeleri + olayları), eğitim tamamlamaları/atamaları, ekip üyelikleri, hesap. Başkalarının
+    kayıtlarındaki referanslar (onaylar, eklediği dersler, olay kayıtları) NULL'lanır; yer tutucu yok.
+    Koruma kuralları (kalıcı owner, son owner, kendi hesabı) çağıran tarafta (index.py) uygulanır.
+    """
+    row = await fetch_one("SELECT id, email FROM users WHERE id = ?", (user_id,))
+    if not row:
+        raise ValueError("Kullanıcı bulunamadı")
+    email = (row["email"] or "").strip().lower()
+    # önce oturumlar: silme sürerken giriş yapılamasın
+    await execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+    await forum.delete_user_content(user_id)   # forum: kendi başlıkları (cevaplarıyla), cevapları, oy/kayıt/görüntüleme
+    own_lists = [r["id"] for r in await fetch_all("SELECT id FROM checklists WHERE user_id = ?", (user_id,))]
+    for cid in own_lists:
+        await execute("DELETE FROM checklist_items WHERE checklist_id = ?", (cid,))
+        await execute("DELETE FROM checklist_events WHERE checklist_id = ?", (cid,))
+    await execute("DELETE FROM checklists WHERE user_id = ?", (user_id,))
+    for t in USER_ID_TABLES:
+        await execute(f"DELETE FROM {t} WHERE user_id = ?", (user_id,))
+    for t, col in ID_REF_COLUMNS:
+        await execute(f"UPDATE {t} SET {col} = NULL WHERE {col} = ?", (user_id,))
+    for t, col in EMAIL_REF_COLUMNS:
+        await execute(f"UPDATE {t} SET {col} = NULL WHERE LOWER({col}) = ?", (email,))
+    # olay ayrıntılarındaki (JSON) e-posta referansları, ör. kilit açma olayındaki "önceki onaylayan"
+    for ev in await fetch_all("SELECT id, details_json FROM checklist_events WHERE LOWER(details_json) LIKE ?",
+                              (f"%{email}%",)):
+        try:
+            cleaned = json.dumps(_scrub_json(json.loads(ev["details_json"]), email), ensure_ascii=False)
+        except (TypeError, ValueError):
+            cleaned = None
+        await execute("UPDATE checklist_events SET details_json = ? WHERE id = ?", (cleaned, ev["id"]))
+    await execute("DELETE FROM users WHERE id = ?", (user_id,))
+    return {"id": user_id, "email": email, "deleted_checklists": len(own_lists)}
 
 
 # ---------------------------------------------------------------------------
@@ -707,30 +1293,59 @@ async def _lesson_assignees(lesson_ids: list[int]) -> dict[int, list[int]]:
     return out
 
 
+async def _lesson_team_ids(lesson_ids: list[int]) -> dict[int, list[int]]:
+    if not lesson_ids:
+        return {}
+    marks = ", ".join("?" * len(lesson_ids))
+    rows = await fetch_all(f"SELECT lesson_id, team_id FROM training_lesson_teams WHERE lesson_id IN ({marks})",
+                           tuple(lesson_ids))
+    out: dict[int, list[int]] = {i: [] for i in lesson_ids}
+    for r in rows:
+        out.setdefault(r["lesson_id"], []).append(r["team_id"])
+    return out
+
+
+def _mode(row: dict) -> str:
+    m = row.get("assign_mode")
+    return m if m in ("all", "teams", "users") else ("all" if row.get("assign_all") else "users")
+
+
 async def list_lessons_all() -> list[dict]:
     rows = await fetch_all("SELECT * FROM training_lessons ORDER BY sort_order, id")
     assignees = await _lesson_assignees([r["id"] for r in rows])
+    teams = await _lesson_team_ids([r["id"] for r in rows])
     for r in rows:
-        r["assign_all"] = bool(r["assign_all"])
-        r["assignee_ids"] = sorted(assignees.get(r["id"], []))
+        r["assign_mode"] = _mode(r)
+        r["assign_all"] = r["assign_mode"] == "all"
+        r["assignee_ids"] = sorted(assignees.get(r["id"], [])) if r["assign_mode"] == "users" else []
+        r["team_ids"] = sorted(teams.get(r["id"], [])) if r["assign_mode"] == "teams" else []
     return rows
+
+
+# Ders kime görünür (DİNAMİK): tüm ekipler | kişinin ŞU ANKİ ekiplerinden biri | kişisel atama.
+# Ekip dışı kişi (hiçbir ekipte değil) hiçbir ders görmez — çağıranlar ayrıca denetler.
+_LESSON_VISIBLE_SQL = """(l.assign_mode = 'all'
+    OR (l.assign_mode = 'teams' AND EXISTS (SELECT 1 FROM training_lesson_teams lt, team_members m, teams mt
+        WHERE lt.lesson_id = l.id AND m.user_id = ? AND mt.id = m.team_id
+          AND (lt.team_id = m.team_id OR lt.team_id = mt.parent_id)))
+    OR (l.assign_mode = 'users' AND EXISTS (SELECT 1 FROM training_assignments a
+        WHERE a.lesson_id = l.id AND a.user_id = ?)))"""
 
 
 async def list_lessons_for_user(user_id: int) -> list[dict]:
     """Yalnızca kullanıcıya atanmış dersler (herkese atananlar + kişisel atamalar)."""
-    return await fetch_all(
-        """SELECT l.* FROM training_lessons l
-           WHERE l.assign_all = 1
-              OR EXISTS (SELECT 1 FROM training_assignments a WHERE a.lesson_id = l.id AND a.user_id = ?)
-           ORDER BY l.sort_order, l.id""", (user_id,))
+    # Eğitim yalnızca EKİP üyeleri içindir: ekip dışı kişi hiçbir ders görmez.
+    if not await is_in_team(user_id):
+        return []
+    return await fetch_all(f"SELECT l.* FROM training_lessons l WHERE {_LESSON_VISIBLE_SQL} ORDER BY l.sort_order, l.id",
+                           (user_id, user_id))
 
 
 async def is_lesson_assigned(lesson_id: int, user_id: int) -> bool:
-    row = await fetch_one(
-        """SELECT 1 AS ok FROM training_lessons l
-           WHERE l.id = ? AND (l.assign_all = 1
-              OR EXISTS (SELECT 1 FROM training_assignments a WHERE a.lesson_id = l.id AND a.user_id = ?))""",
-        (lesson_id, user_id))
+    if not await is_in_team(user_id):
+        return False
+    row = await fetch_one(f"SELECT 1 AS ok FROM training_lessons l WHERE l.id = ? AND {_LESSON_VISIBLE_SQL}",
+                          (lesson_id, user_id, user_id))
     return bool(row)
 
 
@@ -738,35 +1353,42 @@ async def get_lesson(lesson_id: int) -> dict | None:
     return await fetch_one("SELECT * FROM training_lessons WHERE id = ?", (lesson_id,))
 
 
-async def _replace_assignments(lesson_id: int, assignee_ids: list[int]):
+async def _replace_assignments(lesson_id: int, data: dict):
+    mode = data.get("assign_mode") or "all"
     await execute("DELETE FROM training_assignments WHERE lesson_id = ?", (lesson_id,))
-    for uid in sorted(set(assignee_ids)):
+    await execute("DELETE FROM training_lesson_teams WHERE lesson_id = ?", (lesson_id,))
+    for uid in sorted(set(data.get("assignee_ids") or [])) if mode == "users" else []:
         await execute("INSERT INTO training_assignments (lesson_id, user_id) VALUES (?, ?)", (lesson_id, uid))
+    for tid in sorted(set(data.get("team_ids") or [])) if mode == "teams" else []:
+        await execute("INSERT INTO training_lesson_teams (lesson_id, team_id) VALUES (?, ?)", (lesson_id, tid))
 
 
 async def create_lesson(data: dict, created_by: int) -> int:
     now = int(time.time())
     lesson_id = await execute_returning_id(
-        """INSERT INTO training_lessons (title, description, video_url, sort_order, due_date, assign_all,
-           created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        """INSERT INTO training_lessons (title, description, video_url, sort_order, due_date, assign_all, assign_mode,
+           created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (data["title"], data.get("description") or "", data.get("video_url") or None, data.get("sort_order", 0),
-         data.get("due_date") or None, 1 if data.get("assign_all", True) else 0, created_by, now, now))
-    await _replace_assignments(lesson_id, [] if data.get("assign_all", True) else data.get("assignee_ids", []))
+         data.get("due_date") or None, 1 if data["assign_mode"] == "all" else 0, data["assign_mode"],
+         created_by, now, now))
+    await _replace_assignments(lesson_id, data)
     return lesson_id
 
 
 async def update_lesson(lesson_id: int, data: dict):
     await execute(
         """UPDATE training_lessons SET title = ?, description = ?, video_url = ?, sort_order = ?, due_date = ?,
-           assign_all = ?, updated_at = ? WHERE id = ?""",
+           assign_all = ?, assign_mode = ?, updated_at = ? WHERE id = ?""",
         (data["title"], data.get("description") or "", data.get("video_url") or None, data.get("sort_order", 0),
-         data.get("due_date") or None, 1 if data.get("assign_all", True) else 0, int(time.time()), lesson_id))
-    await _replace_assignments(lesson_id, [] if data.get("assign_all", True) else data.get("assignee_ids", []))
+         data.get("due_date") or None, 1 if data["assign_mode"] == "all" else 0, data["assign_mode"],
+         int(time.time()), lesson_id))
+    await _replace_assignments(lesson_id, data)
 
 
 async def delete_lesson(lesson_id: int):
     await execute("DELETE FROM training_completions WHERE lesson_id = ?", (lesson_id,))
     await execute("DELETE FROM training_assignments WHERE lesson_id = ?", (lesson_id,))
+    await execute("DELETE FROM training_lesson_teams WHERE lesson_id = ?", (lesson_id,))
     await execute("DELETE FROM training_lessons WHERE id = ?", (lesson_id,))
 
 

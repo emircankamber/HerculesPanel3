@@ -156,8 +156,8 @@ gerçek bir keyword'le test et (henüz denenmedi).
   `user_query_log` tabloları `user_id` ile izole. Ham SellerSprite verisi
   (`keyword_analysis`) paylaşımlı kalabilirdi ama artık önbellek okunmadığı
   için bu ayrımın önemi kalmadı.
-- **İSTİSNA — Ekip Aktivitesi (yalnızca owner):** `GET /api/team/activity` (`require_owner`;
-  admin/member 403) tüm kullanıcıların `user_query_log` ve `market_decision` kayıtlarını
+- **İSTİSNA — Ekip Aktivitesi (yalnızca owner, Ekip Yönetimi → Aktivite):** `GET /api/team/activity` (`require_owner`;
+  admin/member 403; `team_id` filtresi) ŞU AN en az bir ekipte olan kullanıcıların `user_query_log` ve `market_decision` kayıtlarını
   kişi/tarih/karar/keyword filtresi ve kişi başına özetle döner (özet varsayılan TÜM ZAMANLAR;
   since/until verilirse özet de listeler de yalnızca o aralık). SALT OKUNUR: bu
   bölüm için yazma ucu yok; karar/geçmiş silme uçları zaten yalnızca isteği yapanın KENDİ
@@ -278,8 +278,8 @@ yüzden backend'e hiç bağlanmamalı, sahte veri olur.
   dokunmaz). Hiç kullanıcı yokken ilk kayıt olan owner olur.
 - **Yetki SUNUCUDA:** `index.py` → `require_user` (gerçek hesap şart; auth kapalıyken
   401), `require_staff` (owner/admin), `require_owner`. Arayüzde gizlemek yalnızca kolaylık.
-  - Member yalnızca kendisine atanan dersleri görür (`assign_all=1` ya da
-    `training_assignments`'ta kaydı olanlar) ve yalnızca KENDİ tamamlamasını değiştirir:
+  - Member yalnızca kendisine atanan dersleri görür (bkz. "Eğitim ataması" — tüm ekipler / ekiplerinden biri /
+    kişisel; ekip dışı hiçbirini) ve yalnızca KENDİ tamamlamasını değiştirir:
     `/api/training/lessons/{id}/complete` gövdesinde user_id YOK, oturumdan alınır;
     atanmamış derse 404.
   - Rolleri yalnızca owner'lar değiştirir (`/api/users/{id}/role`: owner|admin|member;
@@ -298,6 +298,130 @@ yüzden backend'e hiç bağlanmamalı, sahte veri olur.
   (`rel="noopener noreferrer"`).
 - Tablolar: `training_lessons`, `training_assignments`, `training_completions`
   (`completed_at` zaman damgası). Ders silinince atama/tamamlamalar da silinir.
+
+## Çoklu ekip, Ekip Yönetimi & kalıcı hesap silme (yalnızca owner)
+
+- **Model:** `teams` (ad, created_at) + `team_members` (team_id, user_id, added_at). Bir kişi birden fazla ekipte
+  olabilir; HİÇBİR ekipte olmayan = **ekip dışı** (paneli normal kullanır: analiz, karar, kendi geçmişi/listeleri;
+  ekip özelliklerinde görünmez). Roller (owner/admin/member) GENEL, ekibe bağlı değil.
+- **Migrasyon (bir kez):** `schema_flags.teams_seeded` işareti ÖNCE yazılır (eşzamanlı sunucusuz örneklerde tek
+  kurulum; ekipler sonradan silinse de yeniden kurulmaz), "Genel" oluşturulur, mevcut TÜM kullanıcılar eklenir.
+  Önceki tekli `users.in_team` sütunu varsa dönüştürülür (1/NULL → Genel, 0 → ekip dışı); sütun kaldı ama artık
+  OKUNMAZ/YAZILMAZ. `_ensure_staff_in_team()` her açılışta ekipsiz owner/admin/`OWNER_EMAILS`'i varsayılan
+  (en eski) ekibe ekler. Yeni kayıt ekip dışı başlar; owner olarak kaydolan (ilk kullanıcı / `OWNER_EMAILS`)
+  varsayılan ekibe girer (hiç ekip yoksa "Genel" oluşturulur).
+- **Hiyerarşi (iki seviye):** `teams.parent_id` (`_add_column_if_missing`; NULL = ana ekip; mevcut ekipler ana ekip
+  kaldı, üyelik değişmedi). Alt ekibin altına ekip açılamaz (409); birden fazla ana ekip olabilir. **Kalıtım
+  hesaplanır, satır yazılmaz:** `team_members` yalnızca DOĞRUDAN üyelik; alt ekip üyesi ana ekibin de üyesi sayılır
+  (`db._effective`, `list_users().team_ids` = etkin, `direct_team_ids` = doğrudan). `team_member_ids(ana)` = doğrudan +
+  tüm alt ekiplerin üyeleri, `team_member_ids(alt)` = yalnızca kendisi → Aktivite, ilerleme, Yetenek Haritası
+  filtreleri buradan. Ana ekibe atanan ders alt ekip üyelerine de görünür (`_LESSON_VISIBLE_SQL` `mt.parent_id`),
+  alt ekibe atanan yalnızca o alt ekibe. `DELETE /api/users/{id}/teams/{team}`: ana ekipten çıkarma o ana ekibin TÜM
+  alt ekiplerinden de çıkarır (`removed` döner; panel onayda alt ekipleri listeler); `POST …/teams/{team}` ekler.
+  (`POST /api/users/{id}/teams {team_ids}` doğrudan kümeyi eşitler, zincirleme çıkarma yapmaz.) Taşıma
+  `PUT /api/teams/{id} {parent_id}` (gönderilirse; null = ana ekip yap): alt ekipleri olan ana ekip taşınamaz, hedef
+  ana ekip olmalı, kendi altına olmaz (409; koşul UPDATE'te de). Alt ekipleri olan ana ekip silinemez (409). Ad
+  benzersizliği aynı düzeyde (kardeşler arasında). Etiket `"Ana › Alt"` (`list_teams().label`, filtre/seçim listeleri
+  `_team_opts`). Davet alt ekip için de üretilir; davetle kaydolan o alt ekibe (dolayısıyla ana ekibe) katılır.
+  Owner/admin koruması etkin üyelikle: yalnızca alt ekipteki admin ana ekipten çıkarılamaz (409).
+- **Ekip yalnızca şunları kapsar** (filtre SUNUCUDA, `db.team_member_ids(team_id=None)` = en az bir ekipte olanlar):
+  Aktivite (arama/karar/özet; `team_id` filtresi, varsayılan tüm ekipler; tüm ekiplerden çıkarılanınki görünmez,
+  geri eklenince kayıtlar silinmediği için geri gelir), eğitim, owner/admin'in BAŞKALARININ kontrol listelerini
+  görmesi (sahibi hiçbir ekipte değilse 404; kişi kendi listesini her zaman görür).
+- **Rol kuralları:** owner/admin yalnızca en az bir ekipte olana (`TeamRuleError` → 409); owner/admin (ve kalıcı owner)
+  SON ekibinden çıkarılamaz → 409. Koşullar UPDATE'lerde de var (`EXISTS team_members`) + sonradan denetim/geri alma.
+- **Ekip Yönetimi sayfası** (menü "Ekip Yönetimi", yalnızca owner; admin/member tüm uçlarda 403):
+  - Ekipler: `GET/POST /api/teams`, `PUT/DELETE /api/teams/{id}`. Ad boşluklardan temizlenir, ≤60, büyük/küçük harf
+    duyarsız benzersiz (422). Silme kullanıcı ve verilerine DOKUNMAZ; yalnızca üyelikler, `training_lesson_teams`
+    ve ekibin davetleri silinir. Bir owner/admin'in TEK ekibiyse 409 (`delete_blockers`). Yalnızca o ekibe atanmış
+    dersler `exclusive_lessons` olarak döner → onay penceresinde uyarı.
+  - Üyeler: `POST /api/users/{id}/teams {team_ids}` kümeyi eşitler (boş = ekip dışı). Rol değişikliği (`/role`) bu
+    sekmeye taşındı (Eğitim sayfasında artık yok). "Ekip dışı" filtresi en yeniden eskiye; son 7 günde kaydolana "yeni".
+  - Davetler: `POST /api/invites {team_id, multi_use, days=7 (1–90)}` düz kodu YALNIZCA bir kez döner; sunucuda
+    `sha256` (`team_invites.code_hash`). `GET /api/invites` aktifleri (iptal/süre/kullanım hakkı), `POST
+    /api/invites/{id}/revoke`. Kayıt: `POST /api/auth/register {invite}` → `redeem_invite` tek `UPDATE … RETURNING`
+    ile kullanımı artırır (tek kullanımlık iki kez kullanılamaz; `db_adapter.execute_fetch` COMMIT eder — `fetch_all`
+    etmez). Geçersiz/süresi dolmuş/iptal davet kaydı ENGELLEMEZ → ekip dışı (`invite.status="invalid"`). Davet hesap
+    oluşturulduktan SONRA harcanır. Panel `?invite=` kodunu sessionStorage'a alıp adres çubuğundan siler.
+  - Aktivite: eski "Ekip Aktivitesi" (`GET /api/team/activity`) + `team_id` filtresi; özet ekip adlarıyla.
+  - Yetenek Haritası: bkz. "Ad Soyad, Profil & Yetkinlik Formu".
+  - Owner menü rozeti: `/api/auth/status.new_outsiders_7d` (son 7 günde kaydolan ekip dışı; owner değilse null).
+- **Eğitim ataması** `training_lessons.assign_mode` = `all` (tüm ekipler) | `teams` (`training_lesson_teams`,
+  DİNAMİK: ekibe sonradan katılan görür, çıkan görmez) | `users` (`training_assignments`). Eski istemci
+  `assign_all` gönderirse mod ondan türetilir. Ekip dışı hiçbir ders görmez/tamamlayamaz; tamamlama kayıtları
+  üyelik değişince SİLİNMEZ. İlerleme `GET /api/training/progress?team_id=` (atananlar dinamik hesaplanır).
+- **Kalıcı silme:** `POST /api/users/{id}/delete {confirm_email}` (onay e-postası tutmazsa 422; kendi hesabı,
+  kalıcı owner, son owner → 409). `db.delete_user_completely`: oturumlar, eşikler, geçmiş, kararlar, kendi kontrol
+  listeleri (madde + olaylarıyla), eğitim tamamlama/atamaları, ekip üyelikleri, yetkinlik formu ve hesap SİLİNİR;
+  yer tutucu YOK.
+  Başkalarının kayıtlarındaki referanslar silinmez, NULL'lanır (`EMAIL_REF_COLUMNS`, `ID_REF_COLUMNS` — eklediği
+  dersler, oluşturduğu davetler — ve `checklist_events.details_json`) → panelde "—". **Kişi e-postası/id'si yazan
+  yeni bir sütun eklersen `EMAIL_REF_COLUMNS` / `ID_REF_COLUMNS` / `USER_ID_TABLES`'a da ekle.** Aynı e-posta sonra
+  yeni (ekip dışı, member) hesap olarak kaydolabilir.
+
+## Ad Soyad, Profil & Yetkinlik Formu
+
+- **Ad soyad zorunlu:** kayıtta `first_name`/`last_name` (boşluk temizlenir, 1–60, yoksa 422). `users`'a
+  `first_name, last_name, username, title, phone` sütunları `_add_column_if_missing` ile; `username` için
+  `ux_users_username` (LOWER) benzersiz indeksi. **Kapı SUNUCUDA:** `require_auth` adı/soyadı olmayan (eski) hesaba
+  428 verir; yalnızca profil uçları (`require_session` → `require_profile_user`) muaf. Panel 428'de ve
+  `auth/status.needs_name`'de ad soyad ekranını açar (kapatılamaz; çıkış yapılabilir).
+- **E-posta yerine "Ad Soyad" her yerde:** `db.display_name()`. Kayıtlarda e-postayla anılan kişiler (kontrol listesi
+  işaretleyen/onaylayan/olaylar, şablonu güncelleyen, liste sahibi `owner_name`) çıktıda `index._person()` ile ada
+  çevrilir — e-posta ASLA dönmez (kişi yoksa/adı yoksa "—"). E-posta yalnızca OWNER ekranlarında ikincil bilgi:
+  `/api/users` ve `/api/training/progress` owner olmayana `email` göndermez; Aktivite/Ekip Yönetimi'nde ad + e-posta.
+  Veritabanında e-posta sütunları (checked_by vb.) aynen kalır; dönüşüm yalnızca çıktıda.
+- **Profil** (`GET/PUT /api/profile`, herkes yalnızca KENDİSİ): ad, soyad, kullanıcı adı (3–30, `[a-z0-9._-]`, küçük
+  harfe çevrilir, büyük/küçük harf duyarsız benzersiz → 409; forumda görünecek, GİRİŞİ DEĞİŞTİRMEZ — giriş e-postayla),
+  unvan (≤80), telefon (opsiyonel). PUT yalnızca gönderilen alanları değiştirir. Departman serbest metni YOK → kişinin
+  ekipleri gösterilir. Fotoğraf yok, baş harflerden avatar (`app.js::initials`). **TC kimlik, doğum tarihi, adres,
+  medeni durum, sağlık gibi kişisel veri alanları bilinçli olarak YOK — ekleme.** Hesap & Güvenlik:
+  `POST /api/profile/password` (mevcut şifre yanlışsa 403; değişince bu oturum dışındakiler kapanır).
+- **Yetkinlik formu** — şema TEK kaynak `api/competency.py` (15 bölüm; `GET /api/competency/schema`, panel buradan
+  çizer). Cevaplar düz sözlük; 04–13 bölümlerinin seviyeleri tek `levels` sözlüğünde (madde → 1–5). `clean_answers()`
+  bilinmeyeni atar, seçenek/seviye doğrular, metni kırpar. Tablo `competency_forms` (user_id PK, answers_json, status
+  draft|submitted, updated_at, submitted_at). `PUT /api/competency/me` = otomatik taslak (panel ~0,9 sn debounce),
+  `POST /api/competency/me/submit` = "gönderildi" + tarih; onay akışı YOK, gönderdikten sonra da düzenlenebilir
+  (durum gönderildi kalır, panel "gönderimden sonra düzenlendi" der). Bölüm "tamam" = içindeki tüm alanlar dolu.
+  **Görünürlük SUNUCUDA:** `GET /api/competency/users/{id}` yalnızca kişinin kendisi ya da OWNER; admin/üye 403
+  (var olmayan id'de bile 403 — varlık sızmaz; owner'a 404). Hesap silinince form da silinir (`USER_ID_TABLES`).
+  Tasarımdaki radar/skor/"Yönetici Notu"/rol eşleşmesi kartı uydurma veri olacağı için YOK.
+- **Yetenek Haritası** (Ekip Yönetimi sekmesi, `GET /api/skills/map`, `require_owner`): kişi × 37 madde (04–13).
+  Filtreler: `team` (all = en az bir ekipte | none = ekip dışı | ekip id), `field` (madde anahtarı | `s:<bölüm>` | boş),
+  `min_level` (madde seçiliyse o maddede; değilse gösterilen maddelerden EN AZ BİRİNDE ≥). Haritada yalnızca formunu
+  GÖNDERENLER; göndermeyenler (hiç başlamamış / taslak) `pending` listesinde. Kişiye tıklayınca salt okunur tam form.
+
+## Topluluk & Forum (`api/forum.py` + `/api/forum/*`)
+
+- **MCP çağrısı YOK.** Giriş yapmış herkes (ekip dışı dahil, ad soyad kapısından sonra — `require_user`) okur,
+  başlık açar, cevap yazar. Başlık türleri: Soru / Tartışma / Bülten (herkes açabilir). Son 3 bülten şeritte.
+- **Görünürlük SUNUCUDA:** `visibility` = `public` (varsayılan) | `team`. Hiçbir ekipte olmayan kullanıcı `team`
+  başlıkları HİÇBİR yerde göremez: liste/arama/etiket/kategori sayıları/istatistik/bülten şeridi/katkıcılar
+  (SQL'de süzülür, `forum.visible_threads`) ve doğrudan link + cevap/oy/kayıt/çözüm uçları (`index._visible_thread`
+  / `_visible_reply` → 404, var olmayanla aynı yanıt). Ekip dışı `team` başlık açamaz/düzenleyemez (403). Tüm
+  ekiplerden çıkarılan kişi kendi `team` başlığını da göremez. Yeni bir forum ucu eklersen bu yardımcıları KULLAN.
+- **Yetkiler:** yazar kendi başlık/cevabını düzenler ve siler (owner dahil başkası METNİ düzenleyemez); owner/admin
+  her başlığı ve cevabı siler, sabitler, kilitler. Kilitli başlığa cevap → 423 (koşul INSERT'in içinde). Çözüm:
+  başlık sahibi ya da owner/admin işaretler/kaldırır (bültende 409; cevap başka başlığınsa 422); çözüm cevabı
+  silinirse "Çözüldü" kalkar. Kategoriler: varsayılan 6 + "Genel" bir kez tohumlanır (`schema_flags.forum_seeded`),
+  ekleme/adlandırma/silme yalnızca owner (içinde başlık olan kategori silinmez → 409).
+- **Faydalı:** `forum_votes` birincil anahtarı (tür, id, kişi) → kişi başına bir; ikinci oy 409, kendi içeriğine 403,
+  DELETE geri alır. **Görüntülenme** = başlığı açan BENZERSİZ kişi (`forum_views`). **Kaydet** = "Takip Edilen
+  Başlıklar" (`forum_saves`). Sekmeler: Tümü (sabitler üstte, son etkinliğe göre), Çözülenler, Sıcak (son 7 günde
+  cevap + faydalı oyu sayısına göre, yalnızca etkileşimi olanlar), Bültenler; ayrıca kayıtlılar, kategori, etiket, arama
+  (başlık + metin + etiket, Türkçe harf duyarsız).
+- **Gerçek veri:** istatistikte yalnızca toplam ve çözülen başlık; "Haftanın Katkıcıları" = son 7 gündeki cevap ve
+  çözüm seçilen cevap sayısı (puan yok); popüler etiketler gerçek sayım. Tasarımdaki aktif satıcı/çözüm oranı/yanıt
+  süresi, canlı yayın kartı, "Detay Raporu"/CPC kutuları uydurma olacağı için YOK.
+- **Metin DÜZ METİN:** sunucu ham saklar (kontrol karakterleri atılır, uzunluk sınırları). Panel `app.js::forumText`
+  her parçayı `esc()` ile kaçırır, yalnızca `http/https` URL'leri `<a target=_blank rel="noopener noreferrer nofollow">`
+  yapar (`javascript:` vb. düz metin kalır), satır sonları `white-space: pre-wrap`. Dosya yükleme yok. Etiketler
+  `[\w.+-]` (≤5, ≤30 karakter; `#` atılır, boşluk → tire, harf duyarsız tekilleştirme).
+- **Paylaşım sınırı** (`forum.POST_LIMITS`/`THREAD_LIMITS`): başlık + cevap 1 dakikada 5, 1 saatte 40; yeni başlık
+  10 dakikada 3 → 429. Düzenleme sınırlanmaz.
+- Doğrudan link `#forum/<id>`. Hesap silinince kişinin başlıkları (cevaplarıyla), cevapları, oy/kayıt/görüntülemeleri
+  silinir (`forum.delete_user_content`). Forum küçük ölçek varsayar: liste görünür başlıkların tamamını çekip
+  Python'da süzer/sayfalar (sayfa 10).
 
 ## Ön öneri kuralı (Uygun / Sınırda / Elenmiş)
 
