@@ -384,3 +384,6 @@ select.field{padding-right:28px;}
 .sk-table td:not(.sk-name){text-align:center;}
 .sk-table td.sk-name,.sk-table th.sk-name{position:sticky;left:0;background:var(--surface-lowest);z-index:1;min-width:150px;max-width:220px;}
 .sk-table td.sk-dim .lv{opacity:.35;}
+
+/* Forum */
+.fm-sol{background:var(--primary-soft);}

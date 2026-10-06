@@ -58,6 +58,7 @@ import database as db
 import checklist as ckl
 import launch_report as lr
 import competency as comp
+import forum
 import excel_export
 import supplier_scoring as sup
 import launch_control as lc
@@ -1850,6 +1851,386 @@ async def users_set_teams(target_id: int, req: UserTeamsIn, user: dict = Depends
     except ValueError as e:
         raise HTTPException(422, str(e))
     return {"ok": True, "id": target_id, "team_ids": await db.user_team_ids(target_id)}
+
+
+# ---------------------------------------------------------------------------
+# TOPLULUK & FORUM — giriş yapmış herkes (ekip dışı dahil). MCP çağrısı YOK.
+# "Sadece ekip üyeleri" başlıkları hiçbir ekipte olmayan kişiye HİÇBİR uçta görünmez (liste, arama,
+# bülten, istatistik, doğrudan link, cevap/oy/kayıt) -> 404. Kural her uçta `_visible_thread`'de.
+# ---------------------------------------------------------------------------
+async def _forum_viewer(user: dict) -> dict:
+    return {"id": user["user_id"], "role": user["role"], "staff": user["role"] in ("owner", "admin"),
+            "can_see_team": await db.is_in_team(user["user_id"])}
+
+
+def _forum_author(row: dict, uid_key: str = "user_id") -> dict:
+    return {"id": row.get(uid_key), "name": db.display_name(row) or "—", "title": row.get("author_title") or ""}
+
+
+def _excerpt(text: str, n: int = 280) -> str:
+    t = " ".join((text or "").split())
+    return t if len(t) <= n else t[: n - 1].rstrip() + "…"
+
+
+def _thread_out(t: dict, cats: dict, v: dict, full: bool = False) -> dict:
+    sol = t.get("solution")
+    out = {"id": t["id"], "title": t["title"], "excerpt": _excerpt(t["body"]), "kind": t["kind"],
+           "kind_label": forum.KINDS.get(t["kind"], t["kind"]), "visibility": t["visibility"],
+           "category": {"id": t.get("category_id"), "name": cats.get(t.get("category_id"), "—")},
+           "tags": t.get("tags") or [], "author": _forum_author(t),
+           "created_at": t["created_at"], "last_activity_at": t["last_activity_at"], "edited_at": t.get("edited_at"),
+           "reply_count": t.get("reply_count", 0), "views": t.get("views", 0), "useful": t.get("useful", 0),
+           "voted": bool(t.get("voted")), "saved": bool(t.get("saved")),
+           "pinned": bool(t["pinned"]), "locked": bool(t["locked"]), "solved": bool(t.get("solution_reply_id")),
+           "solution": {"id": sol["id"], "author": _forum_author(sol), "excerpt": _excerpt(sol["body"], 320)} if sol else None,
+           "is_mine": t["user_id"] == v["id"], "can_edit": t["user_id"] == v["id"],
+           "can_delete": t["user_id"] == v["id"] or v["staff"], "can_moderate": v["staff"]}
+    if full:
+        out["body"] = t["body"]
+    return out
+
+
+async def _visible_thread(tid: int, v: dict) -> dict:
+    t = await forum.get_thread(tid)
+    if not forum.visible(t, v["can_see_team"]):
+        raise HTTPException(404, "Başlık bulunamadı")   # kısıtlı başlığın varlığı da sızmaz
+    return t
+
+
+async def _visible_reply(rid: int, v: dict) -> tuple[dict, dict]:
+    r = await forum.get_reply(rid)
+    if not r:
+        raise HTTPException(404, "Cevap bulunamadı")
+    t = await forum.get_thread(r["thread_id"])
+    if not forum.visible(t, v["can_see_team"]):
+        raise HTTPException(404, "Cevap bulunamadı")
+    return r, t
+
+
+async def _all_visible(v: dict) -> tuple[list[dict], dict]:
+    cats = {c["id"]: c["name"] for c in await forum.list_categories()}
+    return await forum.visible_threads(v["can_see_team"], v["id"]), cats
+
+
+def _default_order(t: dict):
+    return (-int(bool(t["pinned"])), -t["last_activity_at"], -t["id"])
+
+
+@app.get("/api/forum/meta")
+async def forum_meta(user: dict = Depends(require_user)):
+    """Kategoriler (görünür başlık sayılarıyla), gerçek istatistikler (toplam / çözülen başlık), son 3 bülten,
+    son 7 günün katkıcıları (cevap + çözüm sayısı) ve popüler etiketler — hepsi YALNIZCA görünür başlıklardan."""
+    v = await _forum_viewer(user)
+    threads, cats = await _all_visible(v)
+    per_cat: dict = {}
+    tag_count: dict = {}
+    for t in threads:
+        per_cat[t.get("category_id")] = per_cat.get(t.get("category_id"), 0) + 1
+        for tag in t["tags"]:
+            k = tag.casefold()
+            cur = tag_count.setdefault(k, {"tag": tag, "count": 0})
+            cur["count"] += 1
+    bulletins = sorted([t for t in threads if t["kind"] == "bulletin"], key=lambda t: (-t["created_at"], -t["id"]))[:3]
+    since = int(time.time()) - forum.HOT_DAYS * 86400
+    contrib = await forum.contributors_since(since, {t["id"] for t in threads})
+    contrib.sort(key=lambda c: (-(c["replies"] + c["solutions"]), -c["solutions"], db.display_name(c["user"]).casefold()))
+    return {
+        "categories": [{"id": c["id"], "name": c["name"], "sort_order": c["sort_order"], "count": per_cat.get(c["id"], 0)}
+                       for c in await forum.list_categories()],
+        "stats": {"total": len(threads), "solved": sum(1 for t in threads if t.get("solution_reply_id"))},
+        "bulletins": [_thread_out(t, cats, v) for t in bulletins],
+        "contributors": [{"author": _forum_author(c["user"]), "replies": c["replies"], "solutions": c["solutions"]}
+                         for c in contrib[:5]],
+        "tags": sorted(tag_count.values(), key=lambda x: (-x["count"], x["tag"].casefold()))[:10],
+        "kinds": forum.KINDS, "can_post_team": v["can_see_team"], "is_staff": v["staff"], "is_owner": v["role"] == "owner",
+        "limits": {"title_min": forum.TITLE_MIN, "title_max": forum.TITLE_MAX, "body_max": forum.BODY_MAX,
+                   "reply_max": forum.REPLY_MAX, "max_tags": forum.MAX_TAGS, "tag_max": forum.TAG_MAX},
+    }
+
+
+@app.get("/api/forum/threads")
+async def forum_threads(tab: str = Query("all", pattern=r"^(all|solved|hot|bulletins|saved|mine)$"),
+                        category: int | None = Query(None, ge=1), tag: str | None = Query(None, max_length=40),
+                        q: str | None = Query(None, max_length=200), page: int = Query(1, ge=1, le=10000),
+                        user: dict = Depends(require_user)):
+    v = await _forum_viewer(user)
+    threads, cats = await _all_visible(v)
+    if category:
+        threads = [t for t in threads if t.get("category_id") == category]
+    if tag:
+        k = tag.strip().lstrip("#").casefold()
+        threads = [t for t in threads if any(x.casefold() == k for x in t["tags"])]
+    if q and q.strip():
+        needle = _tr_fold(q.strip())
+        threads = [t for t in threads if needle in _tr_fold(" ".join([t["title"], t["body"], " ".join(t["tags"])]))]
+    if tab == "solved":
+        threads = [t for t in threads if t.get("solution_reply_id")]
+    elif tab == "bulletins":
+        threads = [t for t in threads if t["kind"] == "bulletin"]
+    elif tab == "saved":
+        threads = [t for t in threads if t["saved"]]
+    elif tab == "mine":
+        threads = [t for t in threads if t["user_id"] == v["id"]]
+    if tab == "hot":
+        score = await forum.interactions_since(int(time.time()) - forum.HOT_DAYS * 86400)
+        threads = [t for t in threads if score.get(t["id"], 0) > 0]
+        threads.sort(key=lambda t: (-score[t["id"]], -t["last_activity_at"], -t["id"]))
+    else:
+        threads.sort(key=_default_order)
+    total = len(threads)
+    pages = max(1, -(-total // forum.PAGE_SIZE))
+    page = min(page, pages)
+    chunk = threads[(page - 1) * forum.PAGE_SIZE: page * forum.PAGE_SIZE]
+    return {"items": [_thread_out(t, cats, v) for t in chunk], "total": total, "page": page, "pages": pages,
+            "page_size": forum.PAGE_SIZE}
+
+
+@app.get("/api/forum/threads/{tid}")
+async def forum_thread(tid: int, user: dict = Depends(require_user)):
+    v = await _forum_viewer(user)
+    await _visible_thread(tid, v)
+    await forum.record_view(tid, v["id"])
+    threads, cats = await _all_visible(v)
+    t = next(x for x in threads if x["id"] == tid)
+    replies = await forum.replies_of(tid, v["id"])
+    out = _thread_out(t, cats, v, full=True)
+    out.update({
+        "can_reply": not t["locked"], "can_mark_solution": t["kind"] != "bulletin" and (t["user_id"] == v["id"] or v["staff"]),
+        "replies": [{"id": r["id"], "body": r["body"], "author": _forum_author(r), "created_at": r["created_at"],
+                     "edited_at": r.get("edited_at"), "useful": r["useful"], "voted": r["voted"],
+                     "is_solution": r["id"] == t.get("solution_reply_id"), "is_mine": r["user_id"] == v["id"],
+                     "can_edit": r["user_id"] == v["id"], "can_delete": r["user_id"] == v["id"] or v["staff"]}
+                    for r in replies],
+    })
+    return out
+
+
+class ThreadIn(BaseModel):
+    title: str = Field(..., max_length=1000)
+    body: str = Field(..., max_length=50_000)
+    kind: str = Field("question", pattern=r"^(question|discussion|bulletin)$")
+    category_id: int = Field(..., ge=1)
+    visibility: str = Field("public", pattern=r"^(public|team)$")
+    tags: list[str] = Field(default_factory=list, max_length=50)
+
+
+async def _clean_thread(req: ThreadIn, v: dict) -> dict:
+    try:
+        d = {"title": forum.clean_text(req.title, "Başlık", forum.TITLE_MIN, forum.TITLE_MAX, single_line=True),
+             "body": forum.clean_text(req.body, "Metin", 1, forum.BODY_MAX),
+             "tags": forum.clean_tags(req.tags), "kind": req.kind, "visibility": req.visibility}
+    except forum.ForumError as e:
+        raise HTTPException(422, str(e))
+    if not await forum.get_category(req.category_id):
+        raise HTTPException(422, "Geçersiz kategori")
+    d["category_id"] = req.category_id
+    if d["visibility"] == "team" and not v["can_see_team"]:
+        raise HTTPException(403, "\"Sadece ekip üyeleri\" başlığını yalnızca bir ekibe üye olanlar açabilir")
+    return d
+
+
+@app.post("/api/forum/threads")
+async def forum_create(req: ThreadIn, user: dict = Depends(require_user)):
+    v = await _forum_viewer(user)
+    d = await _clean_thread(req, v)
+    msg = await forum.rate_limited(v["id"], new_thread=True)
+    if msg:
+        raise HTTPException(429, msg)
+    tid = await forum.create_thread(v["id"], d)
+    return {"ok": True, "id": tid}
+
+
+@app.put("/api/forum/threads/{tid}")
+async def forum_update(tid: int, req: ThreadIn, user: dict = Depends(require_user)):
+    """Yalnızca yazar düzenler (owner/admin silebilir, sabitler, kilitler ama başkasının metnini değiştirmez)."""
+    v = await _forum_viewer(user)
+    t = await _visible_thread(tid, v)
+    if t["user_id"] != v["id"]:
+        raise HTTPException(403, "Yalnızca yazar düzenleyebilir")
+    await forum.update_thread(tid, await _clean_thread(req, v))
+    return {"ok": True, "id": tid}
+
+
+@app.delete("/api/forum/threads/{tid}")
+async def forum_delete(tid: int, user: dict = Depends(require_user)):
+    v = await _forum_viewer(user)
+    t = await _visible_thread(tid, v)
+    if t["user_id"] != v["id"] and not v["staff"]:
+        raise HTTPException(403, "Yalnızca yazar ya da owner/admin silebilir")
+    await forum.delete_thread(tid)
+    return {"ok": True}
+
+
+class FlagIn(BaseModel):
+    value: bool
+
+
+@app.post("/api/forum/threads/{tid}/pin")
+async def forum_pin(tid: int, req: FlagIn, user: dict = Depends(require_staff)):
+    v = await _forum_viewer(user)
+    await _visible_thread(tid, v)
+    await forum.set_flag(tid, "pinned", req.value)
+    return {"ok": True, "pinned": req.value}
+
+
+@app.post("/api/forum/threads/{tid}/lock")
+async def forum_lock(tid: int, req: FlagIn, user: dict = Depends(require_staff)):
+    v = await _forum_viewer(user)
+    await _visible_thread(tid, v)
+    await forum.set_flag(tid, "locked", req.value)
+    return {"ok": True, "locked": req.value}
+
+
+class ReplyIn(BaseModel):
+    body: str = Field(..., max_length=50_000)
+
+
+def _clean_reply(body: str) -> str:
+    try:
+        return forum.clean_text(body, "Cevap", 1, forum.REPLY_MAX)
+    except forum.ForumError as e:
+        raise HTTPException(422, str(e))
+
+
+@app.post("/api/forum/threads/{tid}/replies")
+async def forum_reply(tid: int, req: ReplyIn, user: dict = Depends(require_user)):
+    v = await _forum_viewer(user)
+    t = await _visible_thread(tid, v)
+    body = _clean_reply(req.body)
+    if t["locked"]:
+        raise HTTPException(423, "Başlık kilitli — cevap yazılamaz")
+    msg = await forum.rate_limited(v["id"], new_thread=False)
+    if msg:
+        raise HTTPException(429, msg)
+    rid = await forum.add_reply(tid, v["id"], body)
+    if rid is None:   # bu arada kilitlendi
+        raise HTTPException(423, "Başlık kilitli — cevap yazılamaz")
+    return {"ok": True, "id": rid}
+
+
+@app.put("/api/forum/replies/{rid}")
+async def forum_reply_update(rid: int, req: ReplyIn, user: dict = Depends(require_user)):
+    v = await _forum_viewer(user)
+    r, _ = await _visible_reply(rid, v)
+    if r["user_id"] != v["id"]:
+        raise HTTPException(403, "Yalnızca yazar düzenleyebilir")
+    await forum.update_reply(rid, _clean_reply(req.body))
+    return {"ok": True}
+
+
+@app.delete("/api/forum/replies/{rid}")
+async def forum_reply_delete(rid: int, user: dict = Depends(require_user)):
+    v = await _forum_viewer(user)
+    r, _ = await _visible_reply(rid, v)
+    if r["user_id"] != v["id"] and not v["staff"]:
+        raise HTTPException(403, "Yalnızca yazar ya da owner/admin silebilir")
+    await forum.delete_reply(rid)
+    return {"ok": True}
+
+
+class SolutionIn(BaseModel):
+    reply_id: int | None = None
+
+
+@app.post("/api/forum/threads/{tid}/solution")
+async def forum_solution(tid: int, req: SolutionIn, user: dict = Depends(require_user)):
+    """Başlık sahibi ya da owner/admin bir cevabı "Çözüm" işaretler (reply_id=null kaldırır). Bültende çözüm olmaz."""
+    v = await _forum_viewer(user)
+    t = await _visible_thread(tid, v)
+    if t["user_id"] != v["id"] and not v["staff"]:
+        raise HTTPException(403, "Çözümü yalnızca başlık sahibi ya da owner/admin işaretleyebilir")
+    if t["kind"] == "bulletin":
+        raise HTTPException(409, "Bülten başlıklarında çözüm işaretlenmez")
+    if req.reply_id is not None:
+        r = await forum.get_reply(req.reply_id)
+        if not r or r["thread_id"] != tid:
+            raise HTTPException(422, "Cevap bu başlığa ait değil")
+    await forum.set_solution(tid, req.reply_id)
+    return {"ok": True, "solution_reply_id": req.reply_id}
+
+
+async def _vote(target: str, target_id: int, v: dict, add: bool):
+    if target == "thread":
+        owner_id = (await _visible_thread(target_id, v))["user_id"]
+    else:
+        owner_id = (await _visible_reply(target_id, v))[0]["user_id"]
+    if not add:
+        await forum.remove_vote(target, target_id, v["id"])
+        return {"ok": True, "voted": False}
+    if owner_id == v["id"]:
+        raise HTTPException(403, "Kendi içeriğine \"Faydalı\" veremezsin")
+    if not await forum.add_vote(target, target_id, v["id"]):
+        raise HTTPException(409, "Bu içerik için zaten \"Faydalı\" verdin")
+    return {"ok": True, "voted": True}
+
+
+@app.post("/api/forum/threads/{tid}/vote")
+async def forum_vote_thread(tid: int, user: dict = Depends(require_user)):
+    return await _vote("thread", tid, await _forum_viewer(user), True)
+
+
+@app.delete("/api/forum/threads/{tid}/vote")
+async def forum_unvote_thread(tid: int, user: dict = Depends(require_user)):
+    return await _vote("thread", tid, await _forum_viewer(user), False)
+
+
+@app.post("/api/forum/replies/{rid}/vote")
+async def forum_vote_reply(rid: int, user: dict = Depends(require_user)):
+    return await _vote("reply", rid, await _forum_viewer(user), True)
+
+
+@app.delete("/api/forum/replies/{rid}/vote")
+async def forum_unvote_reply(rid: int, user: dict = Depends(require_user)):
+    return await _vote("reply", rid, await _forum_viewer(user), False)
+
+
+@app.post("/api/forum/threads/{tid}/save")
+async def forum_save(tid: int, user: dict = Depends(require_user)):
+    v = await _forum_viewer(user)
+    await _visible_thread(tid, v)
+    await forum.set_saved(tid, v["id"], True)
+    return {"ok": True, "saved": True}
+
+
+@app.delete("/api/forum/threads/{tid}/save")
+async def forum_unsave(tid: int, user: dict = Depends(require_user)):
+    v = await _forum_viewer(user)
+    await _visible_thread(tid, v)
+    await forum.set_saved(tid, v["id"], False)
+    return {"ok": True, "saved": False}
+
+
+class CategoryIn(BaseModel):
+    name: str | None = Field(None, max_length=200)
+    sort_order: int | None = Field(None, ge=0, le=100000)
+
+
+@app.post("/api/forum/categories")
+async def forum_cat_create(req: CategoryIn, user: dict = Depends(require_owner)):
+    try:
+        return {"ok": True, "id": await forum.create_category(req.name or "")}
+    except forum.ForumError as e:
+        raise HTTPException(422, str(e))
+
+
+@app.put("/api/forum/categories/{cid}")
+async def forum_cat_update(cid: int, req: CategoryIn, user: dict = Depends(require_owner)):
+    if not await forum.get_category(cid):
+        raise HTTPException(404, "Kategori bulunamadı")
+    try:
+        await forum.update_category(cid, req.name, req.sort_order)
+    except forum.ForumError as e:
+        raise HTTPException(422, str(e))
+    return {"ok": True}
+
+
+@app.delete("/api/forum/categories/{cid}")
+async def forum_cat_delete(cid: int, user: dict = Depends(require_owner)):
+    if not await forum.get_category(cid):
+        raise HTTPException(404, "Kategori bulunamadı")
+    if not await forum.delete_category(cid):
+        raise HTTPException(409, "İçinde başlık olan kategori silinemez — önce başlıkları taşıyın")
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------

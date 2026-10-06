@@ -377,6 +377,38 @@ yüzden backend'e hiç bağlanmamalı, sahte veri olur.
   `min_level` (madde seçiliyse o maddede; değilse gösterilen maddelerden EN AZ BİRİNDE ≥). Haritada yalnızca formunu
   GÖNDERENLER; göndermeyenler (hiç başlamamış / taslak) `pending` listesinde. Kişiye tıklayınca salt okunur tam form.
 
+## Topluluk & Forum (`api/forum.py` + `/api/forum/*`)
+
+- **MCP çağrısı YOK.** Giriş yapmış herkes (ekip dışı dahil, ad soyad kapısından sonra — `require_user`) okur,
+  başlık açar, cevap yazar. Başlık türleri: Soru / Tartışma / Bülten (herkes açabilir). Son 3 bülten şeritte.
+- **Görünürlük SUNUCUDA:** `visibility` = `public` (varsayılan) | `team`. Hiçbir ekipte olmayan kullanıcı `team`
+  başlıkları HİÇBİR yerde göremez: liste/arama/etiket/kategori sayıları/istatistik/bülten şeridi/katkıcılar
+  (SQL'de süzülür, `forum.visible_threads`) ve doğrudan link + cevap/oy/kayıt/çözüm uçları (`index._visible_thread`
+  / `_visible_reply` → 404, var olmayanla aynı yanıt). Ekip dışı `team` başlık açamaz/düzenleyemez (403). Tüm
+  ekiplerden çıkarılan kişi kendi `team` başlığını da göremez. Yeni bir forum ucu eklersen bu yardımcıları KULLAN.
+- **Yetkiler:** yazar kendi başlık/cevabını düzenler ve siler (owner dahil başkası METNİ düzenleyemez); owner/admin
+  her başlığı ve cevabı siler, sabitler, kilitler. Kilitli başlığa cevap → 423 (koşul INSERT'in içinde). Çözüm:
+  başlık sahibi ya da owner/admin işaretler/kaldırır (bültende 409; cevap başka başlığınsa 422); çözüm cevabı
+  silinirse "Çözüldü" kalkar. Kategoriler: varsayılan 6 + "Genel" bir kez tohumlanır (`schema_flags.forum_seeded`),
+  ekleme/adlandırma/silme yalnızca owner (içinde başlık olan kategori silinmez → 409).
+- **Faydalı:** `forum_votes` birincil anahtarı (tür, id, kişi) → kişi başına bir; ikinci oy 409, kendi içeriğine 403,
+  DELETE geri alır. **Görüntülenme** = başlığı açan BENZERSİZ kişi (`forum_views`). **Kaydet** = "Takip Edilen
+  Başlıklar" (`forum_saves`). Sekmeler: Tümü (sabitler üstte, son etkinliğe göre), Çözülenler, Sıcak (son 7 günde
+  cevap + faydalı oyu sayısına göre, yalnızca etkileşimi olanlar), Bültenler; ayrıca kayıtlılar, kategori, etiket, arama
+  (başlık + metin + etiket, Türkçe harf duyarsız).
+- **Gerçek veri:** istatistikte yalnızca toplam ve çözülen başlık; "Haftanın Katkıcıları" = son 7 gündeki cevap ve
+  çözüm seçilen cevap sayısı (puan yok); popüler etiketler gerçek sayım. Tasarımdaki aktif satıcı/çözüm oranı/yanıt
+  süresi, canlı yayın kartı, "Detay Raporu"/CPC kutuları uydurma olacağı için YOK.
+- **Metin DÜZ METİN:** sunucu ham saklar (kontrol karakterleri atılır, uzunluk sınırları). Panel `app.js::forumText`
+  her parçayı `esc()` ile kaçırır, yalnızca `http/https` URL'leri `<a target=_blank rel="noopener noreferrer nofollow">`
+  yapar (`javascript:` vb. düz metin kalır), satır sonları `white-space: pre-wrap`. Dosya yükleme yok. Etiketler
+  `[\w.+-]` (≤5, ≤30 karakter; `#` atılır, boşluk → tire, harf duyarsız tekilleştirme).
+- **Paylaşım sınırı** (`forum.POST_LIMITS`/`THREAD_LIMITS`): başlık + cevap 1 dakikada 5, 1 saatte 40; yeni başlık
+  10 dakikada 3 → 429. Düzenleme sınırlanmaz.
+- Doğrudan link `#forum/<id>`. Hesap silinince kişinin başlıkları (cevaplarıyla), cevapları, oy/kayıt/görüntülemeleri
+  silinir (`forum.delete_user_content`). Forum küçük ölçek varsayar: liste görünür başlıkların tamamını çekip
+  Python'da süzer/sayfalar (sayfa 10).
+
 ## Ön öneri kuralı (Uygun / Sınırda / Elenmiş)
 
 - **TEK kaynak:** `scoring.py` → `UYGUN_MAX_NEGATIVE`, `ELIMINATE_AT`, `verdict_for()`,

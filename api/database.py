@@ -8,6 +8,7 @@ import time
 import hashlib
 import secrets
 from db_adapter import execute, execute_returning_id, execute_fetch, fetch_all, fetch_one, storage_info, USE_POSTGRES
+import forum
 
 CACHE_TTL_SECONDS = 24 * 3600
 
@@ -201,6 +202,7 @@ async def _migrate_schema():
         await execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_users_username ON users (LOWER(username))")
     except Exception:
         pass  # benzersizlik ayrıca kodda denetlenir
+    await forum.seed_once()   # forum varsayılan kategorileri (bir kez)
 
 
 async def _seed_teams_once():
@@ -237,7 +239,7 @@ async def _ensure_staff_in_team():
 
 
 async def init_db():
-    for schema in _SCHEMAS:
+    for schema in _SCHEMAS + forum.SCHEMAS:
         await execute(schema)
     await _migrate_schema()
 
@@ -1140,6 +1142,7 @@ async def delete_user_completely(user_id: int) -> dict:
     email = (row["email"] or "").strip().lower()
     # önce oturumlar: silme sürerken giriş yapılamasın
     await execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+    await forum.delete_user_content(user_id)   # forum: kendi başlıkları (cevaplarıyla), cevapları, oy/kayıt/görüntüleme
     own_lists = [r["id"] for r in await fetch_all("SELECT id FROM checklists WHERE user_id = ?", (user_id,))]
     for cid in own_lists:
         await execute("DELETE FROM checklist_items WHERE checklist_id = ?", (cid,))
