@@ -127,6 +127,14 @@ gerçek bir keyword'le test et (henüz denenmedi).
   sorgulayınca çöker. `database.py::_add_column_if_missing()` +
   `_migrate_schema()` bunu `init_db()` içinde otomatik halleder — yeni bir
   sütun eklersen buraya da ekle.
+- **ŞEMA SÜRÜMÜ — her şema/migrasyon değişikliğinde `database.SCHEMA_VERSION`'ı ARTIR.** Açılışta
+  `init_db()` yalnızca TEK sorgu çalıştırır (`schema_version` tablosu); sürüm güncelse ve `OWNER_EMAILS`
+  özeti (sha256) değişmediyse hiçbir CREATE/ALTER/UPDATE/tohum çalışmaz. Değilse tüm migrasyonlar
+  (`_SCHEMAS` + `forum.SCHEMAS` + `_migrate_schema` + sertifika tohumu) TEK bağlantıda
+  (`db_adapter.single_connection()`) çalışır ve sürüm yazılır. Yeni tablo, sütun, indeks, veri düzeltmesi
+  ya da tohum ekleyip sürümü artırmazsan canlı veritabanında migrasyon HİÇ çalışmaz. Sonuç: veritabanına
+  elle yapılan bir değişikliği (ör. kalıcı owner'ın rolünü DB'de düşürmek) artık bir sonraki açılış
+  "düzeltmez" — sürüm artınca ya da OWNER_EMAILS değişince düzeltilir (yetki zaten sunucuda e-postadan owner).
 - **Dosya adı başlıkları (Content-Disposition) latin-1 ile kodlanır** — Türkçe keyword'ü
   doğrudan `filename="..."` içine yazmak ş/ğ/ı'da `UnicodeEncodeError` → 500 veriyordu (tüm Excel
   export'ları). Dosya döndüren HER uçta `index.py::_content_disposition()` kullan: ASCII yedek
@@ -307,7 +315,8 @@ yüzden backend'e hiç bağlanmamalı, sahte veri olur.
 - **Migrasyon (bir kez):** `schema_flags.teams_seeded` işareti ÖNCE yazılır (eşzamanlı sunucusuz örneklerde tek
   kurulum; ekipler sonradan silinse de yeniden kurulmaz), "Genel" oluşturulur, mevcut TÜM kullanıcılar eklenir.
   Önceki tekli `users.in_team` sütunu varsa dönüştürülür (1/NULL → Genel, 0 → ekip dışı); sütun kaldı ama artık
-  OKUNMAZ/YAZILMAZ. `_ensure_staff_in_team()` her açılışta ekipsiz owner/admin/`OWNER_EMAILS`'i varsayılan
+  OKUNMAZ/YAZILMAZ. `_ensure_staff_in_team()` migrasyon her çalıştığında (şema sürümü artınca ya da
+  `OWNER_EMAILS` değişince — bkz. "Şema sürümü") ekipsiz owner/admin/`OWNER_EMAILS`'i varsayılan
   (en eski) ekibe ekler. Yeni kayıt ekip dışı başlar; owner olarak kaydolan (ilk kullanıcı / `OWNER_EMAILS`)
   varsayılan ekibe girer (hiç ekip yoksa "Genel" oluşturulur).
 - **Hiyerarşi (iki seviye):** `teams.parent_id` (`_add_column_if_missing`; NULL = ana ekip; mevcut ekipler ana ekip
@@ -344,6 +353,8 @@ yüzden backend'e hiç bağlanmamalı, sahte veri olur.
     etmez). Geçersiz/süresi dolmuş/iptal davet kaydı ENGELLEMEZ → ekip dışı (`invite.status="invalid"`). Davet hesap
     oluşturulduktan SONRA harcanır. Panel `?invite=` kodunu sessionStorage'a alıp adres çubuğundan siler.
   - Aktivite: eski "Ekip Aktivitesi" (`GET /api/team/activity`) + `team_id` filtresi; özet ekip adlarıyla.
+    Listeler SUNUCUDAN SAYFALI (`q_page`/`d_page`, `TEAM_PAGE_SIZE`=50; `totals` ve özet tüm filtrelenmiş kümeden,
+    aralık dışı sayfa son sayfaya çekilir). Ön öneri yalnızca o sayfadaki kararlar için hesaplanır.
   - Yetenek Haritası: bkz. "Ad Soyad, Profil & Yetkinlik Formu".
   - Owner menü rozeti: `/api/auth/status.new_outsiders_7d` (son 7 günde kaydolan ekip dışı; owner değilse null).
 - **Eğitim ataması** `training_lessons.assign_mode` = `all` (tüm ekipler) | `teams` (`training_lesson_teams`,
@@ -530,6 +541,27 @@ satır kapsayıcının `overflow:hidden`'ı ile gizleniyor. Favicon: `assets/her
   sepet ağırlığı girilmezse sevkiyat adedi payı kullanılır.
 
 <!-- graphify-rules-start (managed by `graphify init`) -->
+## Performans (davranış aynı, yalnızca hız)
+
+- **Postgres bağlantı havuzu** (`db_adapter.py`): ilk kullanımda kurulur, en fazla 5 bağlantı
+  (`POOL_MAX_SIZE`), `statement_cache_size=0` (Neon PgBouncer — hazırlanmış ifade önbelleği orada hata verir;
+  KALDIRMA). Bırakışta asyncpg'nin sıfırlama sorgusu yok (`_reset_conn`: yalnızca yarım işlem varsa ROLLBACK) —
+  bu yüzden **oturum durumu kullanma** (SET, LISTEN, advisory kilit, imleç): havuzdaki bir sonraki isteğe taşınır.
+  Olay döngüsü değişirse havuz yeniden kurulur. Sunucunun kapattığı boştaki bağlantıda (sorgu gönderilmeden
+  gelen hata) bir kez taze bağlantıyla denenir (`_is_dead_connection`). SQLite yolu değişmedi.
+  Tek bağlantıya bağlı çalışması gereken iş için `async with db_adapter.single_connection():`.
+- **Oturum:** `db.has_users()` — kullanıcı olduğu bir kez görülünce bellekte (COUNT her istekte değil; güvenli
+  çünkü kendi hesabını ve son owner'ı silmek yasak). `db.get_session` TEK JOIN'le oturum + ad/soyad + rol
+  (`get_user_role` ile aynı kural: OWNER_EMAILS → owner, geçersiz → member, hesap yoksa None) + `in_team`
+  getirir; `require_session` bunu isteğe özel `index._AUTH_CTX`'e koyar, `require_user` ve `_forum_viewer`
+  ayrı sorgu yapmaz (`_auth_state(user_id)`). Yeni bir yetki bağımlılığı yazarsan bunu kullan.
+- **Uzayabilen listeler sunucudan sayfalı:** Ekip Aktivitesi (yukarıda), Raporlar ve Forum (zaten sayfa 10).
+  **Raporlar** `GET /api/reports?status=all|decided|pending&q=&range=all|N&market=&page=` — eskiden panelin
+  yaptığı birleştirme (kararlar + son `REPORTS_RECENT_LIMIT`=200 sorgu, (keyword küçük harf, pazar) başına tek
+  kayıt, en son karar/sorgu), filtreler, KPI'lar (yalnızca aralık + pazar filtresiyle) ve sayfalama
+  (`REPORTS_PAGE_SIZE`=20) sunucuda. Excel `POST /api/export/reports {filters}` satırları sunucuda üretir
+  (tüm sayfalar; eski `rows` yolu duruyor). Eski panelle aynı veride sıra, alanlar, KPI ve Excel birebir doğrulandı.
+
 ## Tailwind — derlenmiş CSS (CDN YOK)
 
 - `cdn.tailwindcss.com` kaldırıldı; panel repodaki küçültülmüş `tailwind.css`'i yükler (`index.html`'de
