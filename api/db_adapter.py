@@ -134,6 +134,26 @@ async def fetch_all(sql: str, params: tuple = ()) -> list[dict]:
             return [dict(r) for r in await cur.fetchall()]
 
 
+async def execute_fetch(sql: str, params: tuple = ()) -> list[dict]:
+    """Değiştiren + satır döndüren sorgu (UPDATE/INSERT ... RETURNING) — SQLite'ta COMMIT eder.
+    (fetch_all commit etmez; RETURNING'li bir UPDATE'i onunla çalıştırmak değişikliği kaybeder.)
+    Tek ifadede koşul + değişiklik: ör. tek kullanımlık davetin eşzamanlı iki kayıtta iki kez kullanılmaması."""
+    if USE_POSTGRES:
+        conn = await _pg_conn()
+        try:
+            rows = await conn.fetch(_to_pg_placeholders(sql), *params)
+            return [dict(r) for r in rows]
+        finally:
+            await conn.close()
+    else:
+        async with aiosqlite.connect(SQLITE_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(sql, params)
+            rows = [dict(r) for r in await cur.fetchall()]
+            await db.commit()
+            return rows
+
+
 async def fetch_one(sql: str, params: tuple = ()) -> dict | None:
     rows = await fetch_all(sql, params)
     return rows[0] if rows else None

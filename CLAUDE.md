@@ -156,8 +156,8 @@ gerçek bir keyword'le test et (henüz denenmedi).
   `user_query_log` tabloları `user_id` ile izole. Ham SellerSprite verisi
   (`keyword_analysis`) paylaşımlı kalabilirdi ama artık önbellek okunmadığı
   için bu ayrımın önemi kalmadı.
-- **İSTİSNA — Ekip Aktivitesi (yalnızca owner):** `GET /api/team/activity` (`require_owner`;
-  admin/member 403) ŞU AN ekipte olan kullanıcıların `user_query_log` ve `market_decision` kayıtlarını
+- **İSTİSNA — Ekip Aktivitesi (yalnızca owner, Ekip Yönetimi → Aktivite):** `GET /api/team/activity` (`require_owner`;
+  admin/member 403; `team_id` filtresi) ŞU AN en az bir ekipte olan kullanıcıların `user_query_log` ve `market_decision` kayıtlarını
   kişi/tarih/karar/keyword filtresi ve kişi başına özetle döner (özet varsayılan TÜM ZAMANLAR;
   since/until verilirse özet de listeler de yalnızca o aralık). SALT OKUNUR: bu
   bölüm için yazma ucu yok; karar/geçmiş silme uçları zaten yalnızca isteği yapanın KENDİ
@@ -278,8 +278,8 @@ yüzden backend'e hiç bağlanmamalı, sahte veri olur.
   dokunmaz). Hiç kullanıcı yokken ilk kayıt olan owner olur.
 - **Yetki SUNUCUDA:** `index.py` → `require_user` (gerçek hesap şart; auth kapalıyken
   401), `require_staff` (owner/admin), `require_owner`. Arayüzde gizlemek yalnızca kolaylık.
-  - Member yalnızca kendisine atanan dersleri görür (`assign_all=1` ya da
-    `training_assignments`'ta kaydı olanlar) ve yalnızca KENDİ tamamlamasını değiştirir:
+  - Member yalnızca kendisine atanan dersleri görür (bkz. "Eğitim ataması" — tüm ekipler / ekiplerinden biri /
+    kişisel; ekip dışı hiçbirini) ve yalnızca KENDİ tamamlamasını değiştirir:
     `/api/training/lessons/{id}/complete` gövdesinde user_id YOK, oturumdan alınır;
     atanmamış derse 404.
   - Rolleri yalnızca owner'lar değiştirir (`/api/users/{id}/role`: owner|admin|member;
@@ -299,27 +299,49 @@ yüzden backend'e hiç bağlanmamalı, sahte veri olur.
 - Tablolar: `training_lessons`, `training_assignments`, `training_completions`
   (`completed_at` zaman damgası). Ders silinince atama/tamamlamalar da silinir.
 
-## Ekip üyeliği & kalıcı hesap silme (yalnızca owner)
+## Çoklu ekip, Ekip Yönetimi & kalıcı hesap silme (yalnızca owner)
 
-- **Ekip üyeliği rolden AYRI:** `users.in_team` (`_migrate_schema` → `_add_column_if_missing`). Migrasyonda
-  sütundan önce var olan TÜM kullanıcılar ekip üyesi (`NULL → 1`; idempotent, sonradan çıkarılanı geri eklemez).
-  Yeni kayıt ekip DIŞI başlar (owner olarak kaydolan — ilk kullanıcı / `OWNER_EMAILS` — hariç) ve paneli
-  normal kullanır (analiz, karar, kendi geçmişi, kendi kontrol listeleri).
-- **Ekip yalnızca şunları kapsar** (filtre SUNUCUDA, `db.team_member_ids()` / `db.is_in_team()`): Ekip Aktivitesi
-  (arama, karar, özet — ekip dışı ve oturumsuz kayıtlar görünmez; tekrar eklenince kayıtlar silinmediği için geri
-  gelir), eğitim ("herkese ata" yalnızca ekip, kişisel atama ekip dışı id'ye 422, ilerleme tablosu yalnızca ekip;
-  ekip dışı kişi ders görmez/tamamlayamaz), owner/admin'in BAŞKALARININ kontrol listelerini görmesi (sahibi
-  ekipte değilse 404; kişi kendi listesini her zaman görür).
-- **Kurallar:** owner/admin rolü yalnızca ekip üyelerine (`TeamRuleError` → 409); owner/admin (ve kalıcı owner)
-  ekipten çıkarılamaz → 409, önce rol düşürülür. Koşullar UPDATE'lerin içinde de var. Uç:
-  `POST /api/users/{id}/team {in_team}` (`require_owner`; admin/member 403).
-- **Kalıcı silme:** `POST /api/users/{id}/delete {confirm_email}` (`require_owner`). Onay e-postası tutmazsa 422;
-  kendi hesabı, kalıcı owner, son owner → 409. `db.delete_user_completely`: oturumlar, eşikler, arama geçmişi,
-  kararlar, kendi kontrol listeleri (madde + olaylarıyla), eğitim tamamlama/atamaları ve hesap SİLİNİR;
-  yer tutucu ("silinmiş üye") YOK. Başkalarının kayıtlarındaki referanslar silinmez, alan NULL'lanır
-  (`EMAIL_REF_COLUMNS` + `checklist_events.details_json` + `training_lessons.created_by`) → panelde "—".
-  **Kişi e-postası/id'si yazan yeni bir sütun eklersen `EMAIL_REF_COLUMNS` / `USER_ID_TABLES`'a da ekle.**
-  Aynı e-posta sonra yeni (ekip dışı, member) bir hesap olarak kaydolabilir.
+- **Model:** `teams` (ad, created_at) + `team_members` (team_id, user_id, added_at). Bir kişi birden fazla ekipte
+  olabilir; HİÇBİR ekipte olmayan = **ekip dışı** (paneli normal kullanır: analiz, karar, kendi geçmişi/listeleri;
+  ekip özelliklerinde görünmez). Roller (owner/admin/member) GENEL, ekibe bağlı değil.
+- **Migrasyon (bir kez):** `schema_flags.teams_seeded` işareti ÖNCE yazılır (eşzamanlı sunucusuz örneklerde tek
+  kurulum; ekipler sonradan silinse de yeniden kurulmaz), "Genel" oluşturulur, mevcut TÜM kullanıcılar eklenir.
+  Önceki tekli `users.in_team` sütunu varsa dönüştürülür (1/NULL → Genel, 0 → ekip dışı); sütun kaldı ama artık
+  OKUNMAZ/YAZILMAZ. `_ensure_staff_in_team()` her açılışta ekipsiz owner/admin/`OWNER_EMAILS`'i varsayılan
+  (en eski) ekibe ekler. Yeni kayıt ekip dışı başlar; owner olarak kaydolan (ilk kullanıcı / `OWNER_EMAILS`)
+  varsayılan ekibe girer (hiç ekip yoksa "Genel" oluşturulur).
+- **Ekip yalnızca şunları kapsar** (filtre SUNUCUDA, `db.team_member_ids(team_id=None)` = en az bir ekipte olanlar):
+  Aktivite (arama/karar/özet; `team_id` filtresi, varsayılan tüm ekipler; tüm ekiplerden çıkarılanınki görünmez,
+  geri eklenince kayıtlar silinmediği için geri gelir), eğitim, owner/admin'in BAŞKALARININ kontrol listelerini
+  görmesi (sahibi hiçbir ekipte değilse 404; kişi kendi listesini her zaman görür).
+- **Rol kuralları:** owner/admin yalnızca en az bir ekipte olana (`TeamRuleError` → 409); owner/admin (ve kalıcı owner)
+  SON ekibinden çıkarılamaz → 409. Koşullar UPDATE'lerde de var (`EXISTS team_members`) + sonradan denetim/geri alma.
+- **Ekip Yönetimi sayfası** (menü "Ekip Yönetimi", yalnızca owner; admin/member tüm uçlarda 403):
+  - Ekipler: `GET/POST /api/teams`, `PUT/DELETE /api/teams/{id}`. Ad boşluklardan temizlenir, ≤60, büyük/küçük harf
+    duyarsız benzersiz (422). Silme kullanıcı ve verilerine DOKUNMAZ; yalnızca üyelikler, `training_lesson_teams`
+    ve ekibin davetleri silinir. Bir owner/admin'in TEK ekibiyse 409 (`delete_blockers`). Yalnızca o ekibe atanmış
+    dersler `exclusive_lessons` olarak döner → onay penceresinde uyarı.
+  - Üyeler: `POST /api/users/{id}/teams {team_ids}` kümeyi eşitler (boş = ekip dışı). Rol değişikliği (`/role`) bu
+    sekmeye taşındı (Eğitim sayfasında artık yok). "Ekip dışı" filtresi en yeniden eskiye; son 7 günde kaydolana "yeni".
+  - Davetler: `POST /api/invites {team_id, multi_use, days=7 (1–90)}` düz kodu YALNIZCA bir kez döner; sunucuda
+    `sha256` (`team_invites.code_hash`). `GET /api/invites` aktifleri (iptal/süre/kullanım hakkı), `POST
+    /api/invites/{id}/revoke`. Kayıt: `POST /api/auth/register {invite}` → `redeem_invite` tek `UPDATE … RETURNING`
+    ile kullanımı artırır (tek kullanımlık iki kez kullanılamaz; `db_adapter.execute_fetch` COMMIT eder — `fetch_all`
+    etmez). Geçersiz/süresi dolmuş/iptal davet kaydı ENGELLEMEZ → ekip dışı (`invite.status="invalid"`). Davet hesap
+    oluşturulduktan SONRA harcanır. Panel `?invite=` kodunu sessionStorage'a alıp adres çubuğundan siler.
+  - Aktivite: eski "Ekip Aktivitesi" (`GET /api/team/activity`) + `team_id` filtresi; özet ekip adlarıyla.
+  - Owner menü rozeti: `/api/auth/status.new_outsiders_7d` (son 7 günde kaydolan ekip dışı; owner değilse null).
+- **Eğitim ataması** `training_lessons.assign_mode` = `all` (tüm ekipler) | `teams` (`training_lesson_teams`,
+  DİNAMİK: ekibe sonradan katılan görür, çıkan görmez) | `users` (`training_assignments`). Eski istemci
+  `assign_all` gönderirse mod ondan türetilir. Ekip dışı hiçbir ders görmez/tamamlayamaz; tamamlama kayıtları
+  üyelik değişince SİLİNMEZ. İlerleme `GET /api/training/progress?team_id=` (atananlar dinamik hesaplanır).
+- **Kalıcı silme:** `POST /api/users/{id}/delete {confirm_email}` (onay e-postası tutmazsa 422; kendi hesabı,
+  kalıcı owner, son owner → 409). `db.delete_user_completely`: oturumlar, eşikler, geçmiş, kararlar, kendi kontrol
+  listeleri (madde + olaylarıyla), eğitim tamamlama/atamaları, ekip üyelikleri ve hesap SİLİNİR; yer tutucu YOK.
+  Başkalarının kayıtlarındaki referanslar silinmez, NULL'lanır (`EMAIL_REF_COLUMNS`, `ID_REF_COLUMNS` — eklediği
+  dersler, oluşturduğu davetler — ve `checklist_events.details_json`) → panelde "—". **Kişi e-postası/id'si yazan
+  yeni bir sütun eklersen `EMAIL_REF_COLUMNS` / `ID_REF_COLUMNS` / `USER_ID_TABLES`'a da ekle.** Aynı e-posta sonra
+  yeni (ekip dışı, member) hesap olarak kaydolabilir.
 
 ## Ön öneri kuralı (Uygun / Sınırda / Elenmiş)
 

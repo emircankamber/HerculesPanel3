@@ -39,15 +39,17 @@
     <div class="text-sm text-secondary mb-2">Devam etmek için giriş yapın</div>
     <input type="text" id="login-email" class="field" placeholder="e-posta veya kullanıcı adı" autocomplete="username">
     <input type="password" id="login-password" class="field" placeholder="şifre" autocomplete="current-password">
+    <div class="login-invite" id="login-invite-note" style="display:none;"></div>
     <div class="login-error" id="login-error"></div>
     <button id="login-btn" class="btn btn-primary">Giriş Yap</button>
     <button id="register-btn" class="btn btn-outline">Yeni Hesap Oluştur</button>
-    <div class="login-note">Geçmişin ve kararların ekip arkadaşlarına görünmez; ekibe eklenirsen panel yöneticileri (owner) aramalarını ve kararlarını görebilir. Aynı kelimeyi başkası da arayabilir. İlk kullanıcı kaydolduğunda panel kilitlenir.</div>
+    <div class="login-note">Geçmişin ve kararların ekip arkadaşlarına görünmez; bir ekibe eklenirsen panel yöneticileri (owner) aramalarını ve kararlarını görebilir. Aynı kelimeyi başkası da arayabilir. İlk kullanıcı kaydolduğunda panel kilitlenir.</div>
     <button id="dismiss-login-btn" class="btn btn-outline" style="display:none;">Vazgeç, girişsiz devam et</button>
   </div>
 </div>
 
 <div id="storage-warning" class="storage-warning" style="display:none;"></div>
+<div id="app-notice" class="app-notice" role="status" style="display:none;"><span id="app-notice-text"></span><button type="button" id="app-notice-close" class="icon-btn" aria-label="Kapat"><span class="material-symbols-outlined">close</span></button></div>
 
 <div class="lg:flex min-h-screen">
 
@@ -73,7 +75,7 @@
       <div class="hidden lg:block h-px bg-hairline my-2 mx-2"></div>
       <button data-view="decisions" class="nav-btn"><span class="material-symbols-outlined">view_kanban</span>Pazar Kararları</button>
       <button data-view="history" class="nav-btn"><span class="material-symbols-outlined">history</span>Geçmiş</button>
-      <button data-view="team" class="nav-btn" style="display:none;"><span class="material-symbols-outlined">groups</span>Ekip Aktivitesi</button>
+      <button data-view="team" class="nav-btn" style="display:none;"><span class="material-symbols-outlined">groups</span>Ekip Yönetimi<span id="nav-team-badge" class="nav-badge" style="display:none;" title="Son 7 günde kaydolan, hiçbir ekipte olmayan hesaplar"></span></button>
     </nav>
     <div class="hidden lg:block mt-auto p-4">
       <div class="rounded-xl bg-surface-container-low p-3.5">
@@ -820,10 +822,13 @@
               <fieldset class="md:col-span-2 flex flex-col gap-2">
                 <legend class="eyebrow mb-1.5">Atama</legend>
                 <div class="flex flex-wrap gap-4 text-sm">
-                  <label class="inline-flex items-center gap-2"><input type="radio" name="trn-assign" value="all" checked> Herkese</label>
-                  <label class="inline-flex items-center gap-2"><input type="radio" name="trn-assign" value="some"> Seçilen kişilere</label>
+                  <label class="inline-flex items-center gap-2"><input type="radio" name="trn-assign" value="all" checked> Tüm ekipler</label>
+                  <label class="inline-flex items-center gap-2"><input type="radio" name="trn-assign" value="teams"> Seçilen ekipler</label>
+                  <label class="inline-flex items-center gap-2"><input type="radio" name="trn-assign" value="some"> Seçilen kişiler</label>
                 </div>
+                <div id="trn-f-teams" class="trn-userpick" style="display:none;"></div>
                 <div id="trn-f-users" class="trn-userpick" style="display:none;"></div>
+                <span class="text-[11px] text-secondary">Ekibe atama dinamiktir: ekibe sonradan katılan dersi görür, ekipten çıkan görmez (tamamlama kaydı silinmez). Ekip dışı kişiler ders görmez.</span>
               </fieldset>
               <div class="md:col-span-2 flex flex-wrap items-center gap-2">
                 <button type="submit" id="trn-f-save" class="btn btn-primary"><span class="material-symbols-outlined">save</span>Kaydet</button>
@@ -842,22 +847,15 @@
           <section class="card card-pad">
             <div class="flex flex-wrap items-center justify-between gap-2">
               <div><div class="eyebrow">Takip</div><h3 class="font-display text-lg font-semibold mt-1">Kişi × Ders Tamamlama</h3></div>
-              <div class="flex flex-wrap gap-3 text-xs text-secondary"><span><span class="trn-cell done">✓</span> tamamlandı</span><span><span class="trn-cell todo">—</span> atandı</span><span><span class="trn-cell na">·</span> atanmadı</span></div>
+              <label class="flex items-center gap-2 text-xs text-secondary min-w-0 max-w-full">Ekip
+                <select id="trn-prog-team" class="field !h-8 text-xs min-w-[140px] max-w-[220px]"><option value="">Tüm ekipler</option></select></label>
+              <div class="flex flex-wrap gap-3 text-xs text-secondary w-full"><span><span class="trn-cell done">✓</span> tamamlandı</span><span><span class="trn-cell todo">—</span> atandı</span><span><span class="trn-cell na">·</span> atanmadı</span></div>
             </div>
             <div class="table-wrap mt-4">
               <table class="data-table trn-matrix" id="trn-matrix"></table>
             </div>
           </section>
 
-          <section id="trn-roles" class="card card-pad" style="display:none;">
-            <div><div class="eyebrow">Yalnızca owner'lar</div><h3 class="font-display text-lg font-semibold mt-1">Kullanıcı &amp; Rol Yönetimi</h3>
-              <p class="text-xs text-secondary mt-1">Owner'lar rolleri yönetir (birden fazla owner olabilir); admin'ler ders ekler, atar ve ilerlemeyi görür. Son kalan owner düşürülemez.</p>
-              <p class="text-xs text-secondary mt-1">Ekip üyeliği rolden ayrıdır: yeni kayıtlar ekip dışı başlar ve paneli normal kullanır. Ekip Aktivitesi, eğitim ve başkalarının kontrol listeleri yalnızca ekip üyelerini kapsar. Owner/admin rolü yalnızca ekip üyelerine verilir; owner/admin ekipten çıkarılamaz. "Üyeliği sil" hesabı ve kişiye ait tüm kayıtları kalıcı olarak siler.</p></div>
-            <div class="table-wrap mt-4">
-              <table class="data-table"><thead><tr><th class="l">Kullanıcı</th><th class="l hidden sm:table-cell">Rol</th><th class="!text-center">Rol / Değiştir</th></tr></thead>
-                <tbody id="trn-roles-tbody"></tbody></table>
-            </div>
-          </section>
         </div>
       </section>
 
@@ -950,9 +948,9 @@
       <section id="view-team" class="view">
         <div class="card card-pad hero-bg">
           <div class="max-w-2xl">
-            <div class="flex flex-wrap items-center gap-2"><span class="chip chip-dot ok">Yalnızca owner</span><span class="text-xs text-secondary">salt okunur</span></div>
-            <h1 class="font-display text-[26px] sm:text-[32px] font-semibold tracking-tight leading-tight mt-3">Ekip Aktivitesi</h1>
-            <p class="text-sm text-on-surface-variant mt-2 leading-relaxed">Şu an ekipte olan kişilerin aramaları ve pazar kararları (ekip dışı kişiler görünmez). Kayıtlar değiştirilemez veya silinemez. Bir kayda tıklamak o keyword/ASIN için <b>canlı</b> yeni analiz başlatır (kayıtlı sonuç gösterilmez, MCP kotası kullanılır).</p>
+            <div class="flex flex-wrap items-center gap-2"><span class="chip chip-dot ok">Yalnızca owner</span></div>
+            <h1 class="font-display text-[26px] sm:text-[32px] font-semibold tracking-tight leading-tight mt-3">Ekip Yönetimi</h1>
+            <p class="text-sm text-on-surface-variant mt-2 leading-relaxed">Ekipleri, üyeleri ve davet bağlantılarını yönet; ekiplerin aramalarını ve kararlarını izle. Bir kişi birden fazla ekipte olabilir. Hiçbir ekipte olmayan kişi <b>ekip dışı</b>dır: paneli normal kullanır ama aktivitede, eğitimde ve ekip listelerinde görünmez.</p>
           </div>
         </div>
         <div id="tm-status" class="status-line mt-4"></div>
@@ -960,8 +958,72 @@
           <span class="material-symbols-outlined text-outline" style="font-size:36px">lock</span>
           <div class="font-display text-lg font-semibold mt-2">Bu bölüm yalnızca owner'lara açıktır</div>
         </div>
-        <div id="tm-body" style="display:none;">
-          <form id="tm-filters" class="card card-pad mt-6 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3" novalidate>
+        <div id="tg-body" style="display:none;">
+          <div class="tabs bg-surface-container-low rounded-lg p-0.5 mt-6 max-w-full w-fit" id="tg-tabs" role="tablist">
+            <button type="button" class="tab-btn active" data-tab="teams" role="tab">Ekipler <span class="tg-count-teams text-secondary"></span></button>
+            <button type="button" class="tab-btn" data-tab="members" role="tab">Üyeler <span id="tg-new-badge" class="nav-badge !ml-1" style="display:none;"></span></button>
+            <button type="button" class="tab-btn" data-tab="invites" role="tab">Davetler</button>
+            <button type="button" class="tab-btn" data-tab="activity" role="tab">Aktivite</button>
+          </div>
+
+          <!-- Ekipler -->
+          <div id="tg-pane-teams" class="tg-pane">
+            <form id="tg-team-form" class="card card-pad mt-4 flex flex-wrap items-end gap-3" novalidate>
+              <label class="flex flex-col gap-1.5 flex-1 min-w-[200px]"><span class="eyebrow">Yeni ekip</span>
+                <input type="text" id="tg-team-name" class="field" maxlength="60" placeholder="örn. Ürün Araştırma" autocomplete="off"></label>
+              <button type="submit" class="btn btn-primary"><span class="material-symbols-outlined">group_add</span>Ekip oluştur</button>
+              <span id="tg-team-msg" class="text-xs w-full"></span>
+              <p class="text-xs text-secondary w-full">Ekip silmek kullanıcıları ve verilerini (geçmiş, kararlar, kontrol listeleri, tamamlamalar) <b>silmez</b>; yalnızca üyelikleri, ekibe yapılan ders atamalarını ve ekibin davetlerini kaldırır. <span id="tg-outsiders"></span></p>
+            </form>
+            <div id="tg-team-list" class="flex flex-col gap-2 mt-4"></div>
+          </div>
+
+          <!-- Üyeler -->
+          <div id="tg-pane-members" class="tg-pane" style="display:none;">
+            <div class="card card-pad mt-4">
+              <div class="flex flex-wrap items-end gap-3">
+                <label class="flex flex-col gap-1.5 min-w-[180px] max-w-full"><span class="eyebrow">Göster</span>
+                  <select id="tg-mem-filter" class="field max-w-[260px]"><option value="all">Tümü</option><option value="none">Ekip dışı</option></select></label>
+                <span id="tg-mem-count" class="text-xs text-secondary pb-2"></span>
+              </div>
+              <p class="text-xs text-secondary mt-3">Roller geneldir: owner'lar ekipleri, üyelikleri ve rolleri yönetir (birden fazla owner olabilir); admin'ler ders ekler, atar ve ilerlemeyi görür. Owner/admin rolü yalnızca en az bir ekipte olan kişiye verilir; owner/admin son ekibinden çıkarılamaz (önce rolü düşürülür). Son owner ve kalıcı owner düşürülemez. <b>Üyeliği sil</b> hesabı ve kişiye ait tüm kayıtları kalıcı olarak siler.</p>
+            </div>
+            <div id="tg-mem-list" class="flex flex-col gap-2 mt-4"></div>
+          </div>
+
+          <!-- Davetler -->
+          <div id="tg-pane-invites" class="tg-pane" style="display:none;">
+            <form id="tg-inv-form" class="card card-pad mt-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 items-end" novalidate>
+              <label class="flex flex-col gap-1.5 min-w-0"><span class="eyebrow">Ekip</span><select id="tg-inv-team" class="field"></select></label>
+              <label class="flex flex-col gap-1.5 min-w-0"><span class="eyebrow">Kullanım</span>
+                <select id="tg-inv-uses" class="field"><option value="single">Tek kullanımlık</option><option value="multi">Çok kullanımlık</option></select></label>
+              <label class="flex flex-col gap-1.5 min-w-0"><span class="eyebrow">Geçerlilik (gün)</span>
+                <input type="number" id="tg-inv-days" class="field" min="1" max="90" step="1" value="7"></label>
+              <button type="submit" class="btn btn-primary"><span class="material-symbols-outlined">link</span>Bağlantı oluştur</button>
+              <span id="tg-inv-msg" class="text-xs sm:col-span-2 lg:col-span-4"></span>
+              <div id="tg-inv-result" class="sm:col-span-2 lg:col-span-4 rounded-lg border border-hairline bg-surface-container-low p-3" style="display:none;">
+                <div class="text-xs font-medium" id="tg-inv-result-label"></div>
+                <div class="flex flex-wrap gap-2 mt-2">
+                  <input type="text" id="tg-inv-link" class="field flex-1 min-w-0 mono text-xs" readonly aria-label="Davet bağlantısı">
+                  <button type="button" id="tg-inv-copy" class="btn btn-outline"><span class="material-symbols-outlined">content_copy</span>Kopyala</button>
+                </div>
+                <div class="text-[11px] text-secondary mt-2">Bu bağlantı yalnızca şimdi gösterilir — kod sunucuda hash'li saklanır, sonradan tekrar görüntülenemez.</div>
+              </div>
+            </form>
+            <div class="card mt-4 overflow-hidden">
+              <div class="px-5 pt-4"><h3 class="font-display font-semibold">Aktif davetler</h3>
+                <p class="text-xs text-secondary mt-1">Bağlantıyla kaydolan, davetin ekibine katılır. Süresi dolmuş, iptal edilmiş ya da kullanım hakkı bitmiş bağlantıyla kayıt yine çalışır ama kişi ekip dışı başlar.</p></div>
+              <div id="tg-inv-list" class="flex flex-col divide-y divide-hairline mt-3"></div>
+            </div>
+          </div>
+
+          <!-- Aktivite -->
+          <div id="tg-pane-activity" class="tg-pane" style="display:none;">
+        <p class="text-xs text-secondary mt-4">Yalnızca en az bir ekipte olan kişilerin aramaları ve pazar kararları görünür (ekip dışı ve tüm ekiplerden çıkarılmış kişilerinki görünmez; tekrar eklenince geri gelir). Kayıtlar salt okunurdur. Bir kayda tıklamak o keyword/ASIN için <b>canlı</b> yeni analiz başlatır (MCP kotası kullanılır).</p>
+        <div id="tm-body">
+          <form id="tm-filters" class="card card-pad mt-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3" novalidate>
+            <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Ekip</span>
+              <select id="tm-team" class="field w-full mt-1"><option value="">Tüm ekipler</option></select></label>
             <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Kişi</span>
               <select id="tm-user" class="field w-full mt-1"><option value="">Tümü</option></select></label>
             <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Başlangıç</span>
@@ -972,20 +1034,20 @@
               <select id="tm-decision" class="field w-full mt-1"><option value="">Tümü</option><option>Uygun</option><option>Sınırda</option><option>Elenmiş</option></select></label>
             <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Keyword / ASIN ara</span>
               <input id="tm-q" type="search" class="field w-full mt-1" maxlength="200" placeholder="örn. şemsiye"></label>
-            <div class="sm:col-span-2 lg:col-span-5 flex flex-wrap items-center justify-between gap-2">
+            <div class="sm:col-span-2 lg:col-span-6 flex flex-wrap items-center justify-between gap-2">
               <div class="flex flex-wrap items-center gap-2 min-w-0">
                 <span class="chip ok" id="tm-range-chip"><span class="material-symbols-outlined !text-[14px]" aria-hidden="true">date_range</span><span id="tm-range-label">Tüm zamanlar</span></span>
                 <button type="button" id="tm-alltime" class="btn btn-outline btn-sm" style="display:none;"><span class="material-symbols-outlined">all_inclusive</span>Tüm zamanlar</button>
               </div>
               <button type="button" id="tm-reset" class="btn btn-outline btn-sm"><span class="material-symbols-outlined">filter_alt_off</span>Filtreleri temizle</button>
-              <span class="sm:col-span-2 lg:col-span-5 text-[11px] text-secondary w-full">Tarih aralığı hem özete hem listelere uygulanır. Karar filtresi yalnızca kararlar listesine uygulanır.</span>
+              <span class="text-[11px] text-secondary w-full">Ekip ve tarih aralığı hem özete hem listelere uygulanır (özet varsayılan olarak tüm zamanlar). Kişi, karar ve arama filtreleri yalnızca listelere uygulanır.</span>
             </div>
           </form>
 
           <div class="card mt-4 overflow-hidden">
             <div class="px-5 pt-4 pb-2"><h3 class="font-display font-semibold">Kişi başına özet <span class="text-xs text-secondary font-normal">· <span id="tm-sum-range">tüm zamanlar</span></span></h3></div>
             <div class="table-wrap"><table class="data-table" id="tm-summary">
-              <thead><tr><th class="l">Kişi</th><th>Rol</th><th>Arama</th><th>Karar</th></tr></thead><tbody></tbody></table></div>
+              <thead><tr><th class="l">Kişi</th><th class="l">Ekipler</th><th>Rol</th><th>Arama</th><th>Karar</th></tr></thead><tbody></tbody></table></div>
           </div>
 
           <div class="card mt-4 overflow-hidden">
@@ -1000,6 +1062,8 @@
               <thead><tr><th class="l">Kişi</th><th class="l">Keyword / ASIN</th><th>Pazar</th><th>Tarih</th><th>Ön öneri</th></tr></thead><tbody></tbody></table></div>
             <div class="table-wrap mt-3" id="tm-pane-decisions" style="display:none;"><table class="data-table" id="tm-decisions">
               <thead><tr><th class="l">Kişi</th><th class="l">Keyword / ASIN</th><th>Pazar</th><th>Tarih</th><th>Ön öneri</th><th>Karar</th><th class="l">Not</th></tr></thead><tbody></tbody></table></div>
+          </div>
+        </div>
           </div>
         </div>
       </section>

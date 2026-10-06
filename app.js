@@ -27,9 +27,44 @@ let authRequiredGlobal = false;
 // Oturumdaki kullanıcı (yalnızca GÖRÜNÜM için; tüm yetki kontrolleri sunucuda yapılır)
 let currentUser = { role: null, user_id: null, email: null };
 
+// --- Davet bağlantısı (?invite=KOD): kod yalnızca bu sekmede tutulur, adres çubuğundan hemen silinir.
+const INVITE_KEY = "pl_invite";
+function pendingInvite() { try { return sessionStorage.getItem(INVITE_KEY) || ""; } catch { return ""; } }
+function clearInvite() { try { sessionStorage.removeItem(INVITE_KEY); } catch { /* yok say */ } }
+(function captureInvite() {
+  try {
+    const u = new URL(location.href);
+    const code = (u.searchParams.get("invite") || "").trim();
+    if (!code) return;
+    try { sessionStorage.setItem(INVITE_KEY, code.slice(0, 200)); } catch { /* depolama yoksa yalnızca bu sayfa */ window.__plInvite = code.slice(0, 200); }
+    u.searchParams.delete("invite");
+    history.replaceState(null, "", u.pathname + (u.search || "") + u.hash);
+  } catch { /* yok say */ }
+})();
+function inviteCode() { return pendingInvite() || window.__plInvite || ""; }
+
+function showNotice(text, kind = "") {
+  const el = document.getElementById("app-notice");
+  if (!el) return;
+  document.getElementById("app-notice-text").textContent = text;
+  el.className = `app-notice ${kind}`.trim();
+  el.style.display = "flex";
+}
+function setTeamBadge(n) {
+  const b = document.getElementById("nav-team-badge");
+  if (b) { b.textContent = n > 99 ? "99+" : String(n || ""); b.style.display = n ? "" : "none"; }
+  const t = document.getElementById("tg-new-badge");
+  if (t) { t.textContent = b ? b.textContent : String(n || ""); t.style.display = n ? "" : "none"; }
+}
+
 function showLogin(errorMsg = "", dismissible = false) {
   const overlay = document.getElementById("login-overlay");
   if (overlay) overlay.style.display = "flex";
+  const inv = document.getElementById("login-invite-note");
+  if (inv) {
+    inv.textContent = inviteCode() ? "Davet bağlantısıyla geldin: \"Yeni Hesap Oluştur\" ile kaydolursan davetin ekibine katılırsın. Bağlantının süresi dolmuşsa ya da iptal edildiyse hesabın yine oluşturulur ama ekip dışı başlarsın." : "";
+    inv.style.display = inviteCode() ? "block" : "none";
+  }
   const err = document.getElementById("login-error");
   if (err) err.textContent = errorMsg;
   const dismissBtn = document.getElementById("dismiss-login-btn");
@@ -49,6 +84,7 @@ async function checkAuthStatus() {
     // Ekip Aktivitesi menüsü yalnızca owner'a görünür (yetki yine sunucuda: diğerleri 403)
     const teamNav = document.querySelector('.nav-btn[data-view="team"]');
     if (teamNav) teamNav.style.display = currentUser.role === "owner" ? "" : "none";
+    setTeamBadge(currentUser.role === "owner" ? s.new_outsiders_7d : 0);
     if (currentUser.role !== "owner" && $("#view-team")?.classList.contains("active")) showView("home");
 
     // Paylaşımlı depolama uyarısı
@@ -65,6 +101,8 @@ async function checkAuthStatus() {
     const openLoginBtn = document.getElementById("open-login-btn");
     if (s.auth_required && !s.logged_in) {
       showLogin();
+    } else if (!s.logged_in && inviteCode()) {
+      showLogin("", true);   // davet bağlantısı: kayıt ekranını göster (auth henüz kapalı olsa da)
     } else {
       hideLogin();
       if (chip) chip.textContent = s.email || (s.auth_required ? "" : "auth kapalı — henüz kullanıcı yok");
@@ -72,6 +110,10 @@ async function checkAuthStatus() {
     }
     // Giriş yapılmamışsa (auth zorunlu olsun olmasın) manuel giriş/kayıt butonu görünsün
     if (openLoginBtn) openLoginBtn.style.display = s.logged_in ? "none" : "inline-block";
+    if (s.logged_in && inviteCode()) {
+      clearInvite(); window.__plInvite = "";
+      showNotice("Davet bağlantıları yeni kayıtlar içindir — zaten bir hesabın var. Bir ekibe eklenmek için panel yöneticisine (owner) başvur.");
+    }
     return s;
   } catch {
     // Backend erişilemezse giriş ekranını zorla açma — kullanıcı en azından hatayı görsün
@@ -84,12 +126,19 @@ async function doAuth(endpoint) {
   const err = document.getElementById("login-error");
   if (!email || !password) { err.textContent = "E-posta ve şifre gerekli."; return; }
   try {
+    const payload = { email, password };
+    if (endpoint === "register" && inviteCode()) payload.invite = inviteCode();
     const res = await fetch(`${API_BASE}/api/auth/${endpoint}`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email, password }),
+      body: JSON.stringify(payload),
     });
     const body = await res.json();
     if (!res.ok) { err.textContent = body.detail || `Hata (${res.status})`; return; }
+    if (endpoint === "register" && body.invite) {
+      clearInvite(); window.__plInvite = "";
+      if (body.invite.status === "joined") showNotice(`Hoş geldin! "${body.invite.team}" ekibine katıldın.`);
+      else showNotice("Davet bağlantısı geçersiz, süresi dolmuş ya da iptal edilmiş — hesabın oluşturuldu ama ekip dışı başladın. Bir ekibe eklenmek için panel yöneticisine başvur.", "warn");
+    }
     setToken(body.token);
     hideLogin();
     await checkAuthStatus();
@@ -110,6 +159,8 @@ document.addEventListener("DOMContentLoaded", () => {
   if (regBtn) regBtn.addEventListener("click", () => doAuth("register"));
   if (openLoginBtn) openLoginBtn.addEventListener("click", () => showLogin("", !authRequiredGlobal));
   if (dismissLoginBtn) dismissLoginBtn.addEventListener("click", () => hideLogin());
+  const noticeClose = document.getElementById("app-notice-close");
+  if (noticeClose) noticeClose.addEventListener("click", () => { document.getElementById("app-notice").style.display = "none"; });
   if (logoutBtn) logoutBtn.addEventListener("click", async () => {
     await apiFetch(`${API_BASE}/api/auth/logout`, { method: "POST" });
     setToken("");
@@ -161,7 +212,7 @@ function showView(view) {
   if (view === "training") loadTraining();
   if (view === "checklists") loadChecklists();
   if (view === "launch") lrEnsureVars();
-  if (view === "team") loadTeam();
+  if (view === "team") loadTeamAdmin();
   if (view === "trends") updateTrendsStale();
   // Chart.js gizli (display:none) kapsayıcıda 0 boyutla çizer — veri
   // görünümleri yalnızca görünür olduklarında (yeniden) render edilir.
@@ -2549,7 +2600,6 @@ async function loadTraining() {
   $("#trn-mine").style.display = guest ? "none" : "block";
   $("#trn-progress").style.display = guest ? "none" : "block";
   $("#trn-staff").style.display = !guest && isStaff() ? "flex" : "none";
-  $("#trn-roles").style.display = currentUser.role === "owner" ? "block" : "none";
   $("#trn-role-chip").textContent = guest ? "" : ROLE_LABEL[currentUser.role] || "";
   $("#trn-role-chip").style.display = guest ? "none" : "";
   if (guest) { status.textContent = ""; return; }
@@ -2557,14 +2607,15 @@ async function loadTraining() {
   status.textContent = "yükleniyor…"; status.className = "status-line loading mt-4";
   try {
     const reqs = [apiFetch(`${API_BASE}/api/training/lessons`)];
-    if (isStaff()) reqs.push(apiFetch(`${API_BASE}/api/users`), apiFetch(`${API_BASE}/api/training/progress`));
+    const pt = trnState.progTeam ? `?team_id=${encodeURIComponent(trnState.progTeam)}` : "";
+    if (isStaff()) reqs.push(apiFetch(`${API_BASE}/api/users`), apiFetch(`${API_BASE}/api/training/progress${pt}`));
     const resps = await Promise.all(reqs);
     const bodies = await Promise.all(resps.map(r => r.json().catch(() => ({}))));
     resps.forEach((r, i) => { if (!r.ok) throw new Error(apiErrorText(bodies[i], r.status)); });
     trnState.data = bodies[0];
     // Sunucunun döndürdüğü rol esastır (ör. rol bu arada değiştiyse)
     if (bodies[0].role && bodies[0].role !== currentUser.role) { currentUser.role = bodies[0].role; return loadTraining(); }
-    if (isStaff()) { trnState.users = bodies[1].users || []; trnState.progress = bodies[2]; }
+    if (isStaff()) { trnState.users = bodies[1].users || []; trnState.teams = bodies[1].teams || []; trnState.progress = bodies[2]; }
     renderTraining();
     status.textContent = ""; status.className = "status-line mt-4";
   } catch (err) {
@@ -2623,10 +2674,20 @@ function renderTraining() {
   if (!isStaff()) return;
   renderLessonAdmin();
   renderMatrix();
-  if (currentUser.role === "owner") renderRoles();
 }
 
 // --- Ders yönetimi (owner/admin) ---
+function renderTeamPicker(selected = []) {
+  const sel = new Set(selected);
+  $("#trn-f-teams").innerHTML = (trnState.teams || []).map(t => `
+    <label><input type="checkbox" value="${esc(t.id)}" ${sel.has(t.id) ? "checked" : ""}><span title="${esc(t.name)}">${esc(t.name)}</span></label>`).join("")
+    || `<span class="text-xs text-secondary">Henüz ekip yok — Ekip Yönetimi'nden oluşturun.</span>`;
+}
+function trnShowAssignPick(mode) {
+  $("#trn-f-teams").style.display = mode === "teams" ? "grid" : "none";
+  $("#trn-f-users").style.display = mode === "some" ? "grid" : "none";
+}
+const TRN_MODE_RADIO = { all: "all", teams: "teams", users: "some" };
 function renderUserPicker(selected = []) {
   const box = $("#trn-f-users");
   const sel = new Set(selected);
@@ -2642,8 +2703,8 @@ function resetLessonForm() {
   const maxOrder = Math.max(0, ...((trnState.data?.all_lessons) || []).map(l => l.sort_order || 0));
   $("#trn-f-order").value = maxOrder + 1; $("#trn-f-due").value = "";
   $$('input[name="trn-assign"]').forEach(r => { r.checked = r.value === "all"; });
-  $("#trn-f-users").style.display = "none";
-  renderUserPicker([]);
+  trnShowAssignPick("all");
+  renderUserPicker([]); renderTeamPicker([]);
   $("#trn-form-mode").textContent = "Yeni ders"; $("#trn-form-mode").className = "chip na";
   $("#trn-f-cancel").style.display = "none";
 }
@@ -2652,9 +2713,10 @@ function fillLessonForm(l) {
   trnState.editing = l.id;
   $("#trn-f-id").value = l.id; $("#trn-f-title").value = l.title; $("#trn-f-desc").value = l.description || "";
   $("#trn-f-url").value = l.video_url || ""; $("#trn-f-order").value = l.sort_order ?? 0; $("#trn-f-due").value = l.due_date || "";
-  $$('input[name="trn-assign"]').forEach(r => { r.checked = r.value === (l.assign_all ? "all" : "some"); });
-  $("#trn-f-users").style.display = l.assign_all ? "none" : "grid";
-  renderUserPicker(l.assignee_ids || []);
+  const radio = TRN_MODE_RADIO[l.assign_mode] || (l.assign_all ? "all" : "some");
+  $$('input[name="trn-assign"]').forEach(r => { r.checked = r.value === radio; });
+  trnShowAssignPick(radio);
+  renderUserPicker(l.assignee_ids || []); renderTeamPicker(l.team_ids || []);
   $("#trn-form-mode").textContent = `Düzenleniyor: #${l.id}`; $("#trn-form-mode").className = "chip warn";
   $("#trn-f-cancel").style.display = "";
   $("#trn-form").scrollIntoView({ behavior: "smooth", block: "start" });
@@ -2662,17 +2724,20 @@ function fillLessonForm(l) {
 
 function renderLessonAdmin() {
   if (trnState.editing == null) resetLessonForm();
-  else { const l = trnState.data.all_lessons.find(x => x.id === trnState.editing); l ? renderUserPicker(l.assignee_ids) : resetLessonForm(); }
+  else { const l = trnState.data.all_lessons.find(x => x.id === trnState.editing); l ? (renderUserPicker(l.assignee_ids), renderTeamPicker(l.team_ids || [])) : resetLessonForm(); }
   const tbody = $("#trn-lessons-tbody");
   const lessons = trnState.data.all_lessons || [];
   tbody.innerHTML = lessons.length ? "" : `<tr><td colspan="6" class="muted !text-center !py-6">Henüz ders yok — yukarıdan ekleyin.</td></tr>`;
   lessons.forEach(l => {
     const tr = document.createElement("tr");
     const video = l.youtube_id ? `<span class="chip ok">YouTube</span>` : safeHttpsUrl(l.video_url) ? `<span class="chip na">Link</span>` : `<span class="muted">—</span>`;
-    const assign = l.assign_all ? `<span class="chip ok">Herkes</span>` : `<span class="chip warn">${l.assignee_ids.length} kişi</span>`;
+    const tname = new Map((trnState.teams || []).map(t => [t.id, t.name]));
+    const assign = l.assign_mode === "teams"
+      ? (l.team_ids || []).map(id => `<span class="chip na mr-1 mb-1 max-w-[160px] truncate" title="${esc(tname.get(id) || "")}">${esc(tname.get(id) || "?")}</span>`).join("") || `<span class="chip bad" title="Atanmış ekip kalmadı — ders kimseye görünmüyor">Ekip yok</span>`
+      : l.assign_mode === "all" || l.assign_all ? `<span class="chip ok">Tüm ekipler</span>` : `<span class="chip warn">${l.assignee_ids.length} kişi</span>`;
     tr.innerHTML = `<td class="l tabular">${esc(l.sort_order)}</td>
       <td class="l"><div class="font-semibold whitespace-normal break-words min-w-[160px]">${esc(l.title)}</div></td>
-      <td class="l">${video}</td><td class="l">${l.due_date ? esc(fmtDue(l.due_date)) : '<span class="muted">—</span>'}</td><td class="l">${assign}</td>
+      <td class="l">${video}</td><td class="l">${l.due_date ? esc(fmtDue(l.due_date)) : '<span class="muted">—</span>'}</td><td class="l"><div class="whitespace-normal min-w-[110px]">${assign}</div></td>
       <td class="!text-center whitespace-nowrap"><button type="button" class="icon-btn trn-edit" title="Düzenle" aria-label="Düzenle"><span class="material-symbols-outlined">edit</span></button>
         <button type="button" class="icon-btn trn-del !text-error" title="Sil" aria-label="Sil"><span class="material-symbols-outlined">delete</span></button></td>`;
     tr.querySelector(".trn-edit").addEventListener("click", () => fillLessonForm(l));
@@ -2693,16 +2758,21 @@ async function saveLesson(e) {
   const msg = $("#trn-f-msg");
   const title = $("#trn-f-title").value.trim();
   const url = $("#trn-f-url").value.trim();
-  const assignAll = $('input[name="trn-assign"]:checked').value === "all";
+  const radio = $('input[name="trn-assign"]:checked').value;
+  const mode = radio === "some" ? "users" : radio;
+  const assignAll = mode === "all";
   const assignees = $$('#trn-f-users input:checked').map(i => Number(i.value));
+  const teamIds = $$('#trn-f-teams input:checked').map(i => Number(i.value));
   const fail = (t) => { msg.textContent = t; msg.className = "text-xs text-error"; };
   if (!title) return fail("Başlık gerekli.");
   if (url && !safeHttpsUrl(url)) return fail("Video linki https:// ile başlamalı.");
-  if (!assignAll && !assignees.length) return fail("En az bir kişi seçin ya da 'Herkese' atayın.");
+  if (mode === "users" && !assignees.length) return fail("En az bir kişi seçin ya da 'Tüm ekipler'e atayın.");
+  if (mode === "teams" && !teamIds.length) return fail("En az bir ekip seçin ya da 'Tüm ekipler'e atayın.");
   const body = {
     title, description: $("#trn-f-desc").value, video_url: url || null,
     sort_order: Math.max(0, Math.round(Number($("#trn-f-order").value) || 0)),
-    due_date: $("#trn-f-due").value || null, assign_all: assignAll, assignee_ids: assignAll ? [] : assignees,
+    due_date: $("#trn-f-due").value || null, assign_all: assignAll, assign_mode: mode,
+    assignee_ids: mode === "users" ? assignees : [], team_ids: mode === "teams" ? teamIds : [],
   };
   const id = trnState.editing;
   $("#trn-f-save").disabled = true;
@@ -2723,6 +2793,10 @@ async function saveLesson(e) {
 function renderMatrix() {
   const pg = trnState.progress;
   const table = $("#trn-matrix");
+  const tsel = $("#trn-prog-team");
+  tsel.innerHTML = `<option value="">Tüm ekipler</option>` + (pg?.teams || []).map(t => `<option value="${esc(t.id)}">${esc(t.name)}</option>`).join("");
+  tsel.value = (pg?.teams || []).some(t => String(t.id) === String(trnState.progTeam || "")) ? String(trnState.progTeam) : "";
+  if (pg && !pg.users.length && pg.lessons.length) { table.innerHTML = `<tbody><tr><td class="muted !py-6">Bu ekipte kimse yok.</td></tr></tbody>`; return; }
   if (!pg || !pg.lessons.length) { table.innerHTML = `<tbody><tr><td class="muted !py-6">Henüz ders yok.</td></tr></tbody>`; return; }
   const done = new Map(pg.completions.map(c => [`${c.lesson_id}:${c.user_id}`, c.completed_at]));
   const t = todayISO();
@@ -2743,105 +2817,11 @@ function renderMatrix() {
   table.innerHTML = head + `<tbody>${rows}</tbody>`;
 }
 
-// --- Rol yönetimi (yalnızca owner'lar) ---
-// Birden fazla owner olabilir. Son kalan owner'ın seçimi kilitli; sunucu da reddeder (409).
-function renderRoles() {
-  const tbody = $("#trn-roles-tbody");
-  tbody.innerHTML = "";
-  const owners = trnState.users.filter(u => u.role === "owner").length;
-  trnState.users.forEach(u => {
-    const tr = document.createElement("tr");
-    const lastOwner = u.role === "owner" && owners <= 1;
-    const perm = !!u.permanent;  // OWNER_EMAILS — sunucu düşürmeyi reddeder (409)
-    const locked = perm || lastOwner;
-    const lockMsg = perm ? "Kalıcı owner — düşürülemez" : lastOwner ? "Son owner — düşürülemez" : "";
-    const isMe = u.id === currentUser.user_id;
-    // Owner/admin rolü yalnızca ekip üyelerine verilebilir (sunucu 409 verir)
-    const opts = ["owner", "admin", "member"].map(r => `<option value="${r}" ${u.role === r ? "selected" : ""} ${!u.in_team && r !== "member" ? "disabled" : ""}>${ROLE_LABEL[r]}</option>`).join("");
-    const staffRole = u.role === "owner" || u.role === "admin";
-    // Silinemez: kendi hesabı, kalıcı owner, son owner (sunucu da 409 verir)
-    const noDelete = isMe ? "Kendi hesabını silemezsin" : perm ? "Kalıcı owner silinemez" : lastOwner ? "Son owner silinemez" : "";
-    tr.innerHTML = `<td class="l"><div class="font-medium truncate max-w-[150px] sm:max-w-[260px]" title="${esc(u.email)}">${esc(u.email)}${isMe ? ' <span class="chip na !text-[10px]">sen</span>' : ""}</div>
-        <div class="mt-0.5 flex flex-wrap gap-1">${perm ? '<span class="chip ok !text-[10px] trn-perm" title="OWNER_EMAILS ortam değişkeninde tanımlı"><span class="material-symbols-outlined !text-[12px]" aria-hidden="true">lock</span>kalıcı owner</span>' : ""}
-          <span class="chip ${u.in_team ? "ok" : "na"} !text-[10px] trn-team-chip">${u.in_team ? "Ekipte" : "Ekip dışı"}</span></div>
-        <div class="mt-1.5 flex flex-wrap gap-1.5">
-          <button type="button" class="btn btn-outline !h-7 !px-2 !text-[11px] trn-team-btn" ${u.in_team && staffRole ? `disabled title="Owner/admin ekipten çıkarılamaz — önce rolünü üyeye düşür"` : ""}>${u.in_team ? "Ekipten çıkar" : "Ekibe ekle"}</button>
-          <button type="button" class="btn btn-danger !h-7 !px-2 !text-[11px] trn-del-btn" ${noDelete ? `disabled title="${esc(noDelete)}"` : ""}>Üyeliği sil</button>
-        </div>
-        <div class="trn-del-box hidden mt-2 p-2 rounded border border-error/40 max-w-[260px] whitespace-normal">
-          <div class="text-[11px] text-error leading-snug">Kalıcı silme — geri alınamaz. Hesap, oturumlar, eşikler, arama geçmişi, kararlar, kendi kontrol listeleri ve eğitim tamamlamaları silinir. Onay için e-postayı yaz:</div>
-          <input type="text" class="field !h-8 text-xs mt-1.5 w-full trn-del-input" autocomplete="off" spellcheck="false" aria-label="Onay için e-posta" placeholder="${esc(u.email)}">
-          <div class="mt-1.5 flex gap-1.5"><button type="button" class="btn btn-danger !h-7 !px-2 !text-[11px] trn-del-go" disabled>Kalıcı olarak sil</button>
-            <button type="button" class="btn btn-outline !h-7 !px-2 !text-[11px] trn-del-cancel">Vazgeç</button></div>
-        </div>
-        <div class="trn-act-msg text-[11px] mt-1 text-error whitespace-normal"></div></td>
-      <td class="l hidden sm:table-cell"><span class="chip ${u.role === "owner" ? "ok" : u.role === "admin" ? "warn" : "na"}">${esc(ROLE_LABEL[u.role] || u.role)}</span></td>
-      <td class="!text-center">
-        <select class="field !h-8 text-xs trn-role-sel" aria-label="Rol" ${locked ? `disabled title="${esc(lockMsg)}"` : ""}>${opts}</select>
-        <div class="trn-role-msg whitespace-normal leading-tight max-w-[150px] mx-auto text-[11px] mt-1 ${locked ? "text-secondary" : "text-error"}">${esc(lockMsg)}</div>
-      </td>`;
-    const sel = tr.querySelector(".trn-role-sel");
-    const msg = tr.querySelector(".trn-role-msg");
-    const actMsg = tr.querySelector(".trn-act-msg");
-    const teamBtn = tr.querySelector(".trn-team-btn");
-    teamBtn.addEventListener("click", async () => {
-      teamBtn.disabled = true; actMsg.textContent = "";
-      try {
-        const r = await apiFetch(`${API_BASE}/api/users/${encodeURIComponent(u.id)}/team`, {
-          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ in_team: !u.in_team }),
-        });
-        const b = await r.json().catch(() => ({}));
-        if (!r.ok) throw new Error(apiErrorText(b, r.status));
-        await loadTraining();
-      } catch (err) { teamBtn.disabled = false; actMsg.textContent = err.message; }
-    });
-    const delBox = tr.querySelector(".trn-del-box"), delInput = tr.querySelector(".trn-del-input"), delGo = tr.querySelector(".trn-del-go");
-    const norm = v => String(v || "").trim().toLowerCase();
-    tr.querySelector(".trn-del-btn").addEventListener("click", () => { delBox.classList.toggle("hidden"); delInput.value = ""; delGo.disabled = true; delInput.focus(); });
-    tr.querySelector(".trn-del-cancel").addEventListener("click", () => { delBox.classList.add("hidden"); delInput.value = ""; });
-    delInput.addEventListener("input", () => { delGo.disabled = norm(delInput.value) !== norm(u.email); });
-    delGo.addEventListener("click", async () => {
-      if (norm(delInput.value) !== norm(u.email)) return;
-      delGo.disabled = true; actMsg.textContent = "";
-      try {
-        const r = await apiFetch(`${API_BASE}/api/users/${encodeURIComponent(u.id)}/delete`, {
-          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirm_email: delInput.value }),
-        });
-        const b = await r.json().catch(() => ({}));
-        if (!r.ok) throw new Error(apiErrorText(b, r.status));
-        await loadTraining();
-      } catch (err) { delGo.disabled = false; actMsg.textContent = err.message; }
-    });
-    sel.addEventListener("change", async () => {
-      const next = sel.value;
-      if (isMe && u.role === "owner" && next !== "owner" &&
-          !confirm("Kendi owner yetkini kaldırıyorsun; rol yönetimine erişimin kalmayacak. Devam edilsin mi?")) { sel.value = u.role; return; }
-      if (next === "owner" && u.role !== "owner" &&
-          !confirm(`${u.email} owner yapılsın mı? Owner'lar tüm rolleri değiştirebilir.`)) { sel.value = u.role; return; }
-      sel.disabled = true; msg.textContent = "kaydediliyor…"; msg.className = "trn-role-msg whitespace-normal leading-tight max-w-[150px] mx-auto text-[11px] mt-1 text-secondary";
-      try {
-        const r = await apiFetch(`${API_BASE}/api/users/${encodeURIComponent(u.id)}/role`, {
-          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ role: next }),
-        });
-        const b = await r.json().catch(() => ({}));
-        if (!r.ok) throw new Error(apiErrorText(b, r.status));
-        if (b.self_changed) await checkAuthStatus();  // kendi rolün değiştiyse görünümü sunucudaki role göre yenile
-        await loadTraining();
-      } catch (err) {
-        sel.disabled = false; sel.value = u.role;
-        msg.textContent = err.message; msg.className = "trn-role-msg whitespace-normal leading-tight max-w-[150px] mx-auto text-[11px] mt-1 text-error";
-      }
-    });
-    tbody.appendChild(tr);
-  });
-}
-
 (function bindTrainingView() {
   $("#trn-form").addEventListener("submit", saveLesson);
   $("#trn-f-cancel").addEventListener("click", () => { trnState.editing = null; resetLessonForm(); $("#trn-f-msg").textContent = ""; });
-  $$('input[name="trn-assign"]').forEach(r => r.addEventListener("change", () => {
-    $("#trn-f-users").style.display = $('input[name="trn-assign"]:checked').value === "some" ? "grid" : "none";
-  }));
+  $$('input[name="trn-assign"]').forEach(r => r.addEventListener("change", () => trnShowAssignPick($('input[name="trn-assign"]:checked').value)));
+  $("#trn-prog-team").addEventListener("change", (e) => { trnState.progTeam = e.target.value || null; loadTraining(); });
   $("#trn-login").addEventListener("click", () => showLogin("", !authRequiredGlobal));
 })();
 
@@ -3377,11 +3357,9 @@ function tmKeywordHtml(keyword) {
 }
 
 async function loadTeam() {
-  const owner = currentUser.role === "owner";
-  $("#tm-guest").style.display = owner ? "none" : "block";
-  $("#tm-body").style.display = owner ? "block" : "none";
-  if (!owner) { $("#tm-status").textContent = ""; return; }
+  if (currentUser.role !== "owner") return;
   const params = new URLSearchParams();
+  const tid = $("#tm-team").value; if (tid !== "") params.set("team_id", tid);
   const uid = $("#tm-user").value; if (uid !== "") params.set("user_id", uid);
   const since = tmLocalDayStart($("#tm-from").value); if (since != null) params.set("since", since);
   const untilDay = tmLocalDayStart($("#tm-to").value); if (untilDay != null) params.set("until", untilDay + 86400);
@@ -3401,6 +3379,9 @@ async function loadTeam() {
 function renderTeam() {
   const b = tmState.data; if (!b) return;
   // Kişi seçici (seçimi koru)
+  const tsel = $("#tm-team"), tcur = tsel.value;
+  tsel.innerHTML = `<option value="">Tüm ekipler</option>` + (b.teams || []).map(t => `<option value="${esc(t.id)}">${esc(t.name)}</option>`).join("");
+  tsel.value = (b.teams || []).some(t => String(t.id) === tcur) ? tcur : "";
   const sel = $("#tm-user"), cur = sel.value;
   const people = b.summary.map(s => ({ id: s.user_id, label: s.user }));
   sel.innerHTML = `<option value="">Tümü</option>` + people.map(p => `<option value="${esc(p.id)}">${esc(p.label)}</option>`).join("");
@@ -3417,9 +3398,10 @@ function renderTeam() {
   $("#tm-summary tbody").innerHTML = b.summary.length ? b.summary.map(s => `
     <tr class="tm-sum-row cursor-pointer" data-uid="${esc(s.user_id)}" title="Bu kişinin kayıtlarını göster">
       <td class="l"><span class="font-medium break-all">${esc(s.user)}</span></td>
+      <td class="l"><div class="flex flex-wrap gap-1 min-w-[100px] max-w-[260px] whitespace-normal">${(s.teams || []).map(n => `<span class="chip na !text-[10px] max-w-[140px] truncate" title="${esc(n)}">${esc(n)}</span>`).join("") || "—"}</div></td>
       <td>${s.role ? `<span class="chip ${s.role === "owner" ? "ok" : s.role === "admin" ? "warn" : "na"}">${esc(ROLE_LABEL[s.role] || s.role)}</span>` : "—"}</td>
       <td class="tabular">${fmtNum(s.queries)}</td><td class="tabular">${fmtNum(s.decisions)}</td></tr>`).join("")
-    : `<tr><td colspan="4" class="muted !text-center !py-6">Kullanıcı yok.</td></tr>`;
+    : `<tr><td colspan="5" class="muted !text-center !py-6">Bu filtrede ekip üyesi yok.</td></tr>`;
   $$("#tm-summary .tm-sum-row").forEach(tr => tr.addEventListener("click", () => { $("#tm-user").value = tr.dataset.uid; loadTeam(); }));
 
   $(".tm-count-q").textContent = `(${fmtNum(b.totals.queries)})`;
@@ -3445,6 +3427,266 @@ function renderTeam() {
   });
 }
 
+// ===========================================================================
+// EKİP YÖNETİMİ (yalnızca owner): Ekipler · Üyeler · Davetler · Aktivite
+// Tüm kurallar SUNUCUDA (admin/üye 403); buradaki kilitler yalnızca kolaylık.
+// ===========================================================================
+const tgState = { tab: "teams", teams: [], users: [], invites: [], outsiders: 0, me: null, memFilter: "all", renaming: null };
+const tgIsNew = (u) => u.created_at && (Date.now() / 1000 - u.created_at) < 7 * 86400;
+const tgDate = (ts) => ts ? new Date(ts * 1000).toLocaleDateString("tr-TR", { day: "2-digit", month: "2-digit", year: "numeric" }) : "—";
+const ROLE_CHIP = (r) => `<span class="chip ${r === "owner" ? "ok" : r === "admin" ? "warn" : "na"}">${esc(ROLE_LABEL[r] || r)}</span>`;
+
+async function tgApi(url, opts = {}) {
+  const r = await apiFetch(`${API_BASE}${url}`, { headers: { "Content-Type": "application/json" }, ...opts });
+  const b = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(apiErrorText(b, r.status));
+  return b;
+}
+function tgStatus(text, cls = "") { const el = $("#tm-status"); el.textContent = text; el.className = `status-line mt-4 ${cls}`.trim(); }
+
+function loadTeamAdmin() {
+  const owner = currentUser.role === "owner";
+  $("#tm-guest").style.display = owner ? "none" : "block";
+  $("#tg-body").style.display = owner ? "block" : "none";
+  if (!owner) { tgStatus(""); return; }
+  tgSelectTab(tgState.tab);
+}
+
+function tgSelectTab(tab) {
+  tgState.tab = tab;
+  $$("#tg-tabs .tab-btn").forEach(b => { const on = b.dataset.tab === tab; b.classList.toggle("active", on); b.setAttribute("aria-selected", String(on)); });
+  $$("#view-team .tg-pane").forEach(p => { p.style.display = p.id === `tg-pane-${tab}` ? "" : "none"; });
+  if (tab === "activity") { tgStatus(""); loadTeam(); } else tgLoad();
+}
+
+async function tgLoad() {
+  tgStatus("yükleniyor…", "loading");
+  try {
+    const [t, u, inv, st] = await Promise.all([tgApi("/api/teams"), tgApi("/api/users"), tgApi("/api/invites"), tgApi("/api/auth/status")]);
+    tgState.teams = t.teams || []; tgState.outsiders = t.outsiders || 0;
+    tgState.users = u.users || []; tgState.me = u.me; tgState.invites = inv.invites || [];
+    setTeamBadge(st.new_outsiders_7d || 0);
+    tgRenderTeams(); tgRenderMembers(); tgRenderInvites();
+    tgStatus("");
+  } catch (err) { tgStatus(`Hata: ${err.message}`, "error"); }
+}
+
+// --- Ekipler ---
+function tgRenderTeams() {
+  $(".tg-count-teams").textContent = `(${tgState.teams.length})`;
+  $("#tg-outsiders").textContent = `Şu an ekip dışı: ${fmtNum(tgState.outsiders)} kişi.`;
+  const box = $("#tg-team-list");
+  box.innerHTML = tgState.teams.length ? "" : `<div class="card card-pad text-sm text-secondary">Henüz ekip yok — yukarıdan oluşturun.</div>`;
+  tgState.teams.forEach(t => {
+    const row = document.createElement("div");
+    row.className = "card p-4 flex flex-wrap items-center gap-3";
+    const blockers = t.delete_blockers || [];
+    const editing = tgState.renaming === t.id;
+    row.innerHTML = `
+      <div class="min-w-0 flex-1 basis-[220px]">
+        ${editing
+          ? `<form class="tg-rename flex flex-wrap gap-2"><input type="text" class="field !h-9 flex-1 min-w-[160px]" maxlength="60" aria-label="Yeni ekip adı">
+               <button type="submit" class="btn btn-primary btn-sm">Kaydet</button><button type="button" class="btn btn-outline btn-sm tg-rename-cancel">Vazgeç</button></form>`
+          : `<div class="font-display font-semibold text-[16px] break-words">${esc(t.name)}</div>`}
+        <div class="text-xs text-secondary mt-1">${fmtNum(t.member_count)} üye · oluşturma ${esc(tgDate(t.created_at))}${(t.exclusive_lessons || []).length ? ` · yalnızca bu ekibe atanmış ${fmtNum(t.exclusive_lessons.length)} ders` : ""}</div>
+        <div class="tg-row-msg text-xs text-error mt-1"></div>
+      </div>
+      <div class="flex flex-wrap gap-2">
+        <button type="button" class="btn btn-outline btn-sm tg-show"><span class="material-symbols-outlined">group</span>Üyeler</button>
+        ${editing ? "" : `<button type="button" class="btn btn-outline btn-sm tg-ren"><span class="material-symbols-outlined">edit</span>Yeniden adlandır</button>`}
+        <button type="button" class="btn btn-danger tg-del" ${blockers.length ? `disabled title="${esc("Şu owner/admin'lerin tek ekibi: " + blockers.map(b => b.email).join(", ") + " — önce başka ekibe ekleyin ya da rollerini düşürün")}"` : ""}><span class="material-symbols-outlined">delete</span>Sil</button>
+      </div>`;
+    const msg = row.querySelector(".tg-row-msg");
+    if (blockers.length) msg.textContent = `Silinemez: ${blockers.map(b => b.email).join(", ")} için tek ekip (owner/admin en az bir ekipte olmalı).`;
+    row.querySelector(".tg-show").addEventListener("click", () => { tgState.memFilter = `t:${t.id}`; tgSelectTab("members"); });
+    if (editing) {
+      const f = row.querySelector(".tg-rename"), inp = f.querySelector("input");
+      inp.value = t.name; setTimeout(() => inp.focus(), 0);
+      row.querySelector(".tg-rename-cancel").addEventListener("click", () => { tgState.renaming = null; tgRenderTeams(); });
+      f.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        try { await tgApi(`/api/teams/${encodeURIComponent(t.id)}`, { method: "PUT", body: JSON.stringify({ name: inp.value }) }); tgState.renaming = null; await tgLoad(); }
+        catch (err) { msg.textContent = err.message; }
+      });
+    } else {
+      row.querySelector(".tg-ren").addEventListener("click", () => { tgState.renaming = t.id; tgRenderTeams(); });
+    }
+    row.querySelector(".tg-del").addEventListener("click", async () => {
+      let text = `"${t.name}" ekibi silinsin mi?\n\nKullanıcılar ve verileri SİLİNMEZ; yalnızca ${t.member_count} üyelik, ekibe yapılan ders atamaları ve ekibin davet bağlantıları kaldırılır.`;
+      const ex = t.exclusive_lessons || [];
+      if (ex.length) text += `\n\nUYARI: Şu ders(ler) yalnızca bu ekibe atanmış — ekip silinince kimseye görünmeyecek:\n${ex.map(l => "• " + l.title).join("\n")}`;
+      if (!confirm(text)) return;
+      try { await tgApi(`/api/teams/${encodeURIComponent(t.id)}`, { method: "DELETE" }); if (tgState.memFilter === `t:${t.id}`) tgState.memFilter = "all"; await tgLoad(); }
+      catch (err) { msg.textContent = err.message; }
+    });
+    box.appendChild(row);
+  });
+}
+
+// --- Üyeler ---
+function tgRenderMembers() {
+  const sel = $("#tg-mem-filter");
+  sel.innerHTML = `<option value="all">Tümü</option><option value="none">Ekip dışı</option>` +
+    tgState.teams.map(t => `<option value="t:${esc(t.id)}">${esc(t.name)}</option>`).join("");
+  if (![...sel.options].some(o => o.value === tgState.memFilter)) tgState.memFilter = "all";
+  sel.value = tgState.memFilter;
+  const f = tgState.memFilter;
+  let users = tgState.users.filter(u => f === "all" ? true : f === "none" ? !u.team_ids.length : u.team_ids.includes(Number(f.slice(2))));
+  if (f === "none") users = [...users].sort((a, b) => (b.created_at || 0) - (a.created_at || 0) || b.id - a.id);   // en yeniden eskiye
+  $("#tg-mem-count").textContent = `${fmtNum(users.length)} kişi`;
+  const tname = new Map(tgState.teams.map(t => [t.id, t.name]));
+  const owners = tgState.users.filter(u => u.role === "owner").length;
+  const box = $("#tg-mem-list");
+  box.innerHTML = users.length ? "" : `<div class="card card-pad text-sm text-secondary">Bu filtrede kimse yok.</div>`;
+  users.forEach(u => {
+    const isMe = u.id === tgState.me;
+    const staff = u.role === "owner" || u.role === "admin";
+    const perm = !!u.permanent, lastOwner = u.role === "owner" && owners <= 1;
+    const roleLock = perm ? "Kalıcı owner — düşürülemez" : lastOwner ? "Son owner — düşürülemez" : "";
+    const noDelete = isMe ? "Kendi hesabını silemezsin" : perm ? "Kalıcı owner silinemez" : lastOwner ? "Son owner silinemez" : "";
+    const opts = ["owner", "admin", "member"].map(r => `<option value="${r}" ${u.role === r ? "selected" : ""} ${!u.team_ids.length && r !== "member" ? "disabled" : ""}>${ROLE_LABEL[r]}</option>`).join("");
+    const row = document.createElement("div");
+    row.className = "card p-4 grid grid-cols-1 md:grid-cols-[minmax(0,1.2fr)_minmax(0,1.5fr)_170px_auto] gap-3 md:items-start tg-mem";
+    row.dataset.email = u.email;
+    row.innerHTML = `
+      <div class="min-w-0">
+        <div class="font-medium break-all">${esc(u.email)}</div>
+        <div class="flex flex-wrap gap-1 mt-1">${isMe ? '<span class="chip na !text-[10px]">sen</span>' : ""}${perm ? '<span class="chip ok !text-[10px]"><span class="material-symbols-outlined !text-[12px]" aria-hidden="true">lock</span>kalıcı owner</span>' : ""}${tgIsNew(u) ? '<span class="chip warn !text-[10px] tg-new">yeni</span>' : ""}</div>
+        <div class="text-[11px] text-secondary mt-1">Kayıt: ${esc(tgDate(u.created_at))}</div>
+      </div>
+      <div class="min-w-0">
+        <div class="flex flex-wrap gap-1 tg-teams">${u.team_ids.length ? u.team_ids.map(id => `<span class="chip na !text-[11px] max-w-[180px] truncate" title="${esc(tname.get(id) || "")}">${esc(tname.get(id) || "?")}</span>`).join("") : '<span class="chip bad !text-[11px]">Ekip dışı</span>'}</div>
+        <button type="button" class="btn btn-outline btn-sm mt-2 tg-team-edit" ${tgState.teams.length ? "" : "disabled title=\"Önce bir ekip oluşturun\""}><span class="material-symbols-outlined">group_add</span>Ekipleri düzenle</button>
+        <div class="tg-team-box hidden mt-2 p-2 rounded border border-hairline">
+          <div class="tg-teampick">${tgState.teams.map(t => `<label><input type="checkbox" value="${esc(t.id)}" ${u.team_ids.includes(t.id) ? "checked" : ""}><span title="${esc(t.name)}">${esc(t.name)}</span></label>`).join("")}</div>
+          <div class="flex flex-wrap gap-2 mt-2"><button type="button" class="btn btn-primary btn-sm tg-team-save">Kaydet</button><button type="button" class="btn btn-outline btn-sm tg-team-cancel">Vazgeç</button></div>
+          ${staff ? `<div class="text-[11px] text-secondary mt-1">${esc(ROLE_LABEL[u.role])} en az bir ekipte kalmalı.</div>` : ""}
+        </div>
+      </div>
+      <div class="min-w-0">
+        <select class="field !h-9 text-xs w-full tg-role" aria-label="Rol" ${roleLock ? `disabled title="${esc(roleLock)}"` : ""}>${opts}</select>
+        <div class="tg-role-msg text-[11px] mt-1 text-secondary">${esc(roleLock || (!u.team_ids.length ? "Owner/admin için önce bir ekibe ekleyin" : ""))}</div>
+      </div>
+      <div><button type="button" class="btn btn-danger tg-del-btn" ${noDelete ? `disabled title="${esc(noDelete)}"` : ""}>Üyeliği sil</button></div>
+      <div class="tg-del-box hidden md:col-span-4 p-3 rounded border border-error/40">
+        <div class="text-[12px] text-error leading-snug">Kalıcı silme — geri alınamaz. Hesap, oturumlar, eşikler, arama geçmişi, kararlar, kendi kontrol listeleri, eğitim tamamlamaları ve ekip üyelikleri silinir; başkalarının kayıtlarındaki adı "—" görünür. Onay için e-postayı yaz:</div>
+        <div class="flex flex-wrap gap-2 mt-2">
+          <input type="text" class="field !h-9 text-xs flex-1 min-w-[180px] tg-del-input" autocomplete="off" spellcheck="false" aria-label="Onay için e-posta" placeholder="${esc(u.email)}">
+          <button type="button" class="btn btn-danger tg-del-go" disabled>Kalıcı olarak sil</button>
+          <button type="button" class="btn btn-outline btn-sm tg-del-cancel">Vazgeç</button>
+        </div>
+      </div>
+      <div class="tg-act-msg text-[12px] text-error md:col-span-4 empty:hidden"></div>`;
+    const actMsg = row.querySelector(".tg-act-msg");
+    // ekipler
+    const teamBox = row.querySelector(".tg-team-box");
+    row.querySelector(".tg-team-edit").addEventListener("click", () => teamBox.classList.toggle("hidden"));
+    row.querySelector(".tg-team-cancel").addEventListener("click", () => { teamBox.classList.add("hidden"); tgRenderMembers(); });
+    row.querySelector(".tg-team-save").addEventListener("click", async (e) => {
+      const ids = $$("input:checked", teamBox).map(i => Number(i.value));
+      if (staff && !ids.length) { actMsg.textContent = `${ROLE_LABEL[u.role]} son ekibinden çıkarılamaz — önce rolünü üyeye düşür.`; return; }
+      e.currentTarget.disabled = true; actMsg.textContent = "";
+      try { await tgApi(`/api/users/${encodeURIComponent(u.id)}/teams`, { method: "POST", body: JSON.stringify({ team_ids: ids }) }); await tgLoad(); }
+      catch (err) { e.currentTarget.disabled = false; actMsg.textContent = err.message; }
+    });
+    // rol
+    const sel2 = row.querySelector(".tg-role"), rmsg = row.querySelector(".tg-role-msg");
+    sel2.addEventListener("change", async () => {
+      const next = sel2.value;
+      if (isMe && u.role === "owner" && next !== "owner" &&
+          !confirm("Kendi owner yetkini kaldırıyorsun; Ekip Yönetimi'ne erişimin kalmayacak. Devam edilsin mi?")) { sel2.value = u.role; return; }
+      if (next === "owner" && u.role !== "owner" && !confirm(`${u.email} owner yapılsın mı? Owner'lar ekipleri, üyelikleri ve rolleri yönetir.`)) { sel2.value = u.role; return; }
+      sel2.disabled = true; rmsg.textContent = "kaydediliyor…"; rmsg.className = "tg-role-msg text-[11px] mt-1 text-secondary";
+      try {
+        const b = await tgApi(`/api/users/${encodeURIComponent(u.id)}/role`, { method: "POST", body: JSON.stringify({ role: next }) });
+        if (b.self_changed) { await checkAuthStatus(); if (currentUser.role !== "owner") { showView("home"); return; } }
+        await tgLoad();
+      } catch (err) { sel2.disabled = false; sel2.value = u.role; rmsg.textContent = err.message; rmsg.className = "tg-role-msg text-[11px] mt-1 text-error"; }
+    });
+    // kalıcı silme
+    const delBox = row.querySelector(".tg-del-box"), delInput = row.querySelector(".tg-del-input"), delGo = row.querySelector(".tg-del-go");
+    const norm = v => String(v || "").trim().toLowerCase();
+    row.querySelector(".tg-del-btn").addEventListener("click", () => { delBox.classList.toggle("hidden"); delInput.value = ""; delGo.disabled = true; delInput.focus(); });
+    row.querySelector(".tg-del-cancel").addEventListener("click", () => { delBox.classList.add("hidden"); delInput.value = ""; });
+    delInput.addEventListener("input", () => { delGo.disabled = norm(delInput.value) !== norm(u.email); });
+    delGo.addEventListener("click", async () => {
+      if (norm(delInput.value) !== norm(u.email)) return;
+      delGo.disabled = true; actMsg.textContent = "";
+      try { await tgApi(`/api/users/${encodeURIComponent(u.id)}/delete`, { method: "POST", body: JSON.stringify({ confirm_email: delInput.value }) }); await tgLoad(); }
+      catch (err) { delGo.disabled = false; actMsg.textContent = err.message; }
+    });
+    box.appendChild(row);
+  });
+}
+
+// --- Davetler ---
+function tgRenderInvites() {
+  const sel = $("#tg-inv-team"), cur = sel.value;
+  sel.innerHTML = tgState.teams.map(t => `<option value="${esc(t.id)}">${esc(t.name)}</option>`).join("") || `<option value="">Önce bir ekip oluşturun</option>`;
+  if (tgState.teams.some(t => String(t.id) === cur)) sel.value = cur;
+  $("#tg-inv-form button[type=submit]").disabled = !tgState.teams.length;
+  const box = $("#tg-inv-list");
+  box.innerHTML = tgState.invites.length ? "" : `<div class="px-5 py-6 text-sm text-secondary">Aktif davet yok.</div>`;
+  tgState.invites.forEach(i => {
+    const row = document.createElement("div");
+    row.className = "px-5 py-3 flex flex-wrap items-center gap-3";
+    row.innerHTML = `
+      <div class="min-w-0 flex-1 basis-[220px]">
+        <div class="flex flex-wrap items-center gap-1.5"><span class="font-medium break-all">${esc(i.team_name)}</span>
+          <span class="chip ${i.max_uses == null ? "warn" : "na"} !text-[10px]">${i.max_uses == null ? "Çok kullanımlık" : "Tek kullanımlık"}</span>
+          <span class="text-xs text-secondary">${fmtNum(i.uses)} kullanım</span></div>
+        <div class="text-[11px] text-secondary mt-1 break-all">Son geçerlilik ${esc(tmDate(i.expires_at))} · oluşturan ${esc(i.created_by_email || "—")} · ${esc(tmDate(i.created_at))}</div>
+        <div class="tg-inv-row-msg text-[11px] text-error"></div>
+      </div>
+      <button type="button" class="btn btn-danger tg-inv-revoke"><span class="material-symbols-outlined">link_off</span>İptal et</button>`;
+    row.querySelector(".tg-inv-revoke").addEventListener("click", async (e) => {
+      if (!confirm(`"${i.team_name}" davet bağlantısı iptal edilsin mi? Bu bağlantıyla kaydolanlar ekip dışı başlar.`)) return;
+      e.currentTarget.disabled = true;
+      try { await tgApi(`/api/invites/${encodeURIComponent(i.id)}/revoke`, { method: "POST" }); await tgLoad(); }
+      catch (err) { e.currentTarget.disabled = false; row.querySelector(".tg-inv-row-msg").textContent = err.message; }
+    });
+    box.appendChild(row);
+  });
+}
+
+(function initTeamAdmin() {
+  if (!$("#tg-tabs")) return;
+  $$("#tg-tabs .tab-btn").forEach(b => b.addEventListener("click", () => tgSelectTab(b.dataset.tab)));
+  $("#tg-team-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const msg = $("#tg-team-msg"), name = $("#tg-team-name").value.trim();
+    if (!name) { msg.textContent = "Ekip adı gerekli."; msg.className = "text-xs w-full text-error"; return; }
+    try {
+      await tgApi("/api/teams", { method: "POST", body: JSON.stringify({ name }) });
+      $("#tg-team-name").value = ""; msg.textContent = `"${name}" ekibi oluşturuldu.`; msg.className = "text-xs w-full text-primary";
+      await tgLoad();
+    } catch (err) { msg.textContent = err.message; msg.className = "text-xs w-full text-error"; }
+  });
+  $("#tg-mem-filter").addEventListener("change", (e) => { tgState.memFilter = e.target.value; tgRenderMembers(); });
+  $("#tg-inv-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const msg = $("#tg-inv-msg"); msg.textContent = ""; msg.className = "text-xs sm:col-span-2 lg:col-span-4";
+    const days = Math.round(Number($("#tg-inv-days").value));
+    if (!(days >= 1 && days <= 90)) { msg.textContent = "Geçerlilik 1–90 gün olmalı."; msg.classList.add("text-error"); return; }
+    const teamId = Number($("#tg-inv-team").value);
+    if (!teamId) return;
+    try {
+      const b = await tgApi("/api/invites", { method: "POST", body: JSON.stringify({ team_id: teamId, multi_use: $("#tg-inv-uses").value === "multi", days }) });
+      const team = tgState.teams.find(t => t.id === teamId);
+      $("#tg-inv-link").value = `${location.origin}${location.pathname}?invite=${encodeURIComponent(b.code)}`;
+      $("#tg-inv-result-label").textContent = `"${team ? team.name : ""}" için ${$("#tg-inv-uses").value === "multi" ? "çok" : "tek"} kullanımlık davet · ${tmDate(b.expires_at)} tarihine kadar geçerli`;
+      $("#tg-inv-result").style.display = "";
+      await tgLoad();
+    } catch (err) { msg.textContent = err.message; msg.classList.add("text-error"); }
+  });
+  $("#tg-inv-copy").addEventListener("click", async () => {
+    const inp = $("#tg-inv-link");
+    try { await navigator.clipboard.writeText(inp.value); } catch { inp.select(); document.execCommand?.("copy"); }
+    $("#tg-inv-copy").innerHTML = '<span class="material-symbols-outlined">check</span>Kopyalandı';
+    setTimeout(() => { $("#tg-inv-copy").innerHTML = '<span class="material-symbols-outlined">content_copy</span>Kopyala'; }, 1500);
+  });
+})();
+
 /** Geçmiş'teki gibi: mevcut runAnalysis ile CANLI analiz (önbellek okunmaz; /api/analyze her zaman MCP'ye gider). */
 function tmReanalyze(keyword, marketplace) {
   const target = tmAnalysisTarget(keyword);
@@ -3455,11 +3697,11 @@ function tmReanalyze(keyword, marketplace) {
 
 (function initTeam() {
   if (!$("#tm-filters")) return;
-  ["#tm-user", "#tm-from", "#tm-to", "#tm-decision"].forEach(sel => $(sel).addEventListener("change", loadTeam));
+  ["#tm-team", "#tm-user", "#tm-from", "#tm-to", "#tm-decision"].forEach(sel => $(sel).addEventListener("change", loadTeam));
   $("#tm-q").addEventListener("input", () => { clearTimeout(tmState.timer); tmState.timer = setTimeout(loadTeam, 300); });
   $("#tm-filters").addEventListener("submit", (e) => { e.preventDefault(); loadTeam(); });
   $("#tm-alltime").addEventListener("click", () => { $("#tm-from").value = ""; $("#tm-to").value = ""; loadTeam(); });
-  $("#tm-reset").addEventListener("click", () => { ["#tm-user", "#tm-from", "#tm-to", "#tm-decision", "#tm-q"].forEach(sel => { $(sel).value = ""; }); loadTeam(); });
+  $("#tm-reset").addEventListener("click", () => { ["#tm-team", "#tm-user", "#tm-from", "#tm-to", "#tm-decision", "#tm-q"].forEach(sel => { $(sel).value = ""; }); loadTeam(); });
   $$("#tm-tabs .tab-btn").forEach(btn => btn.addEventListener("click", () => {
     tmState.tab = btn.dataset.tab;
     $$("#tm-tabs .tab-btn").forEach(b => b.classList.toggle("active", b === btn));
