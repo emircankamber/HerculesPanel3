@@ -29,6 +29,7 @@ from urllib.parse import quote
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import asyncio
+import contextvars
 from fastapi import FastAPI, HTTPException, Query, BackgroundTasks, Depends, Header
 from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -91,22 +92,28 @@ async def _all_exceptions_as_json(request, exc: Exception):
 
 @app.on_event("startup")
 async def startup():
+    # Şema sürümü güncelse tek sorgu; değilse tüm migrasyonlar (+ sertifika tohumu) tek bağlantıda.
     await db.init_db()
-    await db.init_db_v3()
-    await db.seed_cert_requirements_if_empty()
+
+
+# İsteğe özel (her istek kendi görevinde/bağlamında çalışır): require_session'ın getirdiği rol + ekip bilgisi.
+_AUTH_CTX: contextvars.ContextVar = contextvars.ContextVar("auth_ctx", default=None)
 
 
 async def require_session(authorization: str | None = Header(default=None)) -> dict:
     """
     Oturum kontrolü — ad soyad kapısı OLMADAN. Yalnızca kişinin ad soyadını girebilmesi için gereken
     uçlarda (profil) kullanılır; diğer tüm uçlar `require_auth`.
+    Oturum + rol + ekip bilgisi tek sorguda gelir (db.get_session); rol ve ekip isteğe özel bağlama
+    (`_AUTH_CTX`) konur, require_user / _forum_viewer aynı istekte yeniden sorgulamaz.
     """
-    if await db.user_count() == 0:
+    if not await db.has_users():
         return {"email": "(auth kapalı — henüz kullanıcı yok)", "auth_disabled": True}
     token = (authorization or "").replace("Bearer ", "").strip()
     session = await db.get_session(token)
     if not session:
         raise HTTPException(401, "Oturum geçersiz veya süresi dolmuş — lütfen giriş yapın")
+    _AUTH_CTX.set({"user_id": session["user_id"], "role": session["role"], "in_team": session["in_team"]})
     return {"email": session["email"], "user_id": session["user_id"], "token": token,
             "needs_name": not ((session.get("first_name") or "").strip() and (session.get("last_name") or "").strip())}
 
@@ -120,13 +127,19 @@ async def require_auth(authorization: str | None = Header(default=None)) -> dict
     Hiç kullanıcı kayıtlı değilse kimlik doğrulama DEVRE DIŞI (ilk kurulum kolaylığı) —
     ilk kullanıcı kaydolduğu anda tüm korumalı uçlar otomatik kilitlenir.
     """
-    if await db.user_count() == 0:
+    if not await db.has_users():
         return {"email": "(auth kapalı — henüz kullanıcı yok)", "auth_disabled": True}
     user = await require_session(authorization)
     # AD SOYAD KAPISI (sunucuda): adı/soyadı olmayan (eski) hesap, profil uçları dışında hiçbir şey yapamaz.
     if user.pop("needs_name", False):
         raise HTTPException(428, NAME_REQUIRED_DETAIL)
     return user
+
+
+def _auth_state(user_id) -> dict | None:
+    """require_session'ın BU istekte oturum sorgusuyla birlikte getirdiği rol/ekip bilgisi (yoksa None)."""
+    st = _AUTH_CTX.get()
+    return st if st and st.get("user_id") == user_id else None
 
 
 async def require_user(user: dict = Depends(require_auth)) -> dict:
@@ -137,7 +150,8 @@ async def require_user(user: dict = Depends(require_auth)) -> dict:
     """
     if user.get("auth_disabled") or not user.get("user_id"):
         raise HTTPException(401, "Bu bölüm için kayıtlı bir hesapla giriş yapın")
-    role = await db.get_user_role(user["user_id"])
+    st = _auth_state(user["user_id"])
+    role = st["role"] if st else await db.get_user_role(user["user_id"])
     if not role:
         raise HTTPException(401, "Kullanıcı bulunamadı — lütfen tekrar giriş yapın")
     return {**user, "role": role}
@@ -1298,13 +1312,13 @@ async def auth_logout(authorization: str | None = Header(default=None)):
 @app.get("/api/auth/status")
 async def auth_status(authorization: str | None = Header(default=None)):
     """Frontend açılışta çağırır: giriş gerekli mi, kullanıcı kim, veri paylaşımlı mı."""
-    count = await db.user_count()
+    has_users = await db.has_users()
     token = (authorization or "").replace("Bearer ", "").strip()
     session = await db.get_session(token) if token else None
-    role = await db.get_user_role(session["user_id"]) if session else None
+    role = session["role"] if session else None
     return {
-        "auth_required": count > 0,
-        "has_users": count > 0,
+        "auth_required": has_users,
+        "has_users": has_users,
         "logged_in": bool(session),
         "email": session["email"] if session else None,
         "name": db.display_name(session) if session else None,
@@ -1859,8 +1873,9 @@ async def users_set_teams(target_id: int, req: UserTeamsIn, user: dict = Depends
 # bülten, istatistik, doğrudan link, cevap/oy/kayıt) -> 404. Kural her uçta `_visible_thread`'de.
 # ---------------------------------------------------------------------------
 async def _forum_viewer(user: dict) -> dict:
+    st = _auth_state(user["user_id"])
     return {"id": user["user_id"], "role": user["role"], "staff": user["role"] in ("owner", "admin"),
-            "can_see_team": await db.is_in_team(user["user_id"])}
+            "can_see_team": st["in_team"] if st else await db.is_in_team(user["user_id"])}
 
 
 def _forum_author(row: dict, uid_key: str = "user_id") -> dict:
@@ -2239,7 +2254,8 @@ async def forum_cat_delete(cid: int, user: dict = Depends(require_owner)):
 async def require_profile_user(user: dict = Depends(require_session)) -> dict:
     if user.get("auth_disabled") or not user.get("user_id"):
         raise HTTPException(401, "Bu bölüm için kayıtlı bir hesapla giriş yapın")
-    role = await db.get_user_role(user["user_id"])
+    st = _auth_state(user["user_id"])
+    role = st["role"] if st else await db.get_user_role(user["user_id"])
     if not role:
         raise HTTPException(401, "Kullanıcı bulunamadı — lütfen tekrar giriş yapın")
     return {**user, "role": role}

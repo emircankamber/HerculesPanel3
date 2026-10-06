@@ -7,6 +7,7 @@ import os
 import time
 import hashlib
 import secrets
+import db_adapter
 from db_adapter import execute, execute_returning_id, execute_fetch, fetch_all, fetch_one, storage_info, USE_POSTGRES
 import forum
 
@@ -240,10 +241,45 @@ async def _ensure_staff_in_team():
             await _add_member(await _default_team_id(), r["id"])
 
 
+# ---------------------------------------------------------------------------
+# ŞEMA SÜRÜMÜ — açılışta TEK sorgu.
+# Sürüm güncelse (ve OWNER_EMAILS değişmediyse) hiçbir CREATE/ALTER/UPDATE çalışmaz.
+# Değilse tüm migrasyonlar TEK bağlantıda çalışır ve sürüm yükseltilir.
+# ŞEMAYA/MİGRASYONA HER DEĞİŞİKLİKTE (yeni tablo, sütun, indeks, veri düzeltmesi, tohum) BU SAYIYI ARTIR —
+# artırmazsan canlı veritabanında migrasyon hiç çalışmaz.
+# ---------------------------------------------------------------------------
+SCHEMA_VERSION = 1
+
+
+def _migration_env_hash() -> str:
+    """Migrasyonun sonucunu etkileyen ortam ayarı: OWNER_EMAILS (kalıcı owner'lar owner yapılır ve
+    ekibe eklenir). Değişirse sürüm aynı olsa da migrasyon yeniden çalışır. E-postalar değil özet saklanır."""
+    return hashlib.sha256(",".join(sorted(permanent_owner_emails())).encode()).hexdigest()
+
+
+async def _schema_is_current() -> bool:
+    try:
+        row = await fetch_one("SELECT version, env_hash FROM schema_version WHERE id = 1")
+    except Exception:
+        return False   # tablo yok (ilk kurulum ya da sürüm kapısından önceki veritabanı)
+    return bool(row) and int(row.get("version") or 0) >= SCHEMA_VERSION \
+        and row.get("env_hash") == _migration_env_hash()
+
+
 async def init_db():
-    for schema in _SCHEMAS + forum.SCHEMAS:
-        await execute(schema)
-    await _migrate_schema()
+    if await _schema_is_current():
+        return
+    async with db_adapter.single_connection():
+        for schema in _SCHEMAS + forum.SCHEMAS:
+            await execute(schema)
+        await _migrate_schema()
+        await seed_cert_requirements_if_empty()
+        await execute("CREATE TABLE IF NOT EXISTS schema_version (id INTEGER PRIMARY KEY, version INTEGER NOT NULL, "
+                      "env_hash TEXT, updated_at INTEGER)")
+        await execute("INSERT INTO schema_version (id, version, env_hash, updated_at) VALUES (1, ?, ?, ?) "
+                      "ON CONFLICT (id) DO UPDATE SET version = excluded.version, env_hash = excluded.env_hash, "
+                      "updated_at = excluded.updated_at",
+                      (SCHEMA_VERSION, _migration_env_hash(), int(time.time())))
 
 
 async def init_db_v3():
@@ -308,11 +344,21 @@ async def create_session(user: dict) -> str:
 
 
 async def get_session(token: str) -> dict | None:
-    """Oturum + kullanıcının ad/soyadı (ad soyad kapısı için tek sorgu)."""
+    """Oturum + kullanıcı bilgisi TEK sorguda: ad/soyad (ad soyad kapısı), rol (get_user_role ile aynı
+    kural: OWNER_EMAILS -> owner, geçersiz -> member; hesap yoksa None) ve en az bir ekipte olup olmadığı."""
     if not token:
         return None
-    return await fetch_one("SELECT s.*, u.first_name, u.last_name FROM sessions s "
-                           "LEFT JOIN users u ON u.id = s.user_id WHERE s.token = ?", (token,))
+    row = await fetch_one(
+        "SELECT s.*, u.first_name, u.last_name, u.id AS u_id, u.email AS u_email, u.role AS u_role, "
+        "EXISTS (SELECT 1 FROM team_members m WHERE m.user_id = s.user_id) AS u_in_team "
+        "FROM sessions s LEFT JOIN users u ON u.id = s.user_id WHERE s.token = ?", (token,))
+    if not row:
+        return None
+    exists = row.pop("u_id") is not None
+    email, role, in_team = row.pop("u_email"), row.pop("u_role"), row.pop("u_in_team")
+    row["role"] = ("owner" if _is_permanent(email) else _norm_role(role)) if exists else None
+    row["in_team"] = bool(in_team)
+    return row
 
 
 async def delete_session(token: str):
@@ -322,6 +368,18 @@ async def delete_session(token: str):
 async def user_count() -> int:
     row = await fetch_one("SELECT COUNT(*) AS c FROM users")
     return (row or {}).get("c", 0) or 0
+
+
+# Kullanıcı olduğu bir kez görülünce bellekte tutulur (her istekte COUNT yok). Güvenli: kullanıcı sayısı
+# sıfıra dönemez (kendi hesabını ve son owner'ı silmek yasak). Henüz kullanıcı yokken her seferinde sorulur.
+_users_seen = False
+
+
+async def has_users() -> bool:
+    global _users_seen
+    if not _users_seen and await user_count() > 0:
+        _users_seen = True
+    return _users_seen
 
 
 # ---------------------------------------------------------------------------
