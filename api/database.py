@@ -521,8 +521,16 @@ async def team_decisions(user_id: int | None = None, since: int | None = None, u
         "ORDER BY q.decided_at DESC, q.id DESC", tuple(args))
 
 
-async def team_verdict_log() -> list[dict]:
-    """Kararlara 'ön öneri' eşlemek için (user_id, keyword, marketplace) -> sorgu verdict'leri."""
+async def team_verdict_log(keywords=None) -> list[dict]:
+    """Kararlara 'ön öneri' eşlemek için (user_id, keyword, marketplace) -> sorgu verdict'leri.
+    keywords verilirse yalnızca o keyword'lerin sorguları (sayfadaki kararlar için; boş liste -> hiç)."""
+    if keywords is not None:
+        keywords = sorted(set(keywords))
+        if not keywords:
+            return []
+        marks = ",".join("?" for _ in keywords)
+        return await fetch_all("SELECT user_id, keyword, marketplace, queried_at, verdict FROM user_query_log "
+                               f"WHERE verdict IS NOT NULL AND keyword IN ({marks}) ORDER BY queried_at", tuple(keywords))
     return await fetch_all("SELECT user_id, keyword, marketplace, queried_at, verdict FROM user_query_log "
                            "WHERE verdict IS NOT NULL ORDER BY queried_at")
 

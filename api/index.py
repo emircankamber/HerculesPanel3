@@ -725,8 +725,99 @@ class ReportRow(BaseModel):
     decided_by: str | None = Field(None, max_length=300)
 
 
+# ---------------------------------------------------------------------------
+# RAPORLAR — kullanıcının kendi kararları + son 200 sorgusu, (keyword, pazar) başına tek kayıt.
+# Eskiden panel /api/decisions + /api/recent?limit=200'ü çekip istemcide birleştiriyordu; birleştirme,
+# filtre, KPI ve sayfalama artık burada (aynı kurallar), panel yalnızca bir sayfayı alır.
+# ---------------------------------------------------------------------------
+REPORTS_PAGE_SIZE = 20
+REPORTS_RECENT_LIMIT = 200
+REPORT_STATUSES = ("all", "decided", "pending")
+
+
+async def _report_items(user_id) -> list[dict]:
+    grouped = await db.list_decisions_grouped(user_id)
+    recent = await db.list_recent(user_id, REPORTS_RECENT_LIMIT)
+    items: dict = {}
+    key = lambda kw, m: f"{str(kw).lower()}|{m}"
+    for decision, rows in (grouped or {}).items():
+        for it in rows or []:
+            items[key(it["keyword"], it["marketplace"])] = {
+                "keyword": it["keyword"], "marketplace": it["marketplace"], "decision": decision,
+                "note": it.get("note") or "", "decided_at": it.get("decided_at"), "decided_by": it.get("decided_by") or "",
+                "verdict": None, "queried_at": None}
+    for r in recent:
+        cur = items.get(key(r["keyword"], r["marketplace"]))
+        if cur:
+            if not cur["queried_at"] or (r["fetched_at"] or 0) > cur["queried_at"]:
+                cur["queried_at"], cur["verdict"] = r["fetched_at"], r["verdict"]
+        else:
+            items[key(r["keyword"], r["marketplace"])] = {
+                "keyword": r["keyword"], "marketplace": r["marketplace"], "decision": None, "note": "",
+                "decided_at": None, "decided_by": "", "verdict": r["verdict"], "queried_at": r["fetched_at"]}
+    return sorted(items.values(), key=_report_ts, reverse=True)
+
+
+def _report_ts(it) -> int:
+    return max(it.get("decided_at") or 0, it.get("queried_at") or 0)
+
+
+def _report_filter(items: list, status: str, q: str, range_days: int | None, market: str, now: float):
+    """(liste filtresi uygulanmış kayıtlar, KPI kümesi = yalnızca aralık + pazar filtresi)."""
+    in_range = [it for it in items
+                if (range_days is None or now - _report_ts(it) <= range_days * 86400)
+                and (market == "all" or it["marketplace"] == market)]
+    needle = (q or "").strip().lower()
+    out = []
+    for it in in_range:
+        if status == "decided" and not it["decision"]:
+            continue
+        if status == "pending" and it["decision"]:
+            continue
+        if needle and needle not in f"{it['keyword']} {it['note']}".lower():
+            continue
+        out.append(it)
+    return out, in_range
+
+
+def _report_range(range_: str) -> int | None:
+    if range_ in ("", "all"):
+        return None
+    if not range_.isdigit() or not 1 <= int(range_) <= 3650:
+        raise HTTPException(422, "Geçersiz tarih aralığı")
+    return int(range_)
+
+
+@app.get("/api/reports")
+async def reports(status: str = Query("all"), q: str = Query("", max_length=200), range: str = Query("all", max_length=8),
+                  market: str = Query("all", max_length=10), page: int = Query(1, ge=1),
+                  user: dict = Depends(require_auth)):
+    """Raporlar sayfası: filtrelenmiş liste SAYFALI; KPI'lar (aralık + pazar filtresiyle) tüm kümeden."""
+    if status not in REPORT_STATUSES:
+        raise HTTPException(422, "Geçersiz durum filtresi")
+    items = await _report_items(user.get("user_id", 0))
+    now = time.time()
+    rows, in_range = _report_filter(items, status, q, _report_range(range), market, now)
+    pg, page_rows = _page_slice(rows, page, REPORTS_PAGE_SIZE)
+    count = lambda d: sum(1 for it in in_range if it["decision"] == d)
+    return {"items": page_rows, "total": len(rows), "all_count": len(items),
+            "page": pg["page"], "pages": pg["pages"], "page_size": REPORTS_PAGE_SIZE,
+            "kpi": {"total": len(in_range), "week": sum(1 for it in in_range if now - _report_ts(it) <= 7 * 86400),
+                    "uygun": count("Uygun"), "sinirda": count("Sınırda"), "elenmis": count("Elenmiş"),
+                    "undecided": sum(1 for it in in_range if not it["decision"])}}
+
+
+class ReportFilters(BaseModel):
+    status: str = "all"
+    q: str = Field("", max_length=200)
+    range: str = Field("all", max_length=8)
+    market: str = Field("all", max_length=10)
+
+
 class ExportReportsRequest(BaseModel):
     rows: list[ReportRow] = Field(default_factory=list, max_length=10000)
+    # Verilirse satırlar SUNUCUDA (Raporlar sayfasının filtreleriyle, tüm sayfalar) üretilir; `rows` yok sayılır.
+    filters: ReportFilters | None = None
     tz_offset_min: int = Field(0, ge=-900, le=900)
     filename: str = Field("pl_pazar_raporlari", max_length=120)
 
@@ -734,8 +825,19 @@ class ExportReportsRequest(BaseModel):
 @app.post("/api/export/reports")
 async def export_reports(req: ExportReportsRequest, user: dict = Depends(require_auth)):
     """Raporlar sayfası listesini (eski CSV ile aynı sütunlar) Excel olarak döner. Metinler formül değil METİN yazılır."""
+    if req.filters is not None:
+        f = req.filters
+        if f.status not in REPORT_STATUSES:
+            raise HTTPException(422, "Geçersiz durum filtresi")
+        rows, _ = _report_filter(await _report_items(user.get("user_id", 0)), f.status, f.q,
+                                 _report_range(f.range), f.market, time.time())
+        rows = [{"keyword": it["keyword"] or "", "marketplace": it["marketplace"] or "", "decision": it["decision"] or "",
+                 "verdict": it["verdict"] or "", "note": it["note"] or "", "decided_at": it["decided_at"] or None,
+                 "queried_at": it["queried_at"] or None, "decided_by": it["decided_by"] or ""} for it in rows]
+    else:
+        rows = [r.model_dump() for r in req.rows]
     try:
-        xlsx_bytes = excel_export.build_reports_xlsx([r.model_dump() for r in req.rows], req.tz_offset_min)
+        xlsx_bytes = excel_export.build_reports_xlsx(rows, req.tz_offset_min)
     except Exception as e:
         raise HTTPException(500, f"Excel oluşturulamadı: {e}")
     return Response(
@@ -2979,7 +3081,14 @@ async def launch_report(req: LaunchReportIn, user: dict = Depends(require_auth))
 # MCP çağrısı yok; kayda tıklamak panelde runAnalysis ile CANLI yeni analiz başlatır.
 # ---------------------------------------------------------------------------
 TEAM_DECISIONS = ("Uygun", "Sınırda", "Elenmiş")
-TEAM_MAX_ROWS = 1000
+TEAM_PAGE_SIZE = 50   # Ekip Aktivitesi listeleri sunucudan sayfalı gelir
+
+
+def _page_slice(rows: list, page: int, size: int):
+    """(sayfa bilgisi, o sayfanın satırları). Sayfa aralık dışındaysa son sayfaya çekilir."""
+    pages = max(1, -(-len(rows) // size))
+    page = min(max(1, page), pages)
+    return {"page": page, "pages": pages}, rows[(page - 1) * size: page * size]
 
 
 def _tr_fold(s: str) -> str:
@@ -2999,6 +3108,7 @@ def _verdict_for(index: dict, uid, kw, mp, at):
 async def team_activity(user_id: int | None = Query(None, ge=0), team_id: int | None = Query(None, ge=1),
                         since: int | None = Query(None, ge=0), until: int | None = Query(None, ge=0),
                         decision: str | None = Query(None), q: str | None = Query(None, max_length=200),
+                        q_page: int = Query(1, ge=1), d_page: int = Query(1, ge=1),
                         user: dict = Depends(require_owner)):
     if decision and decision not in TEAM_DECISIONS:
         raise HTTPException(422, "Geçersiz karar filtresi")
@@ -3021,8 +3131,13 @@ async def team_activity(user_id: int | None = Query(None, ge=0), team_id: int | 
         queries = [r for r in queries if needle in _tr_fold(r["keyword"])]
         decisions = [r for r in decisions if needle in _tr_fold(r["keyword"])]
 
+    # SAYFALAMA (sunucuda): listeler sayfa sayfa döner; toplamlar/özet tüm filtrelenmiş kümeden.
+    q_pg, q_rows = _page_slice(queries, q_page, TEAM_PAGE_SIZE)
+    d_pg, d_rows = _page_slice(decisions, d_page, TEAM_PAGE_SIZE)
+
+    # Ön öneri yalnızca bu sayfadaki kararlar için (onların keyword'lerinin sorgu geçmişinden) hesaplanır.
     vindex: dict = {}
-    for r in await db.team_verdict_log():
+    for r in await db.team_verdict_log([r["keyword"] for r in d_rows]):
         vindex.setdefault((r["user_id"], r["keyword"], r["marketplace"]), []).append((r["queried_at"], r["verdict"]))
 
     def who(uid, email):
@@ -3030,12 +3145,12 @@ async def team_activity(user_id: int | None = Query(None, ge=0), team_id: int | 
 
     q_out = [{"id": r["id"], "user_id": r["user_id"], "user": who(r["user_id"], r.get("email")), "email": emails.get(r["user_id"]),
               "keyword": r["keyword"], "marketplace": r["marketplace"], "at": r["queried_at"],
-              "verdict": r.get("verdict")} for r in queries]
+              "verdict": r.get("verdict")} for r in q_rows]
     d_out = [{"id": r["id"], "user_id": r["user_id"], "user": who(r["user_id"], r.get("email")), "email": emails.get(r["user_id"]),
               "keyword": r["keyword"], "marketplace": r["marketplace"], "at": r["decided_at"],
               "decision": r["decision"], "note": r.get("note") or "",
               "verdict": _verdict_for(vindex, r["user_id"], r["keyword"], r["marketplace"], r["decided_at"])}
-             for r in decisions]
+             for r in d_rows]
 
     # Özet: seçili tarih aralığı (since/until), aralık yoksa TÜM ZAMANLAR. Kişi/karar/arama filtreleri özete uygulanmaz.
     counts = await db.team_counts(since, until)
@@ -3048,6 +3163,7 @@ async def team_activity(user_id: int | None = Query(None, ge=0), team_id: int | 
             "teams": _team_opts(teams),
             "users": [{"id": u["id"], "name": u["name"] or u["email"], "email": u["email"], "role": u["role"]} for u in users],
             "summary": summary,
-            "queries": q_out[:TEAM_MAX_ROWS], "decisions": d_out[:TEAM_MAX_ROWS],
-            "totals": {"queries": len(q_out), "decisions": len(d_out)}, "truncated_at": TEAM_MAX_ROWS}
+            "queries": q_out, "decisions": d_out,
+            "totals": {"queries": len(queries), "decisions": len(decisions)},
+            "page_size": TEAM_PAGE_SIZE, "pages": {"queries": q_pg, "decisions": d_pg}}
 
