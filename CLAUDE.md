@@ -530,6 +530,17 @@ satır kapsayıcının `overflow:hidden`'ı ile gizleniyor. Favicon: `assets/her
   sepet ağırlığı girilmezse sevkiyat adedi payı kullanılır.
 
 <!-- graphify-rules-start (managed by `graphify init`) -->
+## Tailwind — derlenmiş CSS (CDN YOK)
+
+- `cdn.tailwindcss.com` kaldırıldı; panel repodaki küçültülmüş `tailwind.css`'i yükler (`index.html`'de
+  `styles.css`'ten SONRA — eski CDN stilleri de en sona eklendiği için sıralama aynı kaldı). Yapılandırma
+  `tailwind/tailwind.config.js` (renk/font token'ları), giriş `tailwind/input.css`.
+- **Yeni bir Tailwind sınıfı eklediğinde (index.html ya da app.js) CSS'i yeniden üret ve commit'le:**
+  `./scripts/build-css.sh` (`npx tailwindcss@3.4.17 ... --minify`). Üretmezsen sınıf CSS'te olmaz, sessizce görünmez.
+- Tarama yalnızca TAM yazılmış sınıfları görür. `bg-${renk}` gibi parça birleştirmeyle sınıf kurma; gerekiyorsa
+  olası tüm sonuçları `tailwind.config.js` → `safelist`'e ekle. (Şu an `${...}` ile kurulan sınıfların hepsi
+  styles.css'teki özel sınıflar ya da ternary içinde tam literaller — safelist boş.)
+
 ## Use Graphify before grep
 
 This repository is indexed by Graphify: a code graph over its call, dependency, and test structure, exposed through a connected Graphify MCP server. Before reaching for grep or reading files, use the Graphify tools your MCP client lists (their exact names and descriptions are in the server's tool list) for what the graph knows and a text search does not:
