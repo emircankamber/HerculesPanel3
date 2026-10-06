@@ -1788,7 +1788,7 @@ async def training_progress(team_id: int | None = Query(None, ge=1), user: dict 
 
     lessons = await db.list_lessons_all()
     return {
-        "team_id": team_id, "teams": [{"id": t["id"], "name": t["name"]} for t in await db.list_teams()],
+        "team_id": team_id, "teams": _team_opts(await db.list_teams()),
         "users": users,
         "lessons": [{"id": l["id"], "title": l["title"], "sort_order": l["sort_order"], "due_date": l.get("due_date"),
                      "assign_mode": l["assign_mode"], "assignee_ids": assignees(l)} for l in lessons],
@@ -1804,7 +1804,7 @@ async def users_list(user: dict = Depends(require_staff)):
     if user["role"] != "owner":   # e-posta yalnızca owner ekranlarında (ikincil bilgi)
         users = [{k: v for k, v in u.items() if k != "email"} for u in users]
     return {"users": users, "me": user["user_id"], "my_role": user["role"],
-            "teams": [{"id": t["id"], "name": t["name"]} for t in await db.list_teams()]}
+            "teams": _team_opts(await db.list_teams())}
 
 
 class RoleIn(BaseModel):
@@ -2400,13 +2400,14 @@ async def skills_map(team: str = Query("all", max_length=20), field: str = Query
     if not fields:
         raise HTTPException(422, "Bilinmeyen yetkinlik alanı")
     keys = [f["key"] for f in fields]
-    teams = {t["id"]: t["name"] for t in await db.list_teams()}
+    team_list = await db.list_teams()
+    teams = {t["id"]: t["label"] for t in team_list}
     forms = await db.all_competency()
     rows, pending = [], []
     for u in scope:
         f = forms.get(u["id"])
         person = {"id": u["id"], "name": u["name"] or u["email"], "email": u["email"],
-                  "teams": [teams[t] for t in u["team_ids"] if t in teams]}
+                  "teams": [teams[t] for t in u["direct_team_ids"] if t in teams]}
         if not f or f.get("status") != "submitted":
             prog = comp.progress((f or {}).get("answers") or {})
             pending.append({**person, "status": (f or {}).get("status") or "none", "progress": prog,
@@ -2426,9 +2427,36 @@ async def skills_map(team: str = Query("all", max_length=20), field: str = Query
             "sections": [{"key": s["key"], "no": s["no"], "title": s["title"]} for s in comp.SECTIONS
                          if any(f["type"] == "ratings" for f in s["fields"])],
             "all_fields": [{k: f[k] for k in ("key", "label", "section_key")} for f in comp.SKILL_FIELDS],
-            "teams": [{"id": k, "name": v} for k, v in teams.items()],
+            "teams": _team_opts(team_list),
             "rows": rows, "pending": pending, "levels": comp.LEVELS,
             "filters": {"team": team, "field": field, "min_level": min_level}}
+
+
+@app.post("/api/users/{target_id}/teams/{team_id}")
+async def users_add_team(target_id: int, team_id: int, user: dict = Depends(require_owner)):
+    """Tek ekibe ekler (alt ekibe eklenen ana ekibin de üyesi sayılır — ayrıca eklemeye gerek yok)."""
+    try:
+        await db.add_user_to_team(target_id, team_id)
+    except LookupError:
+        raise HTTPException(404, "Kullanıcı bulunamadı")
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    return {"ok": True, "team_ids": await db.user_team_ids(target_id)}
+
+
+@app.delete("/api/users/{target_id}/teams/{team_id}")
+async def users_remove_team(target_id: int, team_id: int, user: dict = Depends(require_owner)):
+    """Ekipten çıkarır; ANA ekipten çıkarılan kişi o ana ekibin tüm alt ekiplerinden de çıkar (removed listesi).
+    Owner/admin son ekibinden çıkarılamaz (409)."""
+    try:
+        removed = await db.remove_user_from_team(target_id, team_id)
+    except LookupError:
+        raise HTTPException(404, "Kullanıcı bulunamadı")
+    except db.TeamRuleError as e:
+        raise HTTPException(409, str(e))
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    return {"ok": True, "removed": removed, "team_ids": await db.user_team_ids(target_id)}
 
 
 # ---------------------------------------------------------------------------
@@ -2436,6 +2464,17 @@ async def skills_map(team: str = Query("all", max_length=20), field: str = Query
 # ---------------------------------------------------------------------------
 class TeamNameIn(BaseModel):
     name: str = Field(..., max_length=200)
+    parent_id: int | None = Field(None, ge=1)   # verilirse alt ekip olarak oluşturulur
+
+
+class TeamUpdateIn(BaseModel):
+    name: str | None = Field(None, max_length=200)
+    parent_id: int | None = Field(None, ge=1)   # GÖNDERİLİRSE taşır (null = ana ekip yap)
+
+
+def _team_opts(teams: list[dict]) -> list[dict]:
+    """Filtre/seçim listeleri için ağaç sıralı ekipler: label = "Ana › Alt"."""
+    return [{"id": t["id"], "name": t["label"], "short": t["name"], "parent_id": t.get("parent_id")} for t in teams]
 
 
 async def _team_or_404(team_id: int) -> dict:
@@ -2457,27 +2496,39 @@ async def teams_list(user: dict = Depends(require_owner)):
 
 @app.post("/api/teams")
 async def teams_create(req: TeamNameIn, user: dict = Depends(require_owner)):
+    """Ana ekip ya da (parent_id ile) alt ekip. Yalnızca iki seviye: alt ekibin altına ekip açılamaz (409)."""
     try:
-        tid = await db.create_team(req.name)
+        tid = await db.create_team(req.name, req.parent_id)
     except db.TeamNameError as e:
         raise HTTPException(422, str(e))
+    except db.TeamRuleError as e:
+        raise HTTPException(409, str(e))
+    except ValueError as e:
+        raise HTTPException(404, str(e))
     return {"ok": True, "id": tid}
 
 
 @app.put("/api/teams/{team_id}")
-async def teams_rename(team_id: int, req: TeamNameIn, user: dict = Depends(require_owner)):
+async def teams_update(team_id: int, req: TeamUpdateIn, user: dict = Depends(require_owner)):
+    """Yeniden adlandır ve/veya taşı. parent_id alanı gönderilirse taşınır (null = ana ekip yap). Alt ekipleri olan
+    ana ekip başka ekibin altına taşınamaz; hedef bir alt ekip olamaz (409)."""
     await _team_or_404(team_id)
+    move = "parent_id" in req.model_fields_set
     try:
-        await db.rename_team(team_id, req.name)
+        await db.update_team(team_id, name=req.name, move=move, parent_id=req.parent_id)
     except db.TeamNameError as e:
         raise HTTPException(422, str(e))
+    except db.TeamRuleError as e:
+        raise HTTPException(409, str(e))
+    except ValueError as e:
+        raise HTTPException(404, str(e))
     return {"ok": True, "id": team_id}
 
 
 @app.delete("/api/teams/{team_id}")
 async def teams_delete(team_id: int, user: dict = Depends(require_owner)):
     """Kullanıcılar ve verileri SİLİNMEZ; yalnızca üyelikler, ders-ekip atamaları ve ekibin davetleri
-    kalkar. Bir owner/admin'in tek ekibiyse 409."""
+    kalkar. Alt ekipleri olan ana ekip ya da bir owner/admin'in tek ekibi silinemez (409)."""
     await _team_or_404(team_id)
     try:
         await db.delete_team(team_id)
@@ -2946,7 +2997,7 @@ async def team_activity(user_id: int | None = Query(None, ge=0), team_id: int | 
     names = {u["id"]: u["name"] for u in users}   # panelde "Ad Soyad"; e-posta yalnızca ikincil bilgi (owner ekranı)
     team = set(emails)
     teams = await db.list_teams()
-    team_names = {t["id"]: t["name"] for t in teams}
+    team_names = {t["id"]: t["label"] for t in teams}
     queries = [r for r in await db.team_queries(user_id, since, until) if r["user_id"] in team]
     decisions = [r for r in await db.team_decisions(user_id, since, until, decision) if r["user_id"] in team]
     if q and q.strip():
@@ -2973,12 +3024,12 @@ async def team_activity(user_id: int | None = Query(None, ge=0), team_id: int | 
     # Özet: seçili tarih aralığı (since/until), aralık yoksa TÜM ZAMANLAR. Kişi/karar/arama filtreleri özete uygulanmaz.
     counts = await db.team_counts(since, until)
     summary = [{"user_id": u["id"], "user": u["name"] or u["email"], "email": u["email"], "role": u["role"],
-                "teams": [team_names[t] for t in u["team_ids"] if t in team_names],
+                "teams": [team_names[t] for t in u["direct_team_ids"] if t in team_names],
                 "queries": counts["queries"].get(u["id"], 0), "decisions": counts["decisions"].get(u["id"], 0)}
                for u in users]
 
     return {"range": {"since": since, "until": until}, "team_id": team_id,
-            "teams": [{"id": t["id"], "name": t["name"]} for t in teams],
+            "teams": _team_opts(teams),
             "users": [{"id": u["id"], "name": u["name"] or u["email"], "email": u["email"], "role": u["role"]} for u in users],
             "summary": summary,
             "queries": q_out[:TEAM_MAX_ROWS], "decisions": d_out[:TEAM_MAX_ROWS],

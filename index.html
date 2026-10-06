@@ -1213,11 +1213,11 @@
           <!-- Ekipler -->
           <div id="tg-pane-teams" class="tg-pane">
             <form id="tg-team-form" class="card card-pad mt-4 flex flex-wrap items-end gap-3" novalidate>
-              <label class="flex flex-col gap-1.5 flex-1 min-w-[200px]"><span class="eyebrow">Yeni ekip</span>
-                <input type="text" id="tg-team-name" class="field" maxlength="60" placeholder="örn. Ürün Araştırma" autocomplete="off"></label>
-              <button type="submit" class="btn btn-primary"><span class="material-symbols-outlined">group_add</span>Ekip oluştur</button>
+              <label class="flex flex-col gap-1.5 flex-1 min-w-[200px]"><span class="eyebrow">Yeni ana ekip</span>
+                <input type="text" id="tg-team-name" class="field" maxlength="60" placeholder="örn. Hercules Brands" autocomplete="off"></label>
+              <button type="submit" class="btn btn-primary"><span class="material-symbols-outlined">group_add</span>Ana ekip oluştur</button>
               <span id="tg-team-msg" class="text-xs w-full"></span>
-              <p class="text-xs text-secondary w-full">Ekip silmek kullanıcıları ve verilerini (geçmiş, kararlar, kontrol listeleri, tamamlamalar) <b>silmez</b>; yalnızca üyelikleri, ekibe yapılan ders atamalarını ve ekibin davetlerini kaldırır. <span id="tg-outsiders"></span></p>
+              <p class="text-xs text-secondary w-full">İki seviye: ana ekip › alt ekip. Alt ekibe eklenen kişi ana ekibin de üyesi sayılır; ana ekipten çıkarılan alt ekiplerinden de çıkar. Alt ekibi olan ana ekip silinemez ve başka ekibin altına taşınamaz. Ekip silmek kullanıcıları ve verilerini (geçmiş, kararlar, kontrol listeleri, tamamlamalar) <b>silmez</b>; yalnızca üyelikleri, ekibe yapılan ders atamalarını ve ekibin davetlerini kaldırır. <span id="tg-outsiders"></span></p>
             </form>
             <div id="tg-team-list" class="flex flex-col gap-2 mt-4"></div>
           </div>

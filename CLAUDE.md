@@ -310,6 +310,20 @@ yüzden backend'e hiç bağlanmamalı, sahte veri olur.
   OKUNMAZ/YAZILMAZ. `_ensure_staff_in_team()` her açılışta ekipsiz owner/admin/`OWNER_EMAILS`'i varsayılan
   (en eski) ekibe ekler. Yeni kayıt ekip dışı başlar; owner olarak kaydolan (ilk kullanıcı / `OWNER_EMAILS`)
   varsayılan ekibe girer (hiç ekip yoksa "Genel" oluşturulur).
+- **Hiyerarşi (iki seviye):** `teams.parent_id` (`_add_column_if_missing`; NULL = ana ekip; mevcut ekipler ana ekip
+  kaldı, üyelik değişmedi). Alt ekibin altına ekip açılamaz (409); birden fazla ana ekip olabilir. **Kalıtım
+  hesaplanır, satır yazılmaz:** `team_members` yalnızca DOĞRUDAN üyelik; alt ekip üyesi ana ekibin de üyesi sayılır
+  (`db._effective`, `list_users().team_ids` = etkin, `direct_team_ids` = doğrudan). `team_member_ids(ana)` = doğrudan +
+  tüm alt ekiplerin üyeleri, `team_member_ids(alt)` = yalnızca kendisi → Aktivite, ilerleme, Yetenek Haritası
+  filtreleri buradan. Ana ekibe atanan ders alt ekip üyelerine de görünür (`_LESSON_VISIBLE_SQL` `mt.parent_id`),
+  alt ekibe atanan yalnızca o alt ekibe. `DELETE /api/users/{id}/teams/{team}`: ana ekipten çıkarma o ana ekibin TÜM
+  alt ekiplerinden de çıkarır (`removed` döner; panel onayda alt ekipleri listeler); `POST …/teams/{team}` ekler.
+  (`POST /api/users/{id}/teams {team_ids}` doğrudan kümeyi eşitler, zincirleme çıkarma yapmaz.) Taşıma
+  `PUT /api/teams/{id} {parent_id}` (gönderilirse; null = ana ekip yap): alt ekipleri olan ana ekip taşınamaz, hedef
+  ana ekip olmalı, kendi altına olmaz (409; koşul UPDATE'te de). Alt ekipleri olan ana ekip silinemez (409). Ad
+  benzersizliği aynı düzeyde (kardeşler arasında). Etiket `"Ana › Alt"` (`list_teams().label`, filtre/seçim listeleri
+  `_team_opts`). Davet alt ekip için de üretilir; davetle kaydolan o alt ekibe (dolayısıyla ana ekibe) katılır.
+  Owner/admin koruması etkin üyelikle: yalnızca alt ekipteki admin ana ekipten çıkarılamaz (409).
 - **Ekip yalnızca şunları kapsar** (filtre SUNUCUDA, `db.team_member_ids(team_id=None)` = en az bir ekipte olanlar):
   Aktivite (arama/karar/özet; `team_id` filtresi, varsayılan tüm ekipler; tüm ekiplerden çıkarılanınki görünmez,
   geri eklenince kayıtlar silinmediği için geri gelir), eğitim, owner/admin'in BAŞKALARININ kontrol listelerini
