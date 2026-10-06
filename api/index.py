@@ -57,6 +57,7 @@ except ImportError:
 import database as db
 import checklist as ckl
 import launch_report as lr
+import competency as comp
 import excel_export
 import supplier_scoring as sup
 import launch_control as lc
@@ -94,6 +95,24 @@ async def startup():
     await db.seed_cert_requirements_if_empty()
 
 
+async def require_session(authorization: str | None = Header(default=None)) -> dict:
+    """
+    Oturum kontrolü — ad soyad kapısı OLMADAN. Yalnızca kişinin ad soyadını girebilmesi için gereken
+    uçlarda (profil) kullanılır; diğer tüm uçlar `require_auth`.
+    """
+    if await db.user_count() == 0:
+        return {"email": "(auth kapalı — henüz kullanıcı yok)", "auth_disabled": True}
+    token = (authorization or "").replace("Bearer ", "").strip()
+    session = await db.get_session(token)
+    if not session:
+        raise HTTPException(401, "Oturum geçersiz veya süresi dolmuş — lütfen giriş yapın")
+    return {"email": session["email"], "user_id": session["user_id"], "token": token,
+            "needs_name": not ((session.get("first_name") or "").strip() and (session.get("last_name") or "").strip())}
+
+
+NAME_REQUIRED_DETAIL = "Devam etmek için önce adını ve soyadını girmen gerekiyor"
+
+
 async def require_auth(authorization: str | None = Header(default=None)) -> dict:
     """
     Korumalı endpoint'ler için oturum kontrolü.
@@ -102,11 +121,11 @@ async def require_auth(authorization: str | None = Header(default=None)) -> dict
     """
     if await db.user_count() == 0:
         return {"email": "(auth kapalı — henüz kullanıcı yok)", "auth_disabled": True}
-    token = (authorization or "").replace("Bearer ", "").strip()
-    session = await db.get_session(token)
-    if not session:
-        raise HTTPException(401, "Oturum geçersiz veya süresi dolmuş — lütfen giriş yapın")
-    return {"email": session["email"], "user_id": session["user_id"]}
+    user = await require_session(authorization)
+    # AD SOYAD KAPISI (sunucuda): adı/soyadı olmayan (eski) hesap, profil uçları dışında hiçbir şey yapamaz.
+    if user.pop("needs_name", False):
+        raise HTTPException(428, NAME_REQUIRED_DETAIL)
+    return user
 
 
 async def require_user(user: dict = Depends(require_auth)) -> dict:
@@ -1228,6 +1247,20 @@ class AuthRequest(BaseModel):
 
 class RegisterRequest(AuthRequest):
     invite: str | None = Field(None, max_length=200)   # davet bağlantısındaki kod (?invite=...)
+    first_name: str = Field("", max_length=200)
+    last_name: str = Field("", max_length=200)
+
+
+_CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _clean_name_part(v: str | None, label: str) -> str:
+    v = " ".join(_CTRL_RE.sub(" ", v or "").split())
+    if not v:
+        raise HTTPException(422, f"{label} zorunlu")
+    if len(v) > 60:
+        raise HTTPException(422, f"{label} en fazla 60 karakter olabilir")
+    return v
 
 
 @app.post("/api/auth/register")
@@ -1236,8 +1269,9 @@ async def auth_register(req: RegisterRequest):
     engellemez — kişi ekip dışı başlar (yanıtta invite.status = "invalid")."""
     if len(req.password) < 6:
         raise HTTPException(400, "Şifre en az 6 karakter olmalı")
+    first, last = _clean_name_part(req.first_name, "Ad"), _clean_name_part(req.last_name, "Soyad")
     try:
-        user = await db.create_user(req.email, req.password, (req.invite or "").strip() or None)
+        user = await db.create_user(req.email, req.password, (req.invite or "").strip() or None, first, last)
     except ValueError as e:
         raise HTTPException(400, str(e))
     token = await db.create_session(user)
@@ -1272,6 +1306,10 @@ async def auth_status(authorization: str | None = Header(default=None)):
         "has_users": count > 0,
         "logged_in": bool(session),
         "email": session["email"] if session else None,
+        "name": db.display_name(session) if session else None,
+        # Ad soyad girilmemiş eski hesap: panel ad soyad ekranını gösterir (sunucu diğer uçlarda 428 verir)
+        "needs_name": bool(session) and not ((session.get("first_name") or "").strip()
+                                             and (session.get("last_name") or "").strip()),
         "user_id": session["user_id"] if session and role else None,
         "role": role,  # "owner" | "admin" | "member" | None — yetki kontrolü yine sunucuda yapılır
         "storage": db.storage_info(),
@@ -1735,6 +1773,8 @@ async def training_progress(team_id: int | None = Query(None, ge=1), user: dict 
         raise HTTPException(404, "Ekip bulunamadı")
     members = await db.team_member_ids(team_id)
     users = [u for u in await db.list_users() if u["id"] in members]
+    if user["role"] != "owner":
+        users = [{k: v for k, v in u.items() if k != "email"} for u in users]
     shown = [u["id"] for u in users]
     team_of = {u["id"]: set(u["team_ids"]) for u in users}
 
@@ -1759,7 +1799,10 @@ async def training_progress(team_id: int | None = Query(None, ge=1), user: dict 
 async def users_list(user: dict = Depends(require_staff)):
     """Atama ve rol yönetimi için kullanıcı listesi (owner/admin). Ekip adları da döner: admin ders atarken
     ekip seçebilsin (ekip YÖNETİMİ uçları yalnızca owner)."""
-    return {"users": await db.list_users(), "me": user["user_id"], "my_role": user["role"],
+    users = await db.list_users()
+    if user["role"] != "owner":   # e-posta yalnızca owner ekranlarında (ikincil bilgi)
+        users = [{k: v for k, v in u.items() if k != "email"} for u in users]
+    return {"users": users, "me": user["user_id"], "my_role": user["role"],
             "teams": [{"id": t["id"], "name": t["name"]} for t in await db.list_teams()]}
 
 
@@ -1807,6 +1850,204 @@ async def users_set_teams(target_id: int, req: UserTeamsIn, user: dict = Depends
     except ValueError as e:
         raise HTTPException(422, str(e))
     return {"ok": True, "id": target_id, "team_ids": await db.user_team_ids(target_id)}
+
+
+# ---------------------------------------------------------------------------
+# PROFİL (herkes, YALNIZCA kendi profili) — ad soyad kapısından muaf (require_session)
+# ---------------------------------------------------------------------------
+async def require_profile_user(user: dict = Depends(require_session)) -> dict:
+    if user.get("auth_disabled") or not user.get("user_id"):
+        raise HTTPException(401, "Bu bölüm için kayıtlı bir hesapla giriş yapın")
+    role = await db.get_user_role(user["user_id"])
+    if not role:
+        raise HTTPException(401, "Kullanıcı bulunamadı — lütfen tekrar giriş yapın")
+    return {**user, "role": role}
+
+
+USERNAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9._-]{1,28})[a-z0-9]$")
+PHONE_RE = re.compile(r"^[0-9+()\-. ]{5,30}$")
+
+
+class ProfileIn(BaseModel):
+    first_name: str | None = Field(None, max_length=200)
+    last_name: str | None = Field(None, max_length=200)
+    username: str | None = Field(None, max_length=200)
+    title: str | None = Field(None, max_length=200)
+    phone: str | None = Field(None, max_length=200)
+
+
+@app.get("/api/profile")
+async def profile_get(user: dict = Depends(require_profile_user)):
+    prof = await db.get_profile(user["user_id"])
+    form = await db.get_competency(user["user_id"])
+    return {**prof, "role": user["role"], "needs_name": not (prof["first_name"] and prof["last_name"]),
+            "competency": _form_meta(form)}
+
+
+@app.put("/api/profile")
+async def profile_put(req: ProfileIn, user: dict = Depends(require_profile_user)):
+    """Yalnızca gönderilen alanlar değişir. Ad/soyad boş bırakılamaz; kullanıcı adı girişi DEĞİŞTİRMEZ
+    (giriş e-postayla), benzersizdir (409). Doğum tarihi, kimlik no gibi kişisel veriler bilinçli olarak YOK."""
+    fields: dict = {}
+    sent = req.model_fields_set
+    if "first_name" in sent:
+        fields["first_name"] = _clean_name_part(req.first_name, "Ad")
+    if "last_name" in sent:
+        fields["last_name"] = _clean_name_part(req.last_name, "Soyad")
+    if "username" in sent:
+        u = (req.username or "").strip().lower()
+        if u and not USERNAME_RE.match(u):
+            raise HTTPException(422, "Kullanıcı adı 3–30 karakter olmalı; küçük harf, rakam, nokta, alt çizgi ve tire kullanılabilir")
+        fields["username"] = u
+    if "title" in sent:
+        t = " ".join(_CTRL_RE.sub(" ", req.title or "").split())
+        if len(t) > 80:
+            raise HTTPException(422, "Unvan en fazla 80 karakter olabilir")
+        fields["title"] = t
+    if "phone" in sent:
+        ph = " ".join((req.phone or "").split())
+        if ph and not PHONE_RE.match(ph):
+            raise HTTPException(422, "Telefon yalnızca rakam, boşluk, +, -, ( ) içerebilir (5–30 karakter)")
+        fields["phone"] = ph
+    try:
+        await db.update_profile(user["user_id"], fields)
+    except db.UsernameTakenError as e:
+        raise HTTPException(409, str(e))
+    return await profile_get(user)
+
+
+class PasswordIn(BaseModel):
+    current_password: str = Field(..., max_length=200)
+    new_password: str = Field(..., max_length=200)
+
+
+@app.post("/api/profile/password")
+async def profile_password(req: PasswordIn, user: dict = Depends(require_profile_user)):
+    """Hesap & Güvenlik: mevcut şifre doğrulanır; değişince bu oturum dışındaki tüm oturumlar kapanır."""
+    if len(req.new_password) < 6:
+        raise HTTPException(422, "Yeni şifre en az 6 karakter olmalı")
+    if not await db.change_password(user["user_id"], req.current_password, req.new_password, user["token"]):
+        raise HTTPException(403, "Mevcut şifre hatalı")
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# YETKİNLİK FORMU — yalnızca kişinin KENDİSİ ve OWNER'lar görür (admin/diğer üyeler 403)
+# ---------------------------------------------------------------------------
+def _form_meta(form: dict | None) -> dict:
+    prog = comp.progress((form or {}).get("answers") or {})
+    return {"status": (form or {}).get("status") or "none", "updated_at": (form or {}).get("updated_at"),
+            "submitted_at": (form or {}).get("submitted_at"), "progress": prog}
+
+
+def _form_out(form: dict | None) -> dict:
+    return {**_form_meta(form), "answers": comp.clean_answers((form or {}).get("answers") or {})}
+
+
+@app.get("/api/competency/schema")
+async def competency_schema(user: dict = Depends(require_user)):
+    return comp.schema()
+
+
+class CompetencyIn(BaseModel):
+    answers: dict
+
+
+@app.get("/api/competency/me")
+async def competency_me(user: dict = Depends(require_user)):
+    return _form_out(await db.get_competency(user["user_id"]))
+
+
+@app.put("/api/competency/me")
+async def competency_save(req: CompetencyIn, user: dict = Depends(require_user)):
+    """Taslak kaydı (otomatik kaydetme). Cevaplar şemaya göre süzülür; durum değişmez."""
+    if len(json.dumps(req.answers, ensure_ascii=False)) > 100_000:
+        raise HTTPException(413, "Form çok büyük")
+    await db.save_competency(user["user_id"], comp.clean_answers(req.answers))
+    return _form_out(await db.get_competency(user["user_id"]))
+
+
+@app.post("/api/competency/me/submit")
+async def competency_submit(user: dict = Depends(require_user)):
+    """Durumu "gönderildi" yapar (tarihiyle). Onay akışı YOK; gönderdikten sonra da düzenlenebilir."""
+    if not await db.get_competency(user["user_id"]):
+        raise HTTPException(409, "Göndermeden önce formu doldurun")
+    await db.submit_competency(user["user_id"])
+    return _form_out(await db.get_competency(user["user_id"]))
+
+
+@app.get("/api/competency/users/{target_id}")
+async def competency_of(target_id: int, user: dict = Depends(require_user)):
+    """Kişinin kendisi ya da OWNER. Admin ve diğer üyeler 403 (var olup olmadığı da sızmaz)."""
+    if target_id != user["user_id"] and user["role"] != "owner":
+        raise HTTPException(403, "Bu formu yalnızca kişinin kendisi ve owner'lar görebilir")
+    prof = await db.get_profile(target_id)
+    if not prof:
+        raise HTTPException(404, "Kullanıcı bulunamadı")
+    return {**_form_out(await db.get_competency(target_id)),
+            "user": {"id": prof["id"], "name": prof["name"], "email": prof["email"] if user["role"] == "owner" else None,
+                     "title": prof["title"], "username": prof["username"], "teams": prof["teams"]}}
+
+
+@app.get("/api/skills/map")
+async def skills_map(team: str = Query("all", max_length=20), field: str = Query("", max_length=60),
+                     min_level: int | None = Query(None, ge=1, le=5), user: dict = Depends(require_owner)):
+    """
+    YETENEK HARİTASI (yalnızca owner): kişi × yetkinlik maddesi (04–13 bölümleri, seviye 1–5).
+    team: "all" (en az bir ekipte olanlar) | "none" (ekip dışı) | ekip id. field: "" (tüm maddeler) |
+    "s:<bölüm anahtarı>" (o bölümün maddeleri) | madde anahtarı. min_level: madde seçiliyse o maddede,
+    değilse gösterilen maddelerden EN AZ BİRİNDE seviye >= min_level olan kişiler.
+    Haritada yalnızca formunu GÖNDERMİŞ kişiler; göndermeyenler (hiç başlamamış / taslak) ayrı listede.
+    """
+    all_users = await db.list_users()
+    if team == "all":
+        scope = [u for u in all_users if u["in_team"]]
+    elif team == "none":
+        scope = [u for u in all_users if not u["in_team"]]
+    elif team.isdigit():
+        if not await db.get_team(int(team)):
+            raise HTTPException(404, "Ekip bulunamadı")
+        scope = [u for u in all_users if int(team) in u["team_ids"]]
+    else:
+        raise HTTPException(422, "Geçersiz ekip filtresi")
+    if not field:
+        fields = comp.SKILL_FIELDS
+    elif field.startswith("s:"):
+        fields = [f for f in comp.SKILL_FIELDS if f["section_key"] == field[2:]]
+    else:
+        fields = [f for f in comp.SKILL_FIELDS if f["key"] == field]
+    if not fields:
+        raise HTTPException(422, "Bilinmeyen yetkinlik alanı")
+    keys = [f["key"] for f in fields]
+    teams = {t["id"]: t["name"] for t in await db.list_teams()}
+    forms = await db.all_competency()
+    rows, pending = [], []
+    for u in scope:
+        f = forms.get(u["id"])
+        person = {"id": u["id"], "name": u["name"] or u["email"], "email": u["email"],
+                  "teams": [teams[t] for t in u["team_ids"] if t in teams]}
+        if not f or f.get("status") != "submitted":
+            prog = comp.progress((f or {}).get("answers") or {})
+            pending.append({**person, "status": (f or {}).get("status") or "none", "progress": prog,
+                            "updated_at": (f or {}).get("updated_at")})
+            continue
+        levels = comp.clean_answers(f["answers"])["levels"]
+        lv = {k: levels.get(k) for k in keys}
+        if min_level is not None and not any((v or 0) >= min_level for v in lv.values()):
+            continue
+        rows.append({**person, "levels": lv, "submitted_at": f.get("submitted_at")})
+    if len(keys) == 1:
+        rows.sort(key=lambda r: (-(r["levels"][keys[0]] or 0), r["name"].casefold()))
+    else:
+        rows.sort(key=lambda r: r["name"].casefold())
+    pending.sort(key=lambda r: r["name"].casefold())
+    return {"fields": [{k: f[k] for k in ("key", "label", "section_no", "section_key", "section_title")} for f in fields],
+            "sections": [{"key": s["key"], "no": s["no"], "title": s["title"]} for s in comp.SECTIONS
+                         if any(f["type"] == "ratings" for f in s["fields"])],
+            "all_fields": [{k: f[k] for k in ("key", "label", "section_key")} for f in comp.SKILL_FIELDS],
+            "teams": [{"id": k, "name": v} for k, v in teams.items()],
+            "rows": rows, "pending": pending, "levels": comp.LEVELS,
+            "filters": {"team": team, "field": field, "min_level": min_level}}
 
 
 # ---------------------------------------------------------------------------
@@ -1937,16 +2178,25 @@ async def _effective_template() -> tuple[dict, dict | None]:
     return ckl.default_template(), None
 
 
-def _template_out(tpl: dict, rec: dict | None) -> dict:
+def _person(names: dict | None, email: str | None) -> str | None:
+    """Kayıtta e-postayla anılan kişinin "Ad Soyad"ı. Kişi yoksa/adı girilmemişse "—" (e-posta asla dönmez);
+    alan zaten boşsa (silinmiş hesap) None -> panelde "—"."""
+    if not email:
+        return None
+    return (names or {}).get(email.strip().lower()) or "—"
+
+
+def _template_out(tpl: dict, rec: dict | None, names: dict | None = None) -> dict:
     th = tpl["thresholds"]
     stages = [{**s, "items": [{**it, "text": ckl.auto_text(it["auto"], th)} if it.get("auto") else it for it in s["items"]]}
               for s in tpl["stages"]]
     return {"template": {**tpl, "stages": stages}, "is_default": rec is None,
-            "updated_at": rec["updated_at"] if rec else None, "updated_by": rec["updated_by"] if rec else None,
+            "updated_at": rec["updated_at"] if rec else None, "updated_by": _person(names, rec["updated_by"]) if rec else None,
             "threshold_limits": {k: {"min": lo, "max": hi, "integer": is_int} for k, (lo, hi, is_int) in ckl.THRESHOLD_LIMITS.items()}}
 
 
-def _checklist_out(cl: dict, items: list[dict], user: dict, detail: bool = True, events: list | None = None) -> dict:
+def _checklist_out(cl: dict, items: list[dict], user: dict, detail: bool = True, events: list | None = None,
+                   names: dict | None = None) -> dict:
     staff = user["role"] in ("owner", "admin")
     is_open = cl["status"] == "open"
     values = (cl.get("snapshot") or {}).get("values") or {}
@@ -1957,8 +2207,8 @@ def _checklist_out(cl: dict, items: list[dict], user: dict, detail: bool = True,
     out_items, done, critical_open, manual_open, auto_unpassed = [], 0, 0, 0, []
     for it in items:
         o = {"id": it["id"], "stage_key": it["stage_key"], "kind": it["kind"], "text": it["text"],
-             "checked_by": it.get("checked_by"), "checked_at": it.get("checked_at"), "note": it.get("note") or "",
-             "created_by": it.get("created_by")}
+             "checked_by": _person(names, it.get("checked_by")), "checked_at": it.get("checked_at"), "note": it.get("note") or "",
+             "created_by": _person(names, it.get("created_by"))}
         if it["kind"] == "auto":
             ev = ckl.evaluate_auto(it.get("auto_key"), values, th)
             ov = ev["status"] != "pass" and it["id"] in overridden
@@ -1981,8 +2231,8 @@ def _checklist_out(cl: dict, items: list[dict], user: dict, detail: bool = True,
     can_edit = is_open and (staff or cl["user_id"] == user["user_id"])
     out = {
         "id": cl["id"], "title": cl.get("title"), "analysis_key": cl["analysis_key"], "marketplace": cl["marketplace"],
-        "owner_email": cl.get("user_email"), "is_mine": cl["user_id"] == user["user_id"],
-        "status": cl["status"], "locked_by": cl.get("locked_by"), "locked_at": cl.get("locked_at"),
+        "owner_name": _person(names, cl.get("user_email")), "is_mine": cl["user_id"] == user["user_id"],
+        "status": cl["status"], "locked_by": _person(names, cl.get("locked_by")), "locked_at": cl.get("locked_at"),
         "approval_reason": None if is_open else cl.get("approval_reason"),
         "overridden_count": 0 if is_open else len(cl.get("overridden") or []),
         "analysis_fetched_at": (cl.get("snapshot") or {}).get("fetched_at"),
@@ -2001,7 +2251,7 @@ def _checklist_out(cl: dict, items: list[dict], user: dict, detail: bool = True,
         out.update({"stages": cl.get("stages") or [], "thresholds": th, "items": out_items,
                     "snapshot": {k: snap.get(k) for k in ("keyword", "marketplace", "analysis_mode", "fetched_at", "category")}
                     | {"values": values},
-                    "events": [{"kind": e["kind"], "by": e.get("by_email"), "at": e["at"], "reason": e.get("reason"),
+                    "events": [{"kind": e["kind"], "by": _person(names, e.get("by_email")), "at": e["at"], "reason": e.get("reason"),
                                 "overridden": [{"text": x.get("text"), "status": x.get("status"), "display": x.get("display")}
                                                for x in ((e.get("details") or {}).get("overridden") or [])]}
                                for e in events or []]})
@@ -2028,7 +2278,7 @@ async def _get_editable(cid: int, user: dict) -> dict:
 @app.get("/api/checklists/template")
 async def checklist_template_get(user: dict = Depends(require_user)):
     tpl, rec = await _effective_template()
-    return _template_out(tpl, rec)
+    return _template_out(tpl, rec, await db.email_name_map())
 
 
 @app.put("/api/checklists/template")
@@ -2041,14 +2291,14 @@ async def checklist_template_put(payload: dict, user: dict = Depends(require_own
         raise HTTPException(422, str(e))
     await db.save_checklist_template(tpl, user["email"])
     tpl, rec = await _effective_template()
-    return _template_out(tpl, rec)
+    return _template_out(tpl, rec, await db.email_name_map())
 
 
 @app.post("/api/checklists/template/reset")
 async def checklist_template_reset(user: dict = Depends(require_owner)):
     await db.reset_checklist_template()
     tpl, rec = await _effective_template()
-    return _template_out(tpl, rec)
+    return _template_out(tpl, rec, await db.email_name_map())
 
 
 class ChecklistCreate(BaseModel):
@@ -2090,7 +2340,8 @@ async def checklist_list(user: dict = Depends(require_user)):
         team = await db.team_member_ids()
         lists = [c for c in lists if c["user_id"] == user["user_id"] or c["user_id"] in team]
     items = await db.items_for_checklists([c["id"] for c in lists])
-    return {"role": user["role"], "checklists": [_checklist_out(c, items.get(c["id"], []), user, detail=False) for c in lists]}
+    names = await db.email_name_map()
+    return {"role": user["role"], "checklists": [_checklist_out(c, items.get(c["id"], []), user, detail=False, names=names) for c in lists]}
 
 
 @app.get("/api/checklists/{cid}")
@@ -2163,7 +2414,7 @@ def _clean_reason(reason: str | None) -> str:
 
 async def _checklist_detail(cid: int, user: dict) -> dict:
     return _checklist_out(await db.get_checklist(cid), await db.checklist_items(cid), user,
-                          events=await db.checklist_events(cid))
+                          events=await db.checklist_events(cid), names=await db.email_name_map())
 
 
 @app.post("/api/checklists/{cid}/lock")
@@ -2311,6 +2562,7 @@ async def team_activity(user_id: int | None = Query(None, ge=0), team_id: int | 
     members = await db.team_member_ids(team_id)
     users = [u for u in await db.list_users() if u["id"] in members]
     emails = {u["id"]: u["email"] for u in users}
+    names = {u["id"]: u["name"] for u in users}   # panelde "Ad Soyad"; e-posta yalnızca ikincil bilgi (owner ekranı)
     team = set(emails)
     teams = await db.list_teams()
     team_names = {t["id"]: t["name"] for t in teams}
@@ -2326,12 +2578,12 @@ async def team_activity(user_id: int | None = Query(None, ge=0), team_id: int | 
         vindex.setdefault((r["user_id"], r["keyword"], r["marketplace"]), []).append((r["queried_at"], r["verdict"]))
 
     def who(uid, email):
-        return emails.get(uid) or email or "—"
+        return names.get(uid) or emails.get(uid) or "—"
 
-    q_out = [{"id": r["id"], "user_id": r["user_id"], "user": who(r["user_id"], r.get("email")),
+    q_out = [{"id": r["id"], "user_id": r["user_id"], "user": who(r["user_id"], r.get("email")), "email": emails.get(r["user_id"]),
               "keyword": r["keyword"], "marketplace": r["marketplace"], "at": r["queried_at"],
               "verdict": r.get("verdict")} for r in queries]
-    d_out = [{"id": r["id"], "user_id": r["user_id"], "user": who(r["user_id"], r.get("email")),
+    d_out = [{"id": r["id"], "user_id": r["user_id"], "user": who(r["user_id"], r.get("email")), "email": emails.get(r["user_id"]),
               "keyword": r["keyword"], "marketplace": r["marketplace"], "at": r["decided_at"],
               "decision": r["decision"], "note": r.get("note") or "",
               "verdict": _verdict_for(vindex, r["user_id"], r["keyword"], r["marketplace"], r["decided_at"])}
@@ -2339,14 +2591,14 @@ async def team_activity(user_id: int | None = Query(None, ge=0), team_id: int | 
 
     # Özet: seçili tarih aralığı (since/until), aralık yoksa TÜM ZAMANLAR. Kişi/karar/arama filtreleri özete uygulanmaz.
     counts = await db.team_counts(since, until)
-    summary = [{"user_id": u["id"], "user": u["email"], "role": u["role"],
+    summary = [{"user_id": u["id"], "user": u["name"] or u["email"], "email": u["email"], "role": u["role"],
                 "teams": [team_names[t] for t in u["team_ids"] if t in team_names],
                 "queries": counts["queries"].get(u["id"], 0), "decisions": counts["decisions"].get(u["id"], 0)}
                for u in users]
 
     return {"range": {"since": since, "until": until}, "team_id": team_id,
             "teams": [{"id": t["id"], "name": t["name"]} for t in teams],
-            "users": [{"id": u["id"], "email": u["email"], "role": u["role"]} for u in users],
+            "users": [{"id": u["id"], "name": u["name"] or u["email"], "email": u["email"], "role": u["role"]} for u in users],
             "summary": summary,
             "queries": q_out[:TEAM_MAX_ROWS], "decisions": d_out[:TEAM_MAX_ROWS],
             "totals": {"queries": len(q_out), "decisions": len(d_out)}, "truncated_at": TEAM_MAX_ROWS}

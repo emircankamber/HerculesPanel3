@@ -20,12 +20,27 @@ async function apiFetch(url, options = {}) {
     setToken("");
     showLogin("Oturumunuz sona erdi — lütfen tekrar giriş yapın.");
   }
+  if (res.status === 428) showNameGate();   // ad soyad girilmemiş eski hesap (kapı sunucuda)
   return res;
 }
 
 let authRequiredGlobal = false;
 // Oturumdaki kullanıcı (yalnızca GÖRÜNÜM için; tüm yetki kontrolleri sunucuda yapılır)
-let currentUser = { role: null, user_id: null, email: null };
+let currentUser = { role: null, user_id: null, email: null, name: null };
+
+// --- Ad soyad kapısı: adı/soyadı olmayan (eski) hesap girmeden panele devam edemez (sunucu 428 verir).
+function showNameGate() {
+  const o = document.getElementById("name-overlay");
+  if (!o || o.style.display === "flex") return;
+  hideLogin();
+  o.style.display = "flex";
+  setTimeout(() => document.getElementById("ng-first")?.focus(), 0);
+}
+/** "Ad Soyad" -> "AS" (avatar) */
+function initials(name) {
+  const p = String(name || "").trim().split(/\s+/).filter(Boolean);
+  return ((p[0] || "?")[0] + (p.length > 1 ? p[p.length - 1][0] : "")).toLocaleUpperCase("tr-TR");
+}
 
 // --- Davet bağlantısı (?invite=KOD): kod yalnızca bu sekmede tutulur, adres çubuğundan hemen silinir.
 const INVITE_KEY = "pl_invite";
@@ -64,6 +79,7 @@ function showLogin(errorMsg = "", dismissible = false) {
   if (inv) {
     inv.textContent = inviteCode() ? "Davet bağlantısıyla geldin: \"Yeni Hesap Oluştur\" ile kaydolursan davetin ekibine katılırsın. Bağlantının süresi dolmuşsa ya da iptal edildiyse hesabın yine oluşturulur ama ekip dışı başlarsın." : "";
     inv.style.display = inviteCode() ? "block" : "none";
+    if (inviteCode()) document.getElementById("reg-names").style.display = "grid";   // davetle gelen büyük ihtimalle kaydolacak
   }
   const err = document.getElementById("login-error");
   if (err) err.textContent = errorMsg;
@@ -80,7 +96,10 @@ async function checkAuthStatus() {
     const res = await apiFetch(`${API_BASE}/api/auth/status`);
     const s = await res.json();
     authRequiredGlobal = !!s.auth_required;
-    currentUser = { role: s.role || null, user_id: s.user_id || null, email: s.email || null };
+    currentUser = { role: s.role || null, user_id: s.user_id || null, email: s.email || null, name: s.name || null };
+    const profNav = document.querySelector('.nav-btn[data-view="profile"]');
+    if (profNav) profNav.style.display = s.logged_in && s.role ? "" : "none";
+    if (s.logged_in && s.needs_name) showNameGate();
     // Ekip Aktivitesi menüsü yalnızca owner'a görünür (yetki yine sunucuda: diğerleri 403)
     const teamNav = document.querySelector('.nav-btn[data-view="team"]');
     if (teamNav) teamNav.style.display = currentUser.role === "owner" ? "" : "none";
@@ -105,7 +124,7 @@ async function checkAuthStatus() {
       showLogin("", true);   // davet bağlantısı: kayıt ekranını göster (auth henüz kapalı olsa da)
     } else {
       hideLogin();
-      if (chip) chip.textContent = s.email || (s.auth_required ? "" : "auth kapalı — henüz kullanıcı yok");
+      if (chip) chip.textContent = s.name || (s.logged_in ? "" : (s.auth_required ? "" : "auth kapalı — henüz kullanıcı yok"));
       if (logoutBtn) logoutBtn.style.display = s.logged_in ? "inline-block" : "none";
     }
     // Giriş yapılmamışsa (auth zorunlu olsun olmasın) manuel giriş/kayıt butonu görünsün
@@ -127,13 +146,21 @@ async function doAuth(endpoint) {
   if (!email || !password) { err.textContent = "E-posta ve şifre gerekli."; return; }
   try {
     const payload = { email, password };
-    if (endpoint === "register" && inviteCode()) payload.invite = inviteCode();
+    if (endpoint === "register") {
+      // Kayıtta ad ve soyad zorunlu (sunucu da 422 verir)
+      const box = document.getElementById("reg-names");
+      if (box.style.display === "none") { box.style.display = "grid"; err.textContent = "Yeni hesap için adını ve soyadını da gir."; document.getElementById("reg-first").focus(); return; }
+      payload.first_name = document.getElementById("reg-first").value.trim();
+      payload.last_name = document.getElementById("reg-last").value.trim();
+      if (!payload.first_name || !payload.last_name) { err.textContent = "Ad ve soyad zorunlu."; return; }
+      if (inviteCode()) payload.invite = inviteCode();
+    }
     const res = await fetch(`${API_BASE}/api/auth/${endpoint}`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
     const body = await res.json();
-    if (!res.ok) { err.textContent = body.detail || `Hata (${res.status})`; return; }
+    if (!res.ok) { err.textContent = apiErrorText(body, res.status); return; }
     if (endpoint === "register" && body.invite) {
       clearInvite(); window.__plInvite = "";
       if (body.invite.status === "joined") showNotice(`Hoş geldin! "${body.invite.team}" ekibine katıldın.`);
@@ -159,6 +186,22 @@ document.addEventListener("DOMContentLoaded", () => {
   if (regBtn) regBtn.addEventListener("click", () => doAuth("register"));
   if (openLoginBtn) openLoginBtn.addEventListener("click", () => showLogin("", !authRequiredGlobal));
   if (dismissLoginBtn) dismissLoginBtn.addEventListener("click", () => hideLogin());
+  const ngForm = document.getElementById("name-gate-form");
+  if (ngForm) ngForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const first = document.getElementById("ng-first").value.trim(), last = document.getElementById("ng-last").value.trim();
+    const errEl = document.getElementById("ng-error");
+    if (!first || !last) { errEl.textContent = "Ad ve soyad zorunlu."; return; }
+    try {
+      const r = await apiFetch(`${API_BASE}/api/profile`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ first_name: first, last_name: last }) });
+      const b = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(apiErrorText(b, r.status));
+      location.reload();   // kapı kalktı: tüm görünümleri baştan yükle
+    } catch (err) { errEl.textContent = err.message; }
+  });
+  document.getElementById("ng-logout")?.addEventListener("click", async () => {
+    await apiFetch(`${API_BASE}/api/auth/logout`, { method: "POST" }); setToken(""); location.reload();
+  });
   const noticeClose = document.getElementById("app-notice-close");
   if (noticeClose) noticeClose.addEventListener("click", () => { document.getElementById("app-notice").style.display = "none"; });
   if (logoutBtn) logoutBtn.addEventListener("click", async () => {
@@ -213,6 +256,7 @@ function showView(view) {
   if (view === "checklists") loadChecklists();
   if (view === "launch") lrEnsureVars();
   if (view === "team") loadTeamAdmin();
+  if (view === "profile") loadProfile();
   if (view === "trends") updateTrendsStale();
   // Chart.js gizli (display:none) kapsayıcıda 0 boyutla çizer — veri
   // görünümleri yalnızca görünür olduklarında (yeniden) render edilir.
@@ -2693,7 +2737,7 @@ function renderUserPicker(selected = []) {
   const sel = new Set(selected);
   // Eğitim yalnızca ekip üyelerine atanır (sunucu da ekip dışı id'yi 422 ile reddeder)
   box.innerHTML = trnState.users.filter(u => u.in_team).map(u => `
-    <label><input type="checkbox" value="${u.id}" ${sel.has(u.id) ? "checked" : ""}><span title="${esc(u.email)}">${esc(u.email)}</span>
+    <label><input type="checkbox" value="${u.id}" ${sel.has(u.id) ? "checked" : ""}><span title="${esc(u.name || "")}">${esc(u.name || "(ad girilmemiş)")}</span>
       <span class="chip na !text-[10px]">${esc(ROLE_LABEL[u.role] || u.role)}</span></label>`).join("") || `<span class="text-xs text-secondary">Ekip üyesi yok.</span>`;
 }
 
@@ -2811,7 +2855,7 @@ function renderMatrix() {
       const late = l.due_date && l.due_date < t;
       return `<td><span class="trn-cell ${late ? "late" : "todo"}" title="${late ? "Son tarih geçti" : "Atandı, tamamlanmadı"}">—</span></td>`;
     }).join("");
-    return `<tr><td><div class="font-medium truncate max-w-[200px]" title="${esc(u.email)}">${esc(u.email)}</div><div class="text-[11px] text-secondary">${esc(ROLE_LABEL[u.role] || u.role)}</div></td>
+    return `<tr><td><div class="font-medium truncate max-w-[200px]" title="${esc(u.name || "")}">${esc(u.name || "(ad girilmemiş)")}</div><div class="text-[11px] text-secondary truncate max-w-[200px]">${esc(ROLE_LABEL[u.role] || u.role)}${u.email ? ` · ${esc(u.email)}` : ""}</div></td>
       <td class="tabular">${n}/${assigned.length}</td>${cells}</tr>`;
   }).join("");
   table.innerHTML = head + `<tbody>${rows}</tbody>`;
@@ -2902,7 +2946,7 @@ function renderChecklistList() {
         <div class="font-semibold text-sm leading-snug break-words min-w-0">${esc(l.title || l.analysis_key)}</div>
         <span class="flex gap-1 shrink-0">${l.status === "locked" && l.overridden_count ? '<span class="chip warn" title="Geçmeyen/verisi olmayan otomatik madde gerekçeyle geçildi">gerekçeli</span>' : ""}${l.status === "locked" ? '<span class="chip ok">Kilitli</span>' : '<span class="chip na">Açık</span>'}</span>
       </div>
-      <div class="text-[11px] text-secondary mt-1 truncate">${esc(l.marketplace)} · analiz ${esc(fmtStamp(l.analysis_fetched_at))}${l.is_mine ? "" : ` · ${esc(l.owner_email || "")}`}</div>
+      <div class="text-[11px] text-secondary mt-1 truncate">${esc(l.marketplace)} · analiz ${esc(fmtStamp(l.analysis_fetched_at))}${l.is_mine ? "" : ` · ${esc(l.owner_name || "—")}`}</div>
       <div class="flex items-center justify-between text-xs mt-2"><span class="tabular font-medium">${l.progress.done}/${l.progress.total} · %${pb.pct}</span>
         ${l.progress.critical_open ? `<span class="chip bad">${l.progress.critical_open} kritik</span>` : ""}</div>${pb.html}`;
     b.addEventListener("click", async () => {
@@ -2992,7 +3036,7 @@ function renderChecklistDetail() {
           <div class="eyebrow">Aktif odak</div>
           <h2 class="font-display text-xl font-semibold mt-1 break-words">${esc(c.title || c.analysis_key)}</h2>
           <div class="flex flex-wrap gap-1.5 mt-2"><span class="chip mono">${esc(c.analysis_key)}</span><span class="chip na">${esc(c.marketplace)}</span>
-            ${locked ? '<span class="chip ok">Kilitli</span>' : '<span class="chip na">Açık</span>'}${c.is_mine ? "" : `<span class="chip warn">${esc(c.owner_email || "")}</span>`}</div>
+            ${locked ? '<span class="chip ok">Kilitli</span>' : '<span class="chip na">Açık</span>'}${c.is_mine ? "" : `<span class="chip warn">${esc(c.owner_name || "—")}</span>`}</div>
           <div class="ck-snap mt-3 inline-flex flex-wrap items-center gap-x-2 gap-y-0.5 rounded-lg bg-surface-container-low px-3 py-2 text-xs">
             <span class="material-symbols-outlined !text-[16px] text-primary" aria-hidden="true">event</span>
             <span class="font-semibold">Snapshot: analiz tarihi ${esc(fmtStamp(snap.fetched_at))}</span>
@@ -3383,7 +3427,7 @@ function renderTeam() {
   tsel.innerHTML = `<option value="">Tüm ekipler</option>` + (b.teams || []).map(t => `<option value="${esc(t.id)}">${esc(t.name)}</option>`).join("");
   tsel.value = (b.teams || []).some(t => String(t.id) === tcur) ? tcur : "";
   const sel = $("#tm-user"), cur = sel.value;
-  const people = b.summary.map(s => ({ id: s.user_id, label: s.user }));
+  const people = b.summary.map(s => ({ id: s.user_id, label: s.user }));   // ad soyad (girilmemişse e-posta)
   sel.innerHTML = `<option value="">Tümü</option>` + people.map(p => `<option value="${esc(p.id)}">${esc(p.label)}</option>`).join("");
   sel.value = people.some(p => String(p.id) === cur) ? cur : "";
 
@@ -3397,7 +3441,7 @@ function renderTeam() {
   // Özet
   $("#tm-summary tbody").innerHTML = b.summary.length ? b.summary.map(s => `
     <tr class="tm-sum-row cursor-pointer" data-uid="${esc(s.user_id)}" title="Bu kişinin kayıtlarını göster">
-      <td class="l"><span class="font-medium break-all">${esc(s.user)}</span></td>
+      <td class="l"><span class="font-medium break-words">${esc(s.user)}</span>${s.email && s.email !== s.user ? `<div class="text-[11px] text-secondary break-all">${esc(s.email)}</div>` : ""}</td>
       <td class="l"><div class="flex flex-wrap gap-1 min-w-[100px] max-w-[260px] whitespace-normal">${(s.teams || []).map(n => `<span class="chip na !text-[10px] max-w-[140px] truncate" title="${esc(n)}">${esc(n)}</span>`).join("") || "—"}</div></td>
       <td>${s.role ? `<span class="chip ${s.role === "owner" ? "ok" : s.role === "admin" ? "warn" : "na"}">${esc(ROLE_LABEL[s.role] || s.role)}</span>` : "—"}</td>
       <td class="tabular">${fmtNum(s.queries)}</td><td class="tabular">${fmtNum(s.decisions)}</td></tr>`).join("")
@@ -3456,7 +3500,9 @@ function tgSelectTab(tab) {
   tgState.tab = tab;
   $$("#tg-tabs .tab-btn").forEach(b => { const on = b.dataset.tab === tab; b.classList.toggle("active", on); b.setAttribute("aria-selected", String(on)); });
   $$("#view-team .tg-pane").forEach(p => { p.style.display = p.id === `tg-pane-${tab}` ? "" : "none"; });
-  if (tab === "activity") { tgStatus(""); loadTeam(); } else tgLoad();
+  if (tab === "activity") { tgStatus(""); loadTeam(); }
+  else if (tab === "skills") skLoad();
+  else tgLoad();
 }
 
 async function tgLoad() {
@@ -3494,10 +3540,10 @@ function tgRenderTeams() {
       <div class="flex flex-wrap gap-2">
         <button type="button" class="btn btn-outline btn-sm tg-show"><span class="material-symbols-outlined">group</span>Üyeler</button>
         ${editing ? "" : `<button type="button" class="btn btn-outline btn-sm tg-ren"><span class="material-symbols-outlined">edit</span>Yeniden adlandır</button>`}
-        <button type="button" class="btn btn-danger tg-del" ${blockers.length ? `disabled title="${esc("Şu owner/admin'lerin tek ekibi: " + blockers.map(b => b.email).join(", ") + " — önce başka ekibe ekleyin ya da rollerini düşürün")}"` : ""}><span class="material-symbols-outlined">delete</span>Sil</button>
+        <button type="button" class="btn btn-danger tg-del" ${blockers.length ? `disabled title="${esc("Şu owner/admin'lerin tek ekibi: " + blockers.map(b => b.name || b.email).join(", ") + " — önce başka ekibe ekleyin ya da rollerini düşürün")}"` : ""}><span class="material-symbols-outlined">delete</span>Sil</button>
       </div>`;
     const msg = row.querySelector(".tg-row-msg");
-    if (blockers.length) msg.textContent = `Silinemez: ${blockers.map(b => b.email).join(", ")} için tek ekip (owner/admin en az bir ekipte olmalı).`;
+    if (blockers.length) msg.textContent = `Silinemez: ${blockers.map(b => b.name || b.email).join(", ")} için tek ekip (owner/admin en az bir ekipte olmalı).`;
     row.querySelector(".tg-show").addEventListener("click", () => { tgState.memFilter = `t:${t.id}`; tgSelectTab("members"); });
     if (editing) {
       const f = row.querySelector(".tg-rename"), inp = f.querySelector("input");
@@ -3550,7 +3596,8 @@ function tgRenderMembers() {
     row.dataset.email = u.email;
     row.innerHTML = `
       <div class="min-w-0">
-        <div class="font-medium break-all">${esc(u.email)}</div>
+        <div class="flex items-center gap-2 min-w-0"><span class="pf-avatar !w-8 !h-8 !text-[11px]">${esc(initials(u.name || u.email))}</span>
+          <div class="min-w-0"><div class="font-medium break-words">${esc(u.name || "(ad girilmemiş)")}</div><div class="text-[11px] text-secondary break-all">${esc(u.email)}${u.username ? ` · @${esc(u.username)}` : ""}</div></div></div>
         <div class="flex flex-wrap gap-1 mt-1">${isMe ? '<span class="chip na !text-[10px]">sen</span>' : ""}${perm ? '<span class="chip ok !text-[10px]"><span class="material-symbols-outlined !text-[12px]" aria-hidden="true">lock</span>kalıcı owner</span>' : ""}${tgIsNew(u) ? '<span class="chip warn !text-[10px] tg-new">yeni</span>' : ""}</div>
         <div class="text-[11px] text-secondary mt-1">Kayıt: ${esc(tgDate(u.created_at))}</div>
       </div>
@@ -3595,7 +3642,7 @@ function tgRenderMembers() {
       const next = sel2.value;
       if (isMe && u.role === "owner" && next !== "owner" &&
           !confirm("Kendi owner yetkini kaldırıyorsun; Ekip Yönetimi'ne erişimin kalmayacak. Devam edilsin mi?")) { sel2.value = u.role; return; }
-      if (next === "owner" && u.role !== "owner" && !confirm(`${u.email} owner yapılsın mı? Owner'lar ekipleri, üyelikleri ve rolleri yönetir.`)) { sel2.value = u.role; return; }
+      if (next === "owner" && u.role !== "owner" && !confirm(`${u.name || u.email} owner yapılsın mı? Owner'lar ekipleri, üyelikleri ve rolleri yönetir.`)) { sel2.value = u.role; return; }
       sel2.disabled = true; rmsg.textContent = "kaydediliyor…"; rmsg.className = "tg-role-msg text-[11px] mt-1 text-secondary";
       try {
         const b = await tgApi(`/api/users/${encodeURIComponent(u.id)}/role`, { method: "POST", body: JSON.stringify({ role: next }) });
@@ -3635,7 +3682,7 @@ function tgRenderInvites() {
         <div class="flex flex-wrap items-center gap-1.5"><span class="font-medium break-all">${esc(i.team_name)}</span>
           <span class="chip ${i.max_uses == null ? "warn" : "na"} !text-[10px]">${i.max_uses == null ? "Çok kullanımlık" : "Tek kullanımlık"}</span>
           <span class="text-xs text-secondary">${fmtNum(i.uses)} kullanım</span></div>
-        <div class="text-[11px] text-secondary mt-1 break-all">Son geçerlilik ${esc(tmDate(i.expires_at))} · oluşturan ${esc(i.created_by_email || "—")} · ${esc(tmDate(i.created_at))}</div>
+        <div class="text-[11px] text-secondary mt-1 break-all">Son geçerlilik ${esc(tmDate(i.expires_at))} · oluşturan ${esc(i.created_by_name || i.created_by_email || "—")} · ${esc(tmDate(i.created_at))}</div>
         <div class="tg-inv-row-msg text-[11px] text-error"></div>
       </div>
       <button type="button" class="btn btn-danger tg-inv-revoke"><span class="material-symbols-outlined">link_off</span>İptal et</button>`;
@@ -3751,3 +3798,342 @@ function syncPreCostState() {
   if (Object.values(readPreCost()).some(v => v != null)) $("#pre-cost").open = true;
 })();
 
+
+// ===========================================================================
+// PROFİL (herkes, yalnızca kendi profili) + YETKİNLİK FORMU (15 bölüm, şema sunucudan)
+// Form yalnızca kişinin kendisi ve owner'lar tarafından görülür — kural SUNUCUDA (admin/üye 403).
+// ===========================================================================
+const pfState = { schema: null, profile: null, form: null, timer: null, saving: null, dirty: false, tab: "form" };
+const PF_STATUS = { none: ["Başlanmadı", "na"], draft: ["Taslak", "warn"], submitted: ["Gönderildi", "ok"] };
+const fmtDay = (ts) => ts ? new Date(ts * 1000).toLocaleDateString("tr-TR", { day: "2-digit", month: "2-digit", year: "numeric" }) : "—";
+
+async function pfApi(url, opts = {}) {
+  const r = await apiFetch(`${API_BASE}${url}`, { headers: { "Content-Type": "application/json" }, ...opts });
+  const b = await r.json().catch(() => ({}));
+  if (!r.ok) { const e = new Error(apiErrorText(b, r.status)); e.status = r.status; throw e; }
+  return b;
+}
+async function cfSchema() { if (!pfState.schema) pfState.schema = await pfApi("/api/competency/schema"); return pfState.schema; }
+
+// --- Form çizici (düzenlenebilir / salt okunur) -----------------------------
+function cfFieldHtml(f, a, sch, pre, ro) {
+  const v = a[f.key];
+  const lab = f.label ? `<div class="text-[13px] font-semibold mb-2">${esc(f.label)}</div>` : "";
+  const lim = sch.limits;
+  if (f.type === "text" || f.type === "textarea") {
+    if (ro) return `<div>${lab}<div class="text-sm whitespace-pre-wrap break-words ${v ? "" : "text-secondary"}">${esc(v || "—")}</div></div>`;
+    return `<div>${lab}${f.type === "text"
+      ? `<input type="text" class="field w-full" data-k="${esc(f.key)}" maxlength="${lim.text}" value="${esc(v || "")}" placeholder="${esc(f.placeholder || "")}" aria-label="${esc(f.label)}">`
+      : `<textarea class="field w-full !h-24 py-2" data-k="${esc(f.key)}" maxlength="${lim.textarea}" placeholder="${esc(f.placeholder || "")}" aria-label="${esc(f.label)}">${esc(v || "")}</textarea>`}</div>`;
+  }
+  if (f.type === "single" || f.type === "multi") {
+    const sel = f.type === "single" ? [v].filter(Boolean) : (v || []);
+    if (ro) return `<div>${lab}<div class="flex flex-wrap gap-1.5">${sel.length ? sel.map(o => `<span class="chip ok">${esc(o)}</span>`).join("") : '<span class="text-sm text-secondary">—</span>'}</div></div>`;
+    const long = f.options.some(o => o.length > 32);
+    return `<div>${lab}<div class="${long ? "grid grid-cols-1 sm:grid-cols-2 gap-2" : "flex flex-wrap gap-2"}" data-k="${esc(f.key)}" data-type="${f.type}" role="${f.type === "single" ? "radiogroup" : "group"}" aria-label="${esc(f.label)}">${f.options.map(o => `
+      <label class="pf-opt ${long ? "block-opt" : ""}"><input type="${f.type === "single" ? "radio" : "checkbox"}" name="${pre}-${esc(f.key)}" value="${esc(o)}" ${sel.includes(o) ? "checked" : ""}><span>${esc(o)}</span></label>`).join("")}</div></div>`;
+  }
+  if (f.type === "ratings") {
+    const lv = a.levels || {};
+    return `<div class="flex flex-col">${f.items.map(it => {
+      const n = lv[it.key];
+      const right = ro ? `<span class="lv lv-${n || 0}">${n || "—"}</span><span class="text-xs text-secondary w-[70px]">${n ? esc(sch.levels[n]) : "boş"}</span>`
+        : `<div class="pf-rate" role="radiogroup" aria-label="${esc(it.label)}">${[1, 2, 3, 4, 5].map(i => `<label title="${i} · ${esc(sch.levels[i])}"><input type="radio" name="${pre}-lv-${esc(it.key)}" data-lv="${esc(it.key)}" value="${i}" ${n === i ? "checked" : ""}>${i}</label>`).join("")}</div>`;
+      return `<div class="pf-row"><div class="min-w-0 flex-1 basis-[220px]"><div class="text-[13.5px] font-medium">${esc(it.label)}</div>${it.desc ? `<div class="text-[11.5px] text-secondary">${esc(it.desc)}</div>` : ""}</div>
+        <div class="flex items-center gap-2">${right}</div></div>`;
+    }).join("")}</div>`;
+  }
+  if (f.type === "list") {
+    const vals = v || [];
+    if (ro) return `<div>${lab}${vals.length ? `<ol class="list-decimal pl-5 text-sm flex flex-col gap-1">${vals.map(x => `<li class="break-words">${esc(x)}</li>`).join("")}</ol>` : '<div class="text-sm text-secondary">—</div>'}</div>`;
+    return `<div>${lab}<div class="flex flex-col gap-2" data-k="${esc(f.key)}" data-type="list">${Array.from({ length: f.max_items }, (_, i) => `
+      <div class="flex items-center gap-2"><span class="text-xs text-secondary w-4 text-right">${i + 1}.</span><input type="text" class="field w-full !h-9" maxlength="${lim.list_item}" value="${esc(vals[i] || "")}" aria-label="${esc(f.label)} ${i + 1}"></div>`).join("")}</div></div>`;
+  }
+  if (f.type === "languages") {
+    const langs = v && v.length ? v : (ro ? [] : [{ name: "İngilizce", cefr: "", note: "", ratings: {} }]);
+    if (ro && !langs.length) return `<div class="text-sm text-secondary">—</div>`;
+    const card = (e, idx) => `
+      <div class="rounded-xl border border-hairline p-3 sm:p-4 cf-lang">
+        ${ro ? `<div class="flex flex-wrap items-center gap-2"><span class="font-semibold break-words">${esc(e.name)}</span>${e.cefr ? `<span class="chip ok">${esc(e.cefr)}</span>` : ""}${e.note ? `<span class="text-xs text-secondary break-words">— ${esc(e.note)}</span>` : ""}</div>`
+          : `<div class="grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_140px_auto] gap-2 items-center">
+              <input type="text" class="field !h-9 cf-lang-name" maxlength="40" value="${esc(e.name || "")}" placeholder="Dil (örn. Almanca)" aria-label="Dil adı">
+              <select class="field !h-9 cf-lang-cefr" aria-label="Genel düzey"><option value="">Genel düzey</option>${sch.cefr.map(c => `<option ${e.cefr === c ? "selected" : ""}>${esc(c)}</option>`).join("")}</select>
+              <button type="button" class="btn btn-outline btn-sm cf-lang-del">Kaldır</button></div>
+             <input type="text" class="field !h-9 w-full mt-2 cf-lang-note" maxlength="${lim.text}" value="${esc(e.note || "")}" placeholder="Not (örn. 1688 / WeChat yazışması)" aria-label="Dil notu">`}
+        <div class="mt-2">${sch.lang_skills.map(sk => {
+          const n = (e.ratings || {})[sk.key];
+          return `<div class="pf-row"><div class="text-[13px] min-w-0 flex-1 basis-[180px]">${esc(sk.label)}</div>${ro ? `<span class="lv lv-${n || 0}">${n || "—"}</span>`
+            : `<div class="pf-rate" role="radiogroup" aria-label="${esc(sk.label)}">${[1, 2, 3, 4, 5].map(i => `<label title="${i} · ${esc(sch.levels[i])}"><input type="radio" name="${pre}-lang${idx}-${sk.key}" data-skill="${sk.key}" value="${i}" ${n === i ? "checked" : ""}>${i}</label>`).join("")}</div>`}</div>`;
+        }).join("")}</div>
+      </div>`;
+    return `<div class="flex flex-col gap-3" data-k="${esc(f.key)}" data-type="languages">${langs.map(card).join("")}
+      ${ro ? "" : `<button type="button" class="btn btn-outline btn-sm self-start cf-lang-add" ${langs.length >= sch.max_languages ? "disabled" : ""}><span class="material-symbols-outlined">add</span>Dil ekle</button>`}</div>`;
+  }
+  return "";
+}
+
+function cfRender(container, sch, answers, { readonly = false, prefix = "cf", progress = null } = {}) {
+  const a = answers || {};
+  container.innerHTML = sch.sections.map(s => {
+    const done = progress ? progress.sections[s.key] : null;
+    const legend = s.fields.some(f => f.type === "ratings") && !readonly
+      ? `<div class="flex flex-wrap gap-1 text-[10.5px] text-secondary">${Object.entries(sch.levels).map(([n, l]) => `<span class="lv lv-${n} !h-5 !text-[10px]">${n}</span>${esc(l)}`).join(" ")}</div>` : "";
+    return `<section class="card card-pad pf-sec" id="${prefix}-sec-${esc(s.key)}">
+      <div class="flex flex-wrap items-start justify-between gap-2">
+        <h3 class="font-display font-semibold text-[16px] flex items-start gap-2 min-w-0"><span class="pf-no">${String(s.no).padStart(2, "0")}</span><span class="break-words">${esc(s.title)}</span></h3>
+        ${done == null ? "" : `<span class="chip ${done ? "ok" : "na"} !text-[10px] cf-done" data-sec="${esc(s.key)}">${done ? "Tamam" : "Eksik"}</span>`}
+      </div>
+      ${s.intro ? `<p class="text-xs text-secondary mt-1">${esc(s.intro)}</p>` : ""}${legend ? `<div class="mt-2">${legend}</div>` : ""}
+      <div class="flex flex-col gap-4 mt-3">${s.fields.map(f => cfFieldHtml(f, a, sch, prefix, readonly)).join("")}</div>
+    </section>`;
+  }).join("");
+}
+
+/** DOM'dan cevapları topla (tek doğruluk kaynağı ekran; sunucu ayrıca şemaya göre süzer). */
+function cfCollect(container, sch) {
+  const out = { levels: {} };
+  sch.sections.forEach(s => s.fields.forEach(f => {
+    if (f.type === "ratings") {
+      f.items.forEach(it => { const c = container.querySelector(`input[data-lv="${CSS.escape(it.key)}"]:checked`); if (c) out.levels[it.key] = Number(c.value); });
+      return;
+    }
+    const el = container.querySelector(`[data-k="${CSS.escape(f.key)}"]`);
+    if (!el) return;
+    if (f.type === "text" || f.type === "textarea") out[f.key] = el.value;
+    else if (f.type === "single") out[f.key] = el.querySelector("input:checked")?.value || "";
+    else if (f.type === "multi") out[f.key] = $$("input:checked", el).map(i => i.value);
+    else if (f.type === "list") out[f.key] = $$("input", el).map(i => i.value.trim()).filter(Boolean);
+    else if (f.type === "languages") out[f.key] = $$(".cf-lang", el).map(card => ({
+      name: card.querySelector(".cf-lang-name").value.trim(), cefr: card.querySelector(".cf-lang-cefr").value,
+      note: card.querySelector(".cf-lang-note").value,
+      ratings: Object.fromEntries($$("input[data-skill]:checked", card).map(i => [i.dataset.skill, Number(i.value)])),
+    })).filter(e => e.name);
+  }));
+  return out;
+}
+
+// --- Profil sayfası ---------------------------------------------------------
+async function loadProfile() {
+  const logged = !!currentUser.role;
+  $("#pf-guest").style.display = logged ? "none" : "block";
+  $("#pf-body").style.display = logged ? "block" : "none";
+  if (!logged) return;
+  const st = $("#pf-status"); st.textContent = "yükleniyor…"; st.className = "status-line mt-4 loading";
+  try {
+    const [p, sch, f] = await Promise.all([pfApi("/api/profile"), cfSchema(), pfApi("/api/competency/me")]);
+    pfState.profile = p;
+    pfRenderHeader(); pfRenderPersonal(); pfRenderSecurity();
+    if (!pfState.dirty) { pfState.form = f; cfRender($("#pf-form"), sch, f.answers, { prefix: "pf", progress: f.progress }); }
+    pfRenderFormMeta(); pfRenderNav();
+    pfSelectTab(pfState.tab);
+    st.textContent = ""; st.className = "status-line mt-4";
+  } catch (err) { st.textContent = `Hata: ${err.message}`; st.className = "status-line mt-4 error"; }
+}
+
+function pfRenderHeader() {
+  const p = pfState.profile;
+  $("#pf-avatar").textContent = initials(p.name || p.email);
+  $("#pf-name").textContent = p.name || "(ad girilmemiş)";
+  $("#pf-sub").textContent = [p.title, p.username ? "@" + p.username : "", p.email].filter(Boolean).join(" • ");
+  $("#pf-teams").innerHTML = `<span class="text-xs text-secondary">Ekipler:</span>` + (p.teams.length
+    ? p.teams.map(t => `<span class="chip na">${esc(t.name)}</span>`).join("") : `<span class="chip na">Ekip dışı</span>`);
+  $("#pf-map-btn").style.display = p.role === "owner" ? "" : "none";
+}
+
+function pfRenderFormMeta() {
+  const f = pfState.form; if (!f) return;
+  const [label, cls] = PF_STATUS[f.status] || PF_STATUS.none;
+  const edited = f.status === "submitted" && f.updated_at && f.submitted_at && f.updated_at > f.submitted_at + 1;
+  $("#pf-form-chip").textContent = f.status === "submitted" ? `${label} · ${fmtDay(f.submitted_at)}` : label;
+  $("#pf-form-chip").className = `chip ${cls}`;
+  $("#pf-form-bar").style.width = `${(f.progress.done / f.progress.total) * 100}%`;
+  $("#pf-form-count").textContent = `${f.progress.done} / ${f.progress.total} bölüm tamam${edited ? " · gönderimden sonra düzenlendi" : ""}`;
+  $("#pf-nav-count").textContent = `${f.progress.done} / ${f.progress.total}`;
+  $("#pf-submit").innerHTML = `<span class="material-symbols-outlined">send</span>${f.status === "submitted" ? "Tekrar Gönder" : "Formu Gönder"}`;
+  $$("#pf-form .cf-done").forEach(ch => { const d = f.progress.sections[ch.dataset.sec]; ch.textContent = d ? "Tamam" : "Eksik"; ch.className = `chip ${d ? "ok" : "na"} !text-[10px] cf-done`; });
+  $$("#pf-nav a").forEach(a => { const d = f.progress.sections[a.dataset.sec]; a.querySelector(".pf-nav-ic").textContent = d ? "✓" : "○"; a.classList.toggle("text-primary", !!d); });
+}
+
+function pfRenderNav() {
+  const sch = pfState.schema;
+  $("#pf-nav").innerHTML = sch.sections.map(s => `<a href="#pf-sec-${esc(s.key)}" data-sec="${esc(s.key)}" class="flex items-start gap-2 rounded-md px-2 py-1 hover:bg-surface-container-low">
+    <span class="pf-nav-ic w-3 shrink-0">○</span><span class="min-w-0">${String(s.no).padStart(2, "0")} · ${esc(s.title)}</span></a>`).join("");
+  $$("#pf-nav a").forEach(a => a.addEventListener("click", (e) => { e.preventDefault(); document.getElementById(`pf-sec-${a.dataset.sec}`)?.scrollIntoView({ behavior: "smooth", block: "start" }); }));
+  pfRenderFormMeta();
+}
+
+function pfRenderPersonal() {
+  const p = pfState.profile;
+  $("#pf-first").value = p.first_name; $("#pf-last").value = p.last_name; $("#pf-username").value = p.username;
+  $("#pf-title").value = p.title; $("#pf-phone").value = p.phone;
+  $("#pf-teams-field").innerHTML = p.teams.length ? p.teams.map(t => `<span class="chip na">${esc(t.name)}</span>`).join("") : `<span class="chip na">Ekip dışı</span>`;
+}
+
+function pfRenderSecurity() {
+  const p = pfState.profile;
+  $("#pf-email").textContent = p.email; $("#pf-role").textContent = ROLE_LABEL[p.role] || p.role; $("#pf-created").textContent = fmtDay(p.created_at);
+}
+
+function pfSelectTab(tab) {
+  pfState.tab = tab;
+  $$("#pf-tabs .tab-btn").forEach(b => { const on = b.dataset.tab === tab; b.classList.toggle("active", on); b.setAttribute("aria-selected", String(on)); });
+  $$("#view-profile .pf-pane").forEach(p => { p.style.display = p.id === `pf-pane-${tab}` ? "" : "none"; });
+}
+
+// Otomatik taslak kaydı (değişiklikten ~0,9 sn sonra; kayıt sürerken gelen değişiklik ardından kaydedilir)
+function pfScheduleSave() {
+  pfState.dirty = true;
+  $("#pf-save-state").textContent = "Değişiklik var — kaydediliyor…";
+  clearTimeout(pfState.timer);
+  pfState.timer = setTimeout(pfSave, 900);
+}
+async function pfSave() {
+  clearTimeout(pfState.timer);
+  if (pfState.saving) { await pfState.saving; if (!pfState.dirty) return; }
+  pfState.dirty = false;
+  const answers = cfCollect($("#pf-form"), pfState.schema);
+  pfState.saving = (async () => {
+    try {
+      const f = await pfApi("/api/competency/me", { method: "PUT", body: JSON.stringify({ answers }) });
+      pfState.form = f; pfRenderFormMeta();
+      $("#pf-save-state").textContent = `Taslak kaydedildi · ${new Date().toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" })}`;
+    } catch (err) { pfState.dirty = true; $("#pf-save-state").textContent = `Kaydedilemedi: ${err.message}`; }
+  })();
+  await pfState.saving; pfState.saving = null;
+  if (pfState.dirty) pfScheduleSave();
+}
+
+(function initProfile() {
+  if (!$("#view-profile")) return;
+  $$("#pf-tabs .tab-btn").forEach(b => b.addEventListener("click", () => pfSelectTab(b.dataset.tab)));
+  const form = $("#pf-form");
+  form.addEventListener("input", (e) => { if (e.target.matches("input[type=text], textarea")) pfScheduleSave(); });
+  form.addEventListener("change", (e) => { if (e.target.matches("input[type=radio], input[type=checkbox], select")) pfScheduleSave(); });
+  form.addEventListener("click", (e) => {
+    const add = e.target.closest(".cf-lang-add"), del = e.target.closest(".cf-lang-del");
+    if (!add && !del) return;
+    const box = form.querySelector("[data-type=languages]");
+    if (del) del.closest(".cf-lang").remove();
+    if (add) {
+      // yeni boş dil kartı (radyo adları benzersiz olsun diye ayrı önek)
+      const t = document.createElement("div");
+      const f = pfState.schema.sections.find(s => s.key === "languages").fields[0];
+      t.innerHTML = cfFieldHtml(f, { languages: [{ name: "", cefr: "", note: "", ratings: {} }] }, pfState.schema, `pfn${Date.now()}`, false);
+      const card = t.querySelector(".cf-lang");
+      add.before(card);
+      card.querySelector(".cf-lang-name").focus();
+    }
+    box.querySelector(".cf-lang-add").disabled = $$(".cf-lang", box).length >= pfState.schema.max_languages;
+    pfScheduleSave();
+  });
+  $("#pf-submit").addEventListener("click", async () => {
+    const btn = $("#pf-submit");
+    if (pfState.dirty || pfState.saving) await pfSave();
+    const pr = pfState.form?.progress;
+    if (pr && pr.done < pr.total && !confirm(`${pr.total - pr.done} bölüm henüz eksik. Form yine de gönderilsin mi? (Gönderdikten sonra da düzenleyebilirsin.)`)) return;
+    btn.disabled = true;
+    try {
+      pfState.form = await pfApi("/api/competency/me/submit", { method: "POST" });
+      pfRenderFormMeta();
+      $("#pf-save-state").textContent = `Form gönderildi · ${fmtDay(pfState.form.submitted_at)}`;
+    } catch (err) { $("#pf-save-state").textContent = `Gönderilemedi: ${err.message}`; }
+    finally { btn.disabled = false; }
+  });
+  window.addEventListener("beforeunload", (e) => { if (pfState.dirty) { pfSave(); e.preventDefault(); e.returnValue = ""; } });
+  $("#pf-personal-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const msg = $("#pf-personal-msg");
+    const body = { first_name: $("#pf-first").value, last_name: $("#pf-last").value, username: $("#pf-username").value,
+                   title: $("#pf-title").value, phone: $("#pf-phone").value };
+    if (!body.first_name.trim() || !body.last_name.trim()) { msg.textContent = "Ad ve soyad zorunlu."; msg.className = "text-xs text-error"; return; }
+    try {
+      pfState.profile = await pfApi("/api/profile", { method: "PUT", body: JSON.stringify(body) });
+      pfRenderHeader(); pfRenderPersonal();
+      msg.textContent = "Kaydedildi."; msg.className = "text-xs text-primary";
+      await checkAuthStatus();   // üst çubuktaki ad
+    } catch (err) { msg.textContent = err.message; msg.className = "text-xs text-error"; }
+  });
+  $("#pf-pass-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const msg = $("#pf-pass-msg"), cur = $("#pf-pass-cur").value, n1 = $("#pf-pass-new").value, n2 = $("#pf-pass-new2").value;
+    const fail = (t) => { msg.textContent = t; msg.className = "text-xs text-error"; };
+    if (!cur || !n1) return fail("Mevcut ve yeni şifre gerekli.");
+    if (n1.length < 6) return fail("Yeni şifre en az 6 karakter olmalı.");
+    if (n1 !== n2) return fail("Yeni şifreler eşleşmiyor.");
+    try {
+      await pfApi("/api/profile/password", { method: "POST", body: JSON.stringify({ current_password: cur, new_password: n1 }) });
+      ["#pf-pass-cur", "#pf-pass-new", "#pf-pass-new2"].forEach(s => { $(s).value = ""; });
+      msg.textContent = "Şifre değiştirildi; diğer oturumların kapatıldı."; msg.className = "text-xs text-primary";
+    } catch (err) { fail(err.message); }
+  });
+  $("#pf-map-btn").addEventListener("click", () => { tgState.tab = "skills"; showView("team"); });
+})();
+
+// --- Salt okunur form penceresi (owner: Yetenek Haritası'ndan; kişi: kendisi) ---
+async function openCompetencyModal(userId) {
+  const m = $("#cf-modal"), body = $("#cf-modal-body");
+  m.style.display = "flex"; body.innerHTML = `<div class="status-line loading">yükleniyor…</div>`;
+  $("#cf-modal-title").textContent = ""; $("#cf-modal-sub").textContent = ""; $("#cf-modal-avatar").textContent = "";
+  try {
+    const [sch, d] = await Promise.all([cfSchema(), pfApi(`/api/competency/users/${encodeURIComponent(userId)}`)]);
+    const [label] = PF_STATUS[d.status] || PF_STATUS.none;
+    $("#cf-modal-avatar").textContent = initials(d.user.name || d.user.email);
+    $("#cf-modal-title").textContent = d.user.name || d.user.email || "—";
+    $("#cf-modal-sub").textContent = [d.user.title, d.user.email, d.user.teams.map(t => t.name).join(", ") || "Ekip dışı",
+      `${label}${d.submitted_at ? " · " + fmtDay(d.submitted_at) : ""} · ${d.progress.done}/${d.progress.total} bölüm`].filter(Boolean).join(" • ");
+    body.innerHTML = `<div class="text-xs text-secondary">Bu formu yalnızca kişinin kendisi ve panel yöneticileri (owner) görebilir.</div><div id="cf-modal-form" class="flex flex-col gap-4"></div>`;
+    cfRender($("#cf-modal-form"), sch, d.answers, { readonly: true, prefix: "cfm", progress: d.progress });
+  } catch (err) { body.innerHTML = `<div class="status-line error">Hata: ${esc(err.message)}</div>`; }
+}
+(function initCfModal() {
+  const m = $("#cf-modal"); if (!m) return;
+  const close = () => { m.style.display = "none"; };
+  $("#cf-modal-close").addEventListener("click", close);
+  m.addEventListener("click", (e) => { if (e.target === m) close(); });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && m.style.display === "flex") close(); });
+})();
+
+// --- Yetenek Haritası (Ekip Yönetimi sekmesi, yalnızca owner) ---------------
+const skState = { team: "all", field: "", min: "" };
+async function skLoad() {
+  const st = $("#tm-status"); st.textContent = "yükleniyor…"; st.className = "status-line mt-4 loading";
+  const params = new URLSearchParams({ team: skState.team || "all" });
+  if (skState.field) params.set("field", skState.field);
+  if (skState.min) params.set("min_level", skState.min);
+  try {
+    const d = await pfApi(`/api/skills/map?${params}`);
+    skRender(d);
+    st.textContent = ""; st.className = "status-line mt-4";
+  } catch (err) { st.textContent = `Hata: ${err.message}`; st.className = "status-line mt-4 error"; }
+}
+function skRender(d) {
+  // filtre seçenekleri (seçimi koru)
+  $("#sk-team").innerHTML = `<option value="all">Tüm ekipler</option>` + d.teams.map(t => `<option value="${esc(t.id)}">${esc(t.name)}</option>`).join("") + `<option value="none">Ekip dışı</option>`;
+  $("#sk-team").value = skState.team;
+  $("#sk-field").innerHTML = `<option value="">Tüm alanlar</option>` + d.sections.map(s => `<optgroup label="${esc(String(s.no).padStart(2, "0") + " · " + s.title)}">
+      <option value="s:${esc(s.key)}">— ${esc(s.title)} (bölümün tümü)</option>
+      ${d.all_fields.filter(f => f.section_key === s.key).map(f => `<option value="${esc(f.key)}">${esc(f.label)}</option>`).join("")}</optgroup>`).join("");
+  $("#sk-field").value = skState.field;
+  $("#sk-min").value = skState.min;
+  $("#sk-legend").innerHTML = Object.entries(d.levels).map(([n, l]) => `<span class="inline-flex items-center gap-1"><span class="lv lv-${n}">${n}</span>${esc(l)}</span>`).join("");
+  $("#sk-count").textContent = `· ${fmtNum(d.rows.length)} kişi`;
+  const min = d.filters.min_level;
+  const head = `<thead><tr><th class="l sk-name">Kişi</th>${d.fields.map(f => `<th class="sk-f" title="${esc(f.section_title + " — " + f.label)}">${esc(f.label)}</th>`).join("")}</tr></thead>`;
+  const rows = d.rows.map(r => `<tr><td class="l sk-name"><button type="button" class="sk-open text-left font-medium text-primary hover:underline break-words" data-id="${esc(r.id)}">${esc(r.name)}</button>
+      <div class="text-[11px] text-secondary truncate" title="${esc(r.teams.join(", "))}">${esc(r.teams.join(", ") || "Ekip dışı")}</div></td>
+      ${d.fields.map(f => { const n = r.levels[f.key]; return `<td class="${min && (n || 0) < min ? "sk-dim" : ""}"><span class="lv lv-${n || 0}" title="${esc(f.label)}: ${n ? n + " · " + esc(d.levels[n]) : "boş"}">${n || "—"}</span></td>`; }).join("")}</tr>`).join("");
+  $("#sk-table").innerHTML = head + `<tbody>${rows || `<tr><td class="l muted !py-6" colspan="${d.fields.length + 1}">Filtreye uyan, formunu göndermiş kişi yok.</td></tr>`}</tbody>`;
+  $("#sk-pending-count").textContent = `· ${fmtNum(d.pending.length)} kişi`;
+  $("#sk-pending").innerHTML = d.pending.length ? d.pending.map(p => `<div class="px-5 py-3 flex flex-wrap items-center justify-between gap-2">
+      <div class="min-w-0"><button type="button" class="sk-open text-left font-medium text-primary hover:underline break-words" data-id="${esc(p.id)}">${esc(p.name)}</button>
+        <div class="text-[11px] text-secondary">${esc(p.teams.join(", ") || "Ekip dışı")}</div></div>
+      <span class="chip ${p.status === "draft" ? "warn" : "na"}">${p.status === "draft" ? `Taslak · ${p.progress.done}/${p.progress.total} bölüm` : "Başlamadı"}</span></div>`).join("")
+    : `<div class="px-5 py-6 text-sm text-secondary">Bu filtrede herkes formunu göndermiş.</div>`;
+  $$("#tg-pane-skills .sk-open").forEach(b => b.addEventListener("click", () => openCompetencyModal(Number(b.dataset.id))));
+}
+(function initSkills() {
+  if (!$("#sk-filters")) return;
+  $("#sk-team").addEventListener("change", (e) => { skState.team = e.target.value; skLoad(); });
+  $("#sk-field").addEventListener("change", (e) => { skState.field = e.target.value; skLoad(); });
+  $("#sk-min").addEventListener("change", (e) => { skState.min = e.target.value; skLoad(); });
+})();

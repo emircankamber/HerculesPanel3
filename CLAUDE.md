@@ -330,6 +330,7 @@ yüzden backend'e hiç bağlanmamalı, sahte veri olur.
     etmez). Geçersiz/süresi dolmuş/iptal davet kaydı ENGELLEMEZ → ekip dışı (`invite.status="invalid"`). Davet hesap
     oluşturulduktan SONRA harcanır. Panel `?invite=` kodunu sessionStorage'a alıp adres çubuğundan siler.
   - Aktivite: eski "Ekip Aktivitesi" (`GET /api/team/activity`) + `team_id` filtresi; özet ekip adlarıyla.
+  - Yetenek Haritası: bkz. "Ad Soyad, Profil & Yetkinlik Formu".
   - Owner menü rozeti: `/api/auth/status.new_outsiders_7d` (son 7 günde kaydolan ekip dışı; owner değilse null).
 - **Eğitim ataması** `training_lessons.assign_mode` = `all` (tüm ekipler) | `teams` (`training_lesson_teams`,
   DİNAMİK: ekibe sonradan katılan görür, çıkan görmez) | `users` (`training_assignments`). Eski istemci
@@ -337,11 +338,44 @@ yüzden backend'e hiç bağlanmamalı, sahte veri olur.
   üyelik değişince SİLİNMEZ. İlerleme `GET /api/training/progress?team_id=` (atananlar dinamik hesaplanır).
 - **Kalıcı silme:** `POST /api/users/{id}/delete {confirm_email}` (onay e-postası tutmazsa 422; kendi hesabı,
   kalıcı owner, son owner → 409). `db.delete_user_completely`: oturumlar, eşikler, geçmiş, kararlar, kendi kontrol
-  listeleri (madde + olaylarıyla), eğitim tamamlama/atamaları, ekip üyelikleri ve hesap SİLİNİR; yer tutucu YOK.
+  listeleri (madde + olaylarıyla), eğitim tamamlama/atamaları, ekip üyelikleri, yetkinlik formu ve hesap SİLİNİR;
+  yer tutucu YOK.
   Başkalarının kayıtlarındaki referanslar silinmez, NULL'lanır (`EMAIL_REF_COLUMNS`, `ID_REF_COLUMNS` — eklediği
   dersler, oluşturduğu davetler — ve `checklist_events.details_json`) → panelde "—". **Kişi e-postası/id'si yazan
   yeni bir sütun eklersen `EMAIL_REF_COLUMNS` / `ID_REF_COLUMNS` / `USER_ID_TABLES`'a da ekle.** Aynı e-posta sonra
   yeni (ekip dışı, member) hesap olarak kaydolabilir.
+
+## Ad Soyad, Profil & Yetkinlik Formu
+
+- **Ad soyad zorunlu:** kayıtta `first_name`/`last_name` (boşluk temizlenir, 1–60, yoksa 422). `users`'a
+  `first_name, last_name, username, title, phone` sütunları `_add_column_if_missing` ile; `username` için
+  `ux_users_username` (LOWER) benzersiz indeksi. **Kapı SUNUCUDA:** `require_auth` adı/soyadı olmayan (eski) hesaba
+  428 verir; yalnızca profil uçları (`require_session` → `require_profile_user`) muaf. Panel 428'de ve
+  `auth/status.needs_name`'de ad soyad ekranını açar (kapatılamaz; çıkış yapılabilir).
+- **E-posta yerine "Ad Soyad" her yerde:** `db.display_name()`. Kayıtlarda e-postayla anılan kişiler (kontrol listesi
+  işaretleyen/onaylayan/olaylar, şablonu güncelleyen, liste sahibi `owner_name`) çıktıda `index._person()` ile ada
+  çevrilir — e-posta ASLA dönmez (kişi yoksa/adı yoksa "—"). E-posta yalnızca OWNER ekranlarında ikincil bilgi:
+  `/api/users` ve `/api/training/progress` owner olmayana `email` göndermez; Aktivite/Ekip Yönetimi'nde ad + e-posta.
+  Veritabanında e-posta sütunları (checked_by vb.) aynen kalır; dönüşüm yalnızca çıktıda.
+- **Profil** (`GET/PUT /api/profile`, herkes yalnızca KENDİSİ): ad, soyad, kullanıcı adı (3–30, `[a-z0-9._-]`, küçük
+  harfe çevrilir, büyük/küçük harf duyarsız benzersiz → 409; forumda görünecek, GİRİŞİ DEĞİŞTİRMEZ — giriş e-postayla),
+  unvan (≤80), telefon (opsiyonel). PUT yalnızca gönderilen alanları değiştirir. Departman serbest metni YOK → kişinin
+  ekipleri gösterilir. Fotoğraf yok, baş harflerden avatar (`app.js::initials`). **TC kimlik, doğum tarihi, adres,
+  medeni durum, sağlık gibi kişisel veri alanları bilinçli olarak YOK — ekleme.** Hesap & Güvenlik:
+  `POST /api/profile/password` (mevcut şifre yanlışsa 403; değişince bu oturum dışındakiler kapanır).
+- **Yetkinlik formu** — şema TEK kaynak `api/competency.py` (15 bölüm; `GET /api/competency/schema`, panel buradan
+  çizer). Cevaplar düz sözlük; 04–13 bölümlerinin seviyeleri tek `levels` sözlüğünde (madde → 1–5). `clean_answers()`
+  bilinmeyeni atar, seçenek/seviye doğrular, metni kırpar. Tablo `competency_forms` (user_id PK, answers_json, status
+  draft|submitted, updated_at, submitted_at). `PUT /api/competency/me` = otomatik taslak (panel ~0,9 sn debounce),
+  `POST /api/competency/me/submit` = "gönderildi" + tarih; onay akışı YOK, gönderdikten sonra da düzenlenebilir
+  (durum gönderildi kalır, panel "gönderimden sonra düzenlendi" der). Bölüm "tamam" = içindeki tüm alanlar dolu.
+  **Görünürlük SUNUCUDA:** `GET /api/competency/users/{id}` yalnızca kişinin kendisi ya da OWNER; admin/üye 403
+  (var olmayan id'de bile 403 — varlık sızmaz; owner'a 404). Hesap silinince form da silinir (`USER_ID_TABLES`).
+  Tasarımdaki radar/skor/"Yönetici Notu"/rol eşleşmesi kartı uydurma veri olacağı için YOK.
+- **Yetenek Haritası** (Ekip Yönetimi sekmesi, `GET /api/skills/map`, `require_owner`): kişi × 37 madde (04–13).
+  Filtreler: `team` (all = en az bir ekipte | none = ekip dışı | ekip id), `field` (madde anahtarı | `s:<bölüm>` | boş),
+  `min_level` (madde seçiliyse o maddede; değilse gösterilen maddelerden EN AZ BİRİNDE ≥). Haritada yalnızca formunu
+  GÖNDERENLER; göndermeyenler (hiç başlamamış / taslak) `pending` listesinde. Kişiye tıklayınca salt okunur tam form.
 
 ## Ön öneri kuralı (Uygun / Sınırda / Elenmiş)
 

@@ -39,12 +39,39 @@
     <div class="text-sm text-secondary mb-2">Devam etmek için giriş yapın</div>
     <input type="text" id="login-email" class="field" placeholder="e-posta veya kullanıcı adı" autocomplete="username">
     <input type="password" id="login-password" class="field" placeholder="şifre" autocomplete="current-password">
+    <div id="reg-names" class="grid grid-cols-2 gap-2" style="display:none;">
+      <input type="text" id="reg-first" class="field" maxlength="60" placeholder="Ad" autocomplete="given-name" aria-label="Ad">
+      <input type="text" id="reg-last" class="field" maxlength="60" placeholder="Soyad" autocomplete="family-name" aria-label="Soyad">
+    </div>
     <div class="login-invite" id="login-invite-note" style="display:none;"></div>
     <div class="login-error" id="login-error"></div>
     <button id="login-btn" class="btn btn-primary">Giriş Yap</button>
     <button id="register-btn" class="btn btn-outline">Yeni Hesap Oluştur</button>
     <div class="login-note">Geçmişin ve kararların ekip arkadaşlarına görünmez; bir ekibe eklenirsen panel yöneticileri (owner) aramalarını ve kararlarını görebilir. Aynı kelimeyi başkası da arayabilir. İlk kullanıcı kaydolduğunda panel kilitlenir.</div>
     <button id="dismiss-login-btn" class="btn btn-outline" style="display:none;">Vazgeç, girişsiz devam et</button>
+  </div>
+</div>
+
+<div id="name-overlay" class="login-overlay" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="name-gate-title">
+  <form id="name-gate-form" class="login-card" novalidate>
+    <div class="font-display text-lg font-semibold" id="name-gate-title">Adını ve soyadını gir</div>
+    <div class="text-sm text-secondary">Panelde e-posta yerine adın görünecek (ekip aktivitesi, eğitim tabloları, kontrol listesi onayları). Devam etmek için gerekli.</div>
+    <input type="text" id="ng-first" class="field" maxlength="60" placeholder="Ad" autocomplete="given-name" aria-label="Ad">
+    <input type="text" id="ng-last" class="field" maxlength="60" placeholder="Soyad" autocomplete="family-name" aria-label="Soyad">
+    <div class="login-error" id="ng-error"></div>
+    <button type="submit" class="btn btn-primary">Kaydet ve devam et</button>
+    <button type="button" id="ng-logout" class="btn btn-outline">Çıkış yap</button>
+  </form>
+</div>
+
+<div id="cf-modal" class="login-overlay !items-start overflow-y-auto" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="cf-modal-title">
+  <div class="bg-surface-container-lowest rounded-2xl w-full max-w-4xl my-6 shadow-xl">
+    <div class="flex items-start justify-between gap-3 p-5 border-b border-hairline sticky top-0 bg-surface-container-lowest rounded-t-2xl z-10">
+      <div class="flex items-center gap-3 min-w-0"><span id="cf-modal-avatar" class="pf-avatar !w-11 !h-11 !text-sm shrink-0"></span>
+        <div class="min-w-0"><div class="font-display font-semibold text-lg break-words" id="cf-modal-title"></div><div class="text-xs text-secondary break-all" id="cf-modal-sub"></div></div></div>
+      <button type="button" id="cf-modal-close" class="icon-btn shrink-0" aria-label="Kapat"><span class="material-symbols-outlined">close</span></button>
+    </div>
+    <div id="cf-modal-body" class="p-5 flex flex-col gap-4"></div>
   </div>
 </div>
 
@@ -71,6 +98,7 @@
       <button data-view="trends" class="nav-btn"><span class="material-symbols-outlined">trending_up</span>Trendler &amp; Fırsatlar</button>
       <button data-view="reports" class="nav-btn"><span class="material-symbols-outlined">folder_open</span>Raporlar</button>
       <button data-view="training" class="nav-btn"><span class="material-symbols-outlined">school</span>Eğitim &amp; Görevler</button>
+      <button data-view="profile" class="nav-btn" style="display:none;"><span class="material-symbols-outlined">account_circle</span>Profilim</button>
       <button data-view="settings" class="nav-btn"><span class="material-symbols-outlined">tune</span>Ayarlar</button>
       <div class="hidden lg:block h-px bg-hairline my-2 mx-2"></div>
       <button data-view="decisions" class="nav-btn"><span class="material-symbols-outlined">view_kanban</span>Pazar Kararları</button>
@@ -859,6 +887,106 @@
         </div>
       </section>
 
+      <!-- ===================== PROFİL ===================== -->
+      <section id="view-profile" class="view">
+        <div class="text-xs text-secondary mb-3">Hesabım / <span class="text-primary font-medium">Profilim</span></div>
+        <div id="pf-guest" class="card card-pad text-center py-12" style="display:none;">
+          <span class="material-symbols-outlined text-outline" style="font-size:36px">lock</span>
+          <div class="font-display text-lg font-semibold mt-2">Profil için giriş yapın</div>
+        </div>
+        <div id="pf-body" style="display:none;">
+          <div class="card card-pad hero-bg flex flex-col md:flex-row md:items-center gap-5">
+            <span id="pf-avatar" class="pf-avatar"></span>
+            <div class="min-w-0 flex-1">
+              <h1 id="pf-name" class="font-display text-[22px] sm:text-[28px] font-semibold tracking-tight leading-tight break-words"></h1>
+              <div id="pf-sub" class="text-sm text-on-surface-variant mt-1 break-words"></div>
+              <div id="pf-teams" class="flex flex-wrap items-center gap-1.5 mt-2"></div>
+            </div>
+            <div class="flex flex-col gap-2 md:items-end shrink-0">
+              <div class="min-w-[200px]">
+                <div class="flex items-center justify-between gap-3 text-xs"><span class="eyebrow">Yetkinlik formu</span><span id="pf-form-chip" class="chip na"></span></div>
+                <div class="crit-track"><div id="pf-form-bar" class="crit-fill" style="width:0"></div></div>
+                <div id="pf-form-count" class="text-[11px] text-secondary mt-1"></div>
+              </div>
+              <button type="button" id="pf-map-btn" class="btn btn-outline btn-sm" style="display:none;"><span class="material-symbols-outlined">grid_view</span>Yetenek Haritası</button>
+            </div>
+          </div>
+          <div class="tabs bg-surface-container-low rounded-lg p-0.5 mt-6 max-w-full w-fit" id="pf-tabs" role="tablist">
+            <button type="button" class="tab-btn active" data-tab="form" role="tab">Yetenek &amp; Çalışma Profili</button>
+            <button type="button" class="tab-btn" data-tab="personal" role="tab">Kişisel Bilgiler &amp; İletişim</button>
+            <button type="button" class="tab-btn" data-tab="security" role="tab">Hesap &amp; Güvenlik</button>
+          </div>
+          <div id="pf-status" class="status-line mt-4"></div>
+
+          <!-- Yetkinlik formu -->
+          <div id="pf-pane-form" class="pf-pane">
+            <div class="card card-pad mt-4 border-l-4 !border-l-primary">
+              <div class="flex items-start gap-3"><span class="material-symbols-outlined text-primary" aria-hidden="true">visibility_lock</span>
+                <div><div class="font-semibold">Bu formu yalnızca sen ve panel yöneticileri (owner) görebilir.</div>
+                  <p class="text-xs text-secondary mt-1">Admin'ler ve diğer ekip üyeleri göremez.</p></div></div>
+            </div>
+            <div class="card card-pad mt-4 bg-surface-container-low">
+              <div class="font-display font-semibold text-[17px]">Bu Form Bir CV Değildir; İş Arkadaşınızın Pusulasıdır</div>
+              <p class="text-sm text-on-surface-variant mt-1.5 leading-relaxed">Geçmiş diploma ya da şirket unvanlarıyla ilgilenmiyoruz. Şu an masada fiilen ne üretebiliyorsunuz, hangi araçlarda takılıyorsunuz, hangi görevler enerjinizi yükseltiyor ve kimden hangi konuda destek alabileceğinizi haritalıyoruz. Lütfen tamamen samimi ve dürüst işaretleyin.</p>
+            </div>
+            <div class="grid grid-cols-1 lg:grid-cols-[230px_minmax(0,1fr)] gap-6 mt-4">
+              <aside class="hidden lg:block">
+                <div class="card p-4 sticky top-20">
+                  <div class="flex items-center justify-between gap-2"><span class="eyebrow">Bölüm Gezgini</span><span id="pf-nav-count" class="chip ok !text-[10px]"></span></div>
+                  <nav id="pf-nav" class="flex flex-col gap-0.5 mt-3 text-[13px]"></nav>
+                </div>
+              </aside>
+              <div id="pf-form" class="flex flex-col gap-4 min-w-0"></div>
+            </div>
+            <div class="card card-pad mt-4 flex flex-wrap items-center justify-between gap-3 sticky bottom-3 z-10 shadow-lg">
+              <div class="flex items-center gap-2 text-xs text-secondary min-w-0"><span class="material-symbols-outlined !text-[18px]" aria-hidden="true">cloud_done</span><span id="pf-save-state">Değişiklikler otomatik olarak taslak kaydedilir.</span></div>
+              <button type="button" id="pf-submit" class="btn btn-primary"><span class="material-symbols-outlined">send</span>Formu Gönder</button>
+            </div>
+          </div>
+
+          <!-- Kişisel bilgiler -->
+          <div id="pf-pane-personal" class="pf-pane" style="display:none;">
+            <form id="pf-personal-form" class="card card-pad mt-4 grid grid-cols-1 md:grid-cols-2 gap-4" novalidate>
+              <label class="flex flex-col gap-1.5"><span class="eyebrow">Ad *</span><input type="text" id="pf-first" class="field" maxlength="60" autocomplete="given-name"></label>
+              <label class="flex flex-col gap-1.5"><span class="eyebrow">Soyad *</span><input type="text" id="pf-last" class="field" maxlength="60" autocomplete="family-name"></label>
+              <label class="flex flex-col gap-1.5"><span class="eyebrow">Kullanıcı adı</span><input type="text" id="pf-username" class="field mono" maxlength="30" autocomplete="off" spellcheck="false" placeholder="örn. ayse.k">
+                <span class="text-[11px] text-secondary">Benzersiz; forumda görünecek. Giriş bilgini (e-posta) değiştirmez. Küçük harf, rakam, nokta, alt çizgi, tire.</span></label>
+              <label class="flex flex-col gap-1.5"><span class="eyebrow">Unvan</span><input type="text" id="pf-title" class="field" maxlength="80" placeholder="örn. Kıdemli PL Araştırmacı"></label>
+              <label class="flex flex-col gap-1.5"><span class="eyebrow">Telefon (opsiyonel)</span><input type="tel" id="pf-phone" class="field" maxlength="30" autocomplete="tel" placeholder="+90 5xx xxx xx xx"></label>
+              <div class="flex flex-col gap-1.5"><span class="eyebrow">Ekipler</span><div id="pf-teams-field" class="flex flex-wrap gap-1.5 min-h-[40px] items-center"></div>
+                <span class="text-[11px] text-secondary">Üye olduğun ekipleri panel yöneticisi (owner) belirler.</span></div>
+              <div class="md:col-span-2 flex flex-wrap items-center gap-3">
+                <button type="submit" class="btn btn-primary"><span class="material-symbols-outlined">save</span>Kaydet</button>
+                <span id="pf-personal-msg" class="text-xs"></span>
+              </div>
+            </form>
+          </div>
+
+          <!-- Hesap & güvenlik -->
+          <div id="pf-pane-security" class="pf-pane" style="display:none;">
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
+              <div class="card card-pad">
+                <div class="eyebrow">Hesap</div>
+                <dl class="mt-3 grid grid-cols-[110px_minmax(0,1fr)] gap-y-2 text-sm">
+                  <dt class="text-secondary">Giriş e-postası</dt><dd id="pf-email" class="break-all"></dd>
+                  <dt class="text-secondary">Rol</dt><dd id="pf-role"></dd>
+                  <dt class="text-secondary">Kayıt</dt><dd id="pf-created"></dd>
+                </dl>
+              </div>
+              <form id="pf-pass-form" class="card card-pad flex flex-col gap-3" novalidate>
+                <div class="eyebrow">Şifre değiştir</div>
+                <input type="password" id="pf-pass-cur" class="field" placeholder="Mevcut şifre" autocomplete="current-password" aria-label="Mevcut şifre">
+                <input type="password" id="pf-pass-new" class="field" placeholder="Yeni şifre (en az 6 karakter)" autocomplete="new-password" aria-label="Yeni şifre">
+                <input type="password" id="pf-pass-new2" class="field" placeholder="Yeni şifre (tekrar)" autocomplete="new-password" aria-label="Yeni şifre tekrar">
+                <div class="flex flex-wrap items-center gap-3"><button type="submit" class="btn btn-primary"><span class="material-symbols-outlined">key</span>Şifreyi değiştir</button>
+                  <span id="pf-pass-msg" class="text-xs"></span></div>
+                <span class="text-[11px] text-secondary">Şifre değişince diğer cihazlardaki oturumların kapanır.</span>
+              </form>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <!-- ===================== AYARLAR ===================== -->
       <section id="view-settings" class="view">
         <div class="card card-pad hero-bg">
@@ -964,6 +1092,7 @@
             <button type="button" class="tab-btn" data-tab="members" role="tab">Üyeler <span id="tg-new-badge" class="nav-badge !ml-1" style="display:none;"></span></button>
             <button type="button" class="tab-btn" data-tab="invites" role="tab">Davetler</button>
             <button type="button" class="tab-btn" data-tab="activity" role="tab">Aktivite</button>
+            <button type="button" class="tab-btn" data-tab="skills" role="tab">Yetenek Haritası</button>
           </div>
 
           <!-- Ekipler -->
@@ -1014,6 +1143,26 @@
               <div class="px-5 pt-4"><h3 class="font-display font-semibold">Aktif davetler</h3>
                 <p class="text-xs text-secondary mt-1">Bağlantıyla kaydolan, davetin ekibine katılır. Süresi dolmuş, iptal edilmiş ya da kullanım hakkı bitmiş bağlantıyla kayıt yine çalışır ama kişi ekip dışı başlar.</p></div>
               <div id="tg-inv-list" class="flex flex-col divide-y divide-hairline mt-3"></div>
+            </div>
+          </div>
+
+          <!-- Yetenek Haritası -->
+          <div id="tg-pane-skills" class="tg-pane" style="display:none;">
+            <form id="sk-filters" class="card card-pad mt-4 grid grid-cols-1 sm:grid-cols-3 gap-3" novalidate>
+              <label class="flex flex-col gap-1.5 min-w-0"><span class="eyebrow">Ekip</span><select id="sk-team" class="field w-full"></select></label>
+              <label class="flex flex-col gap-1.5 min-w-0"><span class="eyebrow">Yetkinlik alanı</span><select id="sk-field" class="field w-full"></select></label>
+              <label class="flex flex-col gap-1.5 min-w-0"><span class="eyebrow">Minimum seviye</span>
+                <select id="sk-min" class="field w-full"><option value="">Hepsi</option><option value="2">2 · Temel ve üzeri</option><option value="3">3 · Orta ve üzeri</option><option value="4">4 · İyi ve üzeri</option><option value="5">5 · İleri</option></select></label>
+              <p class="sm:col-span-3 text-[11px] text-secondary">Yalnızca formunu <b>gönderen</b> kişiler haritada. Tek bir alan seçiliyse minimum seviye o alana, bölüm/tümü seçiliyse gösterilen alanlardan <b>en az birine</b> uygulanır. Kişiye tıklayınca tam yetkinlik formu açılır.</p>
+            </form>
+            <div class="card mt-4 overflow-hidden">
+              <div class="px-5 pt-4 flex flex-wrap items-center justify-between gap-2"><h3 class="font-display font-semibold">Kişi × yetkinlik <span id="sk-count" class="text-xs text-secondary font-normal"></span></h3>
+                <div id="sk-legend" class="flex flex-wrap gap-1.5 text-[11px]"></div></div>
+              <div class="table-wrap mt-3"><table class="data-table sk-table" id="sk-table"></table></div>
+            </div>
+            <div class="card mt-4 overflow-hidden">
+              <div class="px-5 pt-4"><h3 class="font-display font-semibold">Formu henüz göndermeyenler <span id="sk-pending-count" class="text-xs text-secondary font-normal"></span></h3></div>
+              <div id="sk-pending" class="flex flex-col divide-y divide-hairline mt-3"></div>
             </div>
           </div>
 
