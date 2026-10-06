@@ -540,7 +540,6 @@ satır kapsayıcının `overflow:hidden`'ı ile gizleniyor. Favicon: `assets/her
   "türetilmiştir" dipnotu (skill metni bunu istiyor); 1 varyasyonda sepet ağırlığı satırı yok;
   sepet ağırlığı girilmezse sevkiyat adedi payı kullanılır.
 
-<!-- graphify-rules-start (managed by `graphify init`) -->
 ## Performans (davranış aynı, yalnızca hız)
 
 - **Postgres bağlantı havuzu** (`db_adapter.py`): ilk kullanımda kurulur, en fazla 5 bağlantı
@@ -572,16 +571,3 @@ satır kapsayıcının `overflow:hidden`'ı ile gizleniyor. Favicon: `assets/her
 - Tarama yalnızca TAM yazılmış sınıfları görür. `bg-${renk}` gibi parça birleştirmeyle sınıf kurma; gerekiyorsa
   olası tüm sonuçları `tailwind.config.js` → `safelist`'e ekle. (Şu an `${...}` ile kurulan sınıfların hepsi
   styles.css'teki özel sınıflar ya da ternary içinde tam literaller — safelist boş.)
-
-## Use Graphify before grep
-
-This repository is indexed by Graphify: a code graph over its call, dependency, and test structure, exposed through a connected Graphify MCP server. Before reaching for grep or reading files, use the Graphify tools your MCP client lists (their exact names and descriptions are in the server's tool list) for what the graph knows and a text search does not:
-
-- find where a symbol, function, or class is defined (instead of grepping for it)
-- understand how something works, or where a behavior is handled
-- find who calls a function, or what it calls
-- see what a change affects (its blast radius) and which tests cover it
-- map a file's dependencies and dependents
-
-Fall back to grep or file reads only for what the graph does not model: literal string or comment matches, non-indexed files, or reading a file you have already located. If no Graphify tools are listed, check the MCP server connection.
-<!-- graphify-rules-end -->
