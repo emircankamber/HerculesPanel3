@@ -1904,78 +1904,45 @@ function renderCompetitorTable() {
 })();
 
 // ---------------------------------------------------------------------------
-// Raporlar — /api/decisions + /api/recent (kullanıcıya özel)
+// Raporlar — GET /api/reports (kullanıcıya özel). Kararlar + son 200 sorgunun (keyword, pazar) başına
+// birleştirilmesi, filtreler, KPI'lar ve SAYFALAMA sunucuda; panel yalnızca bir sayfayı çizer.
 // ---------------------------------------------------------------------------
-const repState = { status: "all", query: "", range: "all", market: "all", items: [] };
+const repState = { status: "all", query: "", range: "all", market: "all", page: 1, data: null, timer: null, seq: 0 };
 const DECISION_CHIP = { "Uygun": "ok", "Sınırda": "warn", "Elenmiş": "bad" };
 
-async function loadReports() {
-  const list = $("#rep-list");
-  list.innerHTML = `<p class="p-6 text-sm text-secondary">yükleniyor…</p>`;
-  try {
-    const [decRes, recRes] = await Promise.all([
-      apiFetch(`${API_BASE}/api/decisions`),
-      apiFetch(`${API_BASE}/api/recent?limit=200`),
-    ]);
-    if (!decRes.ok || !recRes.ok) throw new Error(`HTTP ${decRes.ok ? recRes.status : decRes.status}`);
-    const grouped = await decRes.json();
-    const recent = await recRes.json();
+function repParams() {
+  return { status: repState.status, q: repState.query, range: repState.range, market: repState.market };
+}
 
-    // (keyword, pazar) başına tek kayıt: en son karar + en son sorgu
-    const map = new Map();
-    const keyOf = (kw, m) => `${String(kw).toLowerCase()}|${m}`;
-    Object.entries(grouped || {}).forEach(([decision, items]) => (items || []).forEach(it => {
-      map.set(keyOf(it.keyword, it.marketplace), {
-        keyword: it.keyword, marketplace: it.marketplace, decision, note: it.note || "",
-        decided_at: it.decided_at, decided_by: it.decided_by || "", verdict: null, queried_at: null,
-      });
-    }));
-    (Array.isArray(recent) ? recent : []).forEach(r => {
-      const k = keyOf(r.keyword, r.marketplace);
-      const cur = map.get(k);
-      if (cur) {
-        if (!cur.queried_at || r.fetched_at > cur.queried_at) { cur.queried_at = r.fetched_at; cur.verdict = r.verdict; }
-      } else {
-        map.set(k, { keyword: r.keyword, marketplace: r.marketplace, decision: null, note: "",
-          decided_at: null, decided_by: "", verdict: r.verdict, queried_at: r.fetched_at });
-      }
-    });
-    repState.items = [...map.values()].sort((a, b) =>
-      Math.max(b.decided_at || 0, b.queried_at || 0) - Math.max(a.decided_at || 0, a.queried_at || 0));
+/** Filtre değişince 1. sayfaya döner; sayfa düğmeleri loadReports(true) ile sayfayı korur. */
+async function loadReports(keepPage) {
+  if (keepPage !== true) repState.page = 1;
+  const list = $("#rep-list");
+  if (!repState.data) list.innerHTML = `<p class="p-6 text-sm text-secondary">yükleniyor…</p>`;
+  const seq = ++repState.seq;
+  try {
+    const params = new URLSearchParams({ ...repParams(), page: repState.page });
+    const res = await apiFetch(`${API_BASE}/api/reports?${params}`);
+    const b = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(apiErrorText(b, res.status));
+    if (seq !== repState.seq) return;   // daha yeni bir istek var
+    repState.data = b; repState.page = b.page;
     renderReports();
   } catch (err) {
+    if (seq !== repState.seq) return;
     list.innerHTML = `<p class="p-6 text-sm text-error">Raporlar yüklenemedi: ${esc(err.message)}</p>`;
   }
 }
 
-function repFiltered() {
-  const now = Date.now() / 1000;
-  const q = repState.query.toLowerCase();
-  return repState.items.filter(it => {
-    const ts = Math.max(it.decided_at || 0, it.queried_at || 0);
-    if (repState.range !== "all" && now - ts > Number(repState.range) * 86400) return false;
-    if (repState.market !== "all" && it.marketplace !== repState.market) return false;
-    if (repState.status === "decided" && !it.decision) return false;
-    if (repState.status === "pending" && it.decision) return false;
-    if (q && !`${it.keyword} ${it.note}`.toLowerCase().includes(q)) return false;
-    return true;
-  });
-}
-
 function renderReports() {
-  const items = repFiltered();
-  const nowS = Date.now() / 1000;
-  const inRange = repState.items.filter(it => {
-    const ts = Math.max(it.decided_at || 0, it.queried_at || 0);
-    return (repState.range === "all" || nowS - ts <= Number(repState.range) * 86400)
-      && (repState.market === "all" || it.marketplace === repState.market);
-  });
-  const count = (d) => inRange.filter(it => it.decision === d).length;
-  const cU = count("Uygun"), cS = count("Sınırda"), cE = count("Elenmiş");
-  const undecided = inRange.filter(it => !it.decision).length;
+  const b = repState.data; if (!b) return;
+  const items = b.items;
+  const k = b.kpi;
+  const cU = k.uygun, cS = k.sinirda, cE = k.elenmis;
+  const undecided = k.undecided;
   const decidedTotal = cU + cS + cE;
-  const total = inRange.length;
-  const week = inRange.filter(it => nowS - Math.max(it.decided_at || 0, it.queried_at || 0) <= 7 * 86400).length;
+  const total = k.total;
+  const week = k.week;
   const pct = (n, d) => d ? Math.round((n / d) * 1000) / 10 : 0;
 
   $("#rep-k-total").textContent = fmtNum(total);
@@ -2007,11 +1974,14 @@ function renderReports() {
       <span class="tabular font-medium">%${pct(n, decidedTotal)} (${n})</span>
     </div>`).join("");
 
-  // --- Liste ---
-  $("#rep-count").textContent = `${items.length} dosya listeleniyor`;
+  // --- Liste (yalnızca bu sayfa) ---
+  $("#rep-count").textContent = `${b.total} dosya listeleniyor`;
+  $("#rep-pager-row").style.display = b.total > b.page_size ? "" : "none";
+  $("#rep-range-text").textContent = b.total ? `${fmtNum((b.page - 1) * b.page_size + 1)}–${fmtNum(Math.min(b.total, b.page * b.page_size))} / ${fmtNum(b.total)} kayıt` : "";
+  renderPager($("#rep-pager"), b.page, b.pages, (p) => { repState.page = p; loadReports(true).then(() => $("#rep-list").scrollIntoView({ block: "nearest" })); });
   const list = $("#rep-list");
   if (!items.length) {
-    list.innerHTML = `<p class="p-6 text-sm text-secondary">${repState.items.length ? "Filtreye uyan kayıt yok." : "Henüz analiz ya da karar kaydı yok."}</p>`;
+    list.innerHTML = `<p class="p-6 text-sm text-secondary">${b.all_count ? "Filtreye uyan kayıt yok." : "Henüz analiz ya da karar kaydı yok."}</p>`;
     return;
   }
   list.innerHTML = "";
@@ -2058,24 +2028,23 @@ function renderReports() {
 }
 
 (function bindReportsView() {
-  $("#rep-search").addEventListener("input", (e) => { repState.query = e.target.value.trim(); renderReports(); });
-  bindSegment($("#rep-status"), "status", (s) => { repState.status = s; renderReports(); });
-  $("#rep-range").addEventListener("change", (e) => { repState.range = e.target.value; renderReports(); });
-  $("#rep-market").addEventListener("change", (e) => { repState.market = e.target.value; renderReports(); });
+  $("#rep-search").addEventListener("input", (e) => {
+    repState.query = e.target.value.trim(); clearTimeout(repState.timer); repState.timer = setTimeout(loadReports, 250);
+  });
+  bindSegment($("#rep-status"), "status", (s) => { repState.status = s; loadReports(); });
+  $("#rep-range").addEventListener("change", (e) => { repState.range = e.target.value; loadReports(); });
+  $("#rep-market").addEventListener("change", (e) => { repState.market = e.target.value; loadReports(); });
   // Excel (.xlsx), eski CSV ile aynı sütunlar. Sunucu metinleri formül değil METİN yazar (formül enjeksiyonu koruması).
   $("#rep-xlsx").addEventListener("click", async (e) => {
     const btn = e.currentTarget, original = btn.innerHTML;
-    const items = repFiltered();
     const name = `pl_pazar_raporlari_${new Date().toISOString().slice(0, 10)}`;
     btn.disabled = true; btn.textContent = "hazırlanıyor…";
     try {
       const res = await apiFetch(`${API_BASE}/api/export/reports`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          filename: name, tz_offset_min: new Date().getTimezoneOffset(),
-          rows: items.map(it => ({ keyword: it.keyword ?? "", marketplace: it.marketplace ?? "", decision: it.decision || "",
-            verdict: it.verdict || "", note: it.note ?? "", decided_at: it.decided_at || null, queried_at: it.queried_at || null,
-            decided_by: it.decided_by ?? "" })),
+          // Satırlar sunucuda aynı filtrelerle (TÜM sayfalar) üretilir — panelde yalnızca bir sayfa var.
+          filename: name, tz_offset_min: new Date().getTimezoneOffset(), filters: repParams(),
         }),
       });
       if (!res.ok) { const b = await res.json().catch(() => ({})); throw new Error(apiErrorText(b, res.status)); }
@@ -3382,7 +3351,7 @@ async function submitLaunchReport(e) {
 // EKİP AKTİVİTESİ (yalnızca owner; sunucu /api/team/activity -> require_owner, diğerleri 403)
 // Salt okunur. Kayda tıklamak runAnalysis ile CANLI yeni analiz başlatır (önbellek/kayıtlı sonuç yok).
 // ===========================================================================
-const tmState = { tab: "queries", data: null, timer: null };
+const tmState = { tab: "queries", data: null, timer: null, page: { queries: 1, decisions: 1 } };
 const TM_VERDICT_CLASS = { "Uygun": "ok", "Sınırda": "warn", "Elenmiş": "bad" };
 
 const tmDate = (ts) => ts ? new Date(ts * 1000).toLocaleString("tr-TR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }) : "—";
@@ -3404,8 +3373,10 @@ function tmKeywordHtml(keyword) {
   return asin ? `<span class="mono">${esc(asin[1])}</span> <span class="chip na !text-[10px]">ASIN</span>` : esc(k);
 }
 
-async function loadTeam() {
+/** Filtre değişince sayfalar başa döner; sayfa düğmeleri loadTeam(true) ile mevcut sayfaları korur. */
+async function loadTeam(keepPage) {
   if (currentUser.role !== "owner") return;
+  if (keepPage !== true) tmState.page = { queries: 1, decisions: 1 };
   const params = new URLSearchParams();
   const tid = $("#tm-team").value; if (tid !== "") params.set("team_id", tid);
   const uid = $("#tm-user").value; if (uid !== "") params.set("user_id", uid);
@@ -3413,6 +3384,7 @@ async function loadTeam() {
   const untilDay = tmLocalDayStart($("#tm-to").value); if (untilDay != null) params.set("until", untilDay + 86400);
   const dec = $("#tm-decision").value; if (dec) params.set("decision", dec);
   const q = $("#tm-q").value.trim(); if (q) params.set("q", q);
+  params.set("q_page", tmState.page.queries); params.set("d_page", tmState.page.decisions);
   const st = $("#tm-status"); st.textContent = "yükleniyor…"; st.className = "status-line mt-4 loading";
   try {
     const r = await apiFetch(`${API_BASE}/api/team/activity?${params}`);
@@ -3454,8 +3426,8 @@ function renderTeam() {
 
   $(".tm-count-q").textContent = `(${fmtNum(b.totals.queries)})`;
   $(".tm-count-d").textContent = `(${fmtNum(b.totals.decisions)})`;
-  const trunc = b.totals.queries > b.truncated_at || b.totals.decisions > b.truncated_at;
-  $("#tm-trunc").textContent = trunc ? `Her listede en yeni ${fmtNum(b.truncated_at)} kayıt gösteriliyor — daraltmak için filtre kullanın.` : "";
+  tmState.page = { queries: b.pages.queries.page, decisions: b.pages.decisions.page };   // sunucu aralığa çekmiş olabilir
+  renderTeamPager();
 
   const vchip = (v) => `<span class="chip ${TM_VERDICT_CLASS[v] || "na"}">${esc(v ?? "—")}</span>`;
   const rowAttrs = (r) => `class="tm-row cursor-pointer" tabindex="0" role="button" data-kw="${esc(r.keyword)}" data-mp="${esc(r.marketplace)}" title="Canlı yeniden analiz et"`;
@@ -3473,6 +3445,16 @@ function renderTeam() {
     tr.addEventListener("click", go);
     tr.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } });
   });
+}
+
+/** Aktif sekmenin (Aramalar/Kararlar) sayfa çubuğu — kayıtlar sunucudan sayfa sayfa gelir. */
+function renderTeamPager() {
+  const b = tmState.data; if (!b) return;
+  const k = tmState.tab, pg = b.pages[k], total = b.totals[k];
+  $("#tm-pager-row").style.display = total > b.page_size ? "" : "none";
+  const from = (pg.page - 1) * b.page_size + 1, to = Math.min(total, pg.page * b.page_size);
+  $("#tm-range").textContent = total ? `${fmtNum(from)}–${fmtNum(to)} / ${fmtNum(total)} kayıt` : "";
+  renderPager($("#tm-pager"), pg.page, pg.pages, (p) => { tmState.page[k] = p; loadTeam(true); });
 }
 
 // ===========================================================================
@@ -3821,6 +3803,7 @@ function tmReanalyze(keyword, marketplace) {
     $$("#tm-tabs .tab-btn").forEach(b => b.classList.toggle("active", b === btn));
     $("#tm-pane-queries").style.display = tmState.tab === "queries" ? "" : "none";
     $("#tm-pane-decisions").style.display = tmState.tab === "decisions" ? "" : "none";
+    renderTeamPager();
   }));
 })();
 

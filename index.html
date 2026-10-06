@@ -9,26 +9,9 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Manrope:wght@500;600;700&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&display=swap" rel="stylesheet">
-<script src="https://cdn.tailwindcss.com"></script>
-<script>
-  // "Editorial Intelligence" tasarım token'ları (stitch referans tasarımıyla aynı)
-  tailwind.config = {
-    theme: { extend: {
-      colors: {
-        "primary": "#005c55", "primary-container": "#0f766e", "primary-fixed": "#9cf2e8",
-        "on-primary": "#ffffff", "secondary": "#565e74", "secondary-container": "#dae2fd",
-        "tertiary": "#7d4200", "tertiary-container": "#a15600",
-        "error": "#ba1a1a", "error-container": "#ffdad6",
-        "surface": "#f8f9ff", "surface-container-lowest": "#ffffff", "surface-container-low": "#eff4ff",
-        "surface-container": "#e5eeff", "surface-container-high": "#dce9ff",
-        "on-surface": "#0b1c30", "on-surface-variant": "#3e4947",
-        "outline": "#6e7977", "outline-variant": "#bdc9c6", "hairline": "#e3e9f2",
-      },
-      fontFamily: { display: ["Manrope", "Inter", "sans-serif"], sans: ["Inter", "system-ui", "sans-serif"] },
-    } },
-  };
-</script>
 <link rel="stylesheet" href="styles.css">
+<!-- Derlenmiş Tailwind (scripts/build-css.sh). styles.css'ten SONRA: eski CDN stilleri de en sona ekliyordu. -->
+<link rel="stylesheet" href="tailwind.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 </head>
 <body class="bg-surface text-on-surface">
@@ -807,6 +790,10 @@
               <span id="rep-count" class="text-xs text-secondary"></span>
             </div>
             <div id="rep-list"></div>
+            <div id="rep-pager-row" class="flex flex-wrap items-center justify-between gap-3 px-5 py-4 border-t border-hairline" style="display:none;">
+              <span id="rep-range-text" class="text-xs text-secondary"></span>
+              <div id="rep-pager" class="pager"></div>
+            </div>
           </div>
           <div class="card card-pad h-fit">
             <div class="flex items-center justify-between"><h3 class="font-display text-lg font-semibold">Karar Dağılımı</h3><span id="rep-dist-range" class="text-xs text-secondary"></span></div>
@@ -1320,12 +1307,15 @@
                 <button type="button" class="tab-btn active" data-tab="queries">Aramalar <span class="tm-count-q"></span></button>
                 <button type="button" class="tab-btn" data-tab="decisions">Kararlar <span class="tm-count-d"></span></button>
               </div>
-              <span id="tm-trunc" class="text-[11px] text-secondary"></span>
             </div>
             <div class="table-wrap mt-3" id="tm-pane-queries"><table class="data-table" id="tm-queries">
               <thead><tr><th class="l">Kişi</th><th class="l">Keyword / ASIN</th><th>Pazar</th><th>Tarih</th><th>Ön öneri</th></tr></thead><tbody></tbody></table></div>
             <div class="table-wrap mt-3" id="tm-pane-decisions" style="display:none;"><table class="data-table" id="tm-decisions">
               <thead><tr><th class="l">Kişi</th><th class="l">Keyword / ASIN</th><th>Pazar</th><th>Tarih</th><th>Ön öneri</th><th>Karar</th><th class="l">Not</th></tr></thead><tbody></tbody></table></div>
+            <div id="tm-pager-row" class="flex flex-wrap items-center justify-between gap-3 px-5 py-4 border-t border-hairline" style="display:none;">
+              <span id="tm-range" class="text-xs text-secondary"></span>
+              <div id="tm-pager" class="pager"></div>
+            </div>
           </div>
         </div>
           </div>
