@@ -3077,21 +3077,91 @@ function ckAnalysisKey(data) {
   return data.analysis_mode === "asin" && data.asin ? `ASIN:${data.asin}` : data.keyword;
 }
 
+/** Ürün Analizi sonucundaki "Kontrol Listesi Başlat" ve Kontrol Listesi sayfasındaki seçici aynı yolu kullanır. */
 async function startChecklist(data, btn) {
+  return createChecklist(ckAnalysisKey(data), data.marketplace, btn);
+}
+
+async function createChecklist(analysisKey, marketplace, btn) {
   if (!currentUser.role) { showLogin("Kontrol listesi için kayıtlı bir hesapla giriş yapın.", !authRequiredGlobal); return; }
+  // Aynı ürün için AÇIK bir listen varsa yanlışlıkla ikinci kopyayı açma
+  const dup = ckState.lists.find(l => l.is_mine && l.status === "open" && l.analysis_key === analysisKey && l.marketplace === marketplace);
+  if (dup && !confirm(`"${dup.title || analysisKey}" için zaten açık bir listen var. Yine de yeni bir liste oluşturulsun mu?`)) return;
   const original = btn.innerHTML; btn.disabled = true; btn.textContent = "oluşturuluyor…";
   try {
     const r = await apiFetch(`${API_BASE}/api/checklists`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ analysis_key: ckAnalysisKey(data), marketplace: data.marketplace }),
+      body: JSON.stringify({ analysis_key: analysisKey, marketplace }),
     });
     const b = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(apiErrorText(b, r.status));
     ckState.current = b;
+    $("#ck-new").style.display = "none";
     showView("checklists");
   } catch (err) {
     alert(`Kontrol listesi oluşturulamadı: ${err.message}`);
   } finally { btn.disabled = false; btn.innerHTML = original; }
+}
+
+// ---- Yeni liste seçici: kullanıcının kendi analiz geçmişi (GET /api/recent; MCP çağrısı yok) ----
+const ckNew = { rows: [] };
+
+async function openNewChecklistPicker() {
+  const box = $("#ck-new");
+  box.style.display = "";
+  const list = $("#ck-new-list");
+  list.innerHTML = `<div class="text-xs text-secondary">yükleniyor…</div>`;
+  try {
+    const recent = await ckApi("/api/recent?limit=200");
+    const seen = new Set();
+    // (anahtar, pazar) başına en son analiz — liste zaten yeniden eskiye sıralı
+    ckNew.rows = (Array.isArray(recent) ? recent : []).filter(r => {
+      const k = `${r.keyword}\u0000${r.marketplace}`;
+      if (seen.has(k)) return false;
+      seen.add(k); return true;
+    });
+    renderNewChecklistPicker();
+    $("#ck-new-q").focus();
+  } catch (err) {
+    list.innerHTML = `<div class="text-xs text-error">Analiz geçmişi yüklenemedi: ${esc(err.message)}</div>`;
+  }
+}
+
+function renderNewChecklistPicker() {
+  const q = $("#ck-new-q").value.trim().toLocaleLowerCase("tr");
+  const rows = ckNew.rows.filter(r => !q || String(r.keyword).toLocaleLowerCase("tr").includes(q)).slice(0, 50);
+  const list = $("#ck-new-list");
+  if (!ckNew.rows.length) {
+    list.innerHTML = `<div class="text-sm text-secondary">Henüz analiz ettiğin bir ürün yok. "Yeni ürün analiz et" ile başla; analiz bitince burada görünür.</div>`;
+    return;
+  }
+  list.innerHTML = rows.length ? "" : `<div class="text-sm text-secondary">Aramayla eşleşen analiz yok.</div>`;
+  rows.forEach(r => {
+    const isAsin = String(r.keyword).startsWith("ASIN:");
+    const label = isAsin ? String(r.keyword).slice(5) : r.keyword;
+    const mine = ckState.lists.filter(l => l.is_mine && l.analysis_key === r.keyword && l.marketplace === r.marketplace);
+    const vChip = r.verdict ? `<span class="chip ${DECISION_CHIP[r.verdict] || "na"}">${esc(r.verdict)}</span>` : "";
+    const row = document.createElement("div");
+    row.className = "flex flex-wrap items-center justify-between gap-2 rounded-lg border border-hairline px-3 py-2";
+    row.innerHTML = `
+      <div class="min-w-0">
+        <div class="flex flex-wrap items-center gap-1.5"><span class="font-semibold text-sm break-words">${esc(label)}</span>${isAsin ? '<span class="chip na">ASIN</span>' : ""}<span class="chip na">${esc(r.marketplace)}</span>${vChip}</div>
+        <div class="text-[11px] text-secondary mt-0.5">Son analiz ${esc(fmtStamp(r.fetched_at))}${mine.length ? ` · bu ürün için ${mine.length} listen var` : ""}</div>
+      </div>
+      <div class="flex gap-2 shrink-0">
+        ${mine.length ? '<button type="button" class="ck-new-goto btn btn-outline btn-sm"><span class="material-symbols-outlined">visibility</span>Listeyi aç</button>' : ""}
+        <button type="button" class="ck-new-create btn btn-primary btn-sm"><span class="material-symbols-outlined">checklist</span>Liste oluştur</button>
+      </div>`;
+    row.querySelector(".ck-new-create").addEventListener("click", (e) => createChecklist(r.keyword, r.marketplace, e.currentTarget));
+    row.querySelector(".ck-new-goto")?.addEventListener("click", async () => {
+      try {
+        ckState.current = await ckApi(`/api/checklists/${encodeURIComponent(mine[0].id)}`);
+        $("#ck-new").style.display = "none";
+        renderChecklistList(); renderChecklistDetail();
+      } catch (err) { ckSetStatus(`Hata: ${err.message}`, "error"); }
+    });
+    list.appendChild(row);
+  });
 }
 
 async function ckApi(url, opts = {}) {
@@ -3129,7 +3199,7 @@ function ckProgressBar(p) {
 function renderChecklistList() {
   const box = $("#ck-list");
   $("#ck-list-count").textContent = ckState.lists.length ? `${ckState.lists.length} liste` : "";
-  box.innerHTML = ckState.lists.length ? "" : `<div class="card card-pad text-sm text-secondary w-full">Henüz liste yok. Ürün Analizi ekranındaki <b>Kontrol Listesi Başlat</b> butonuyla oluştur.</div>`;
+  box.innerHTML = ckState.lists.length ? "" : `<div class="card card-pad text-sm text-secondary w-full">Henüz liste yok. Yukarıdaki <b>Yeni Ürün Listesi</b> ile daha önce analiz ettiğin bir ürünü seç ya da Ürün Analizi sonucundaki <b>Kontrol Listesi Başlat</b> butonunu kullan.</div>`;
   ckState.lists.forEach(l => {
     const pb = ckProgressBar(l.progress);
     const b = document.createElement("button");
@@ -3400,6 +3470,12 @@ function renderTemplateEditor() {
 
 (function bindChecklistView() {
   $("#ck-tpl-open").addEventListener("click", openTemplateEditor);
+  $("#ck-new-open").addEventListener("click", () => {
+    if (!currentUser.role) { showLogin("Kontrol listesi için kayıtlı bir hesapla giriş yapın.", !authRequiredGlobal); return; }
+    openNewChecklistPicker();
+  });
+  $("#ck-new-close").addEventListener("click", () => { $("#ck-new").style.display = "none"; });
+  $("#ck-new-q").addEventListener("input", renderNewChecklistPicker);
   $("#ck-tpl-close").addEventListener("click", () => { $("#ck-tpl").style.display = "none"; $("#ck-tpl-msg").textContent = ""; });
   $("#ck-tpl-save").addEventListener("click", async () => {
     const msg = $("#ck-tpl-msg");

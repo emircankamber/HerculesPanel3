@@ -513,6 +513,10 @@ satır kapsayıcının `overflow:hidden`'ı ile gizleniyor. Favicon: `assets/her
   göndermez (member otomatik maddeleri sahte değerle geçiremesin diye). Liste,
   oluşturulduğu andaki snapshot + şablon + eşiklerin KOPYASINI taşır; analiz ya da
   şablon sonradan değişse de mevcut liste değişmez.
+- **Liste başlatma iki yoldan:** (1) Ürün Analizi sonucundaki "Kontrol Listesi Başlat", (2) Kontrol Listesi
+  sayfasındaki "Yeni Ürün Listesi" → kişinin KENDİ analiz geçmişinden (`GET /api/recent`, anahtar+pazar başına en
+  son) seçim; ikisi de aynı `POST /api/checklists`. Yeniden analiz/MCP çağrısı YOK. Aynı ürün için kişinin açık
+  listesi varsa panel onay ister (sunucu ikinci listeyi engellemez).
 - **6 otomatik madde** (`checklist.evaluate_auto`, elle işaretlenemez — 400):
   arama > 40.000 (yalnızca ana keyword'ün exact satırı; ASIN modunda "Veri yok"),
   ilk 10 rakip ciro toplamı > $500.000, ort. yorum < 800, yeni marka ≥ 3
