@@ -38,15 +38,23 @@ def verdict_for(negative_count: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# KRİTER 03 — İLK 5 KEYWORD'ÜN AĞIRLIKLI ACOS'U (yalnızca SUNUCUDA hesaplanır)
+# KRİTER 03 — İLGİLİ İLK 20 KEYWORD'ÜN AĞIRLIKLI ACOS'U (yalnızca SUNUCUDA hesaplanır)
 #   ACOS = Σ(bid × clicks) ÷ Σ(purchases × fiyat)
-#   = 5 keyword'e birlikte reklam verilse oluşacak toplam harcama ÷ toplam satış.
-# Sıralama: keyword modunda relevancy, ASIN modunda trafficPercentage (büyükten küçüğe;
-# eşitlikte orijinal sıra). bid/clicks/purchases/fiyat'tan biri eksik ya da geçersizse
+#   = 20 keyword'e birlikte reklam verilse oluşacak toplam harcama ÷ toplam satış
+#   (tıklaması/satışı çok olan keyword doğal olarak daha ağır basar).
+# HAVUZ (index.py): keyword modunda keyword_miner(minRelevancy=50, size=ACOS_POOL_SIZE) — hacme göre
+# ilk 20'lik tablo havuzu DEĞİL (o havuz ilgili ama hacmi düşük keyword'leri dışarıda bırakıyordu;
+# "samsung water filter" gerçek verisinde %32,6 vs ilgili havuzla %44,3). ASIN modunda traffic_keyword
+# (size=ACOS_POOL_SIZE). Sıralama: keyword modunda relevancy, ASIN modunda trafficPercentage (büyükten
+# küçüğe; eşitlikte orijinal sıra). Sıralama değeri olmayan ya da ≤0 olan satır (ör. ürüne trafik
+# getirmeyen keyword) "ilgili" sayılmaz. bid/clicks/purchases/fiyat'tan biri eksik ya da geçersizse
 # keyword atlanır, sıradaki alınır. Satışı 0 olan keyword harcamaya eklenir.
 # (Lansman Raporu bunu KULLANMAZ — orada skill gereği ana keyword + kendi fiyatımız.)
 # ---------------------------------------------------------------------------
-TOP_ACOS_N = 5
+TOP_ACOS_N = 20
+ACOS_POOL_SIZE = 100   # SellerSprite'tan çekilen ilgili keyword havuzu (gerçek çağrıyla doğrulandı: 100 satıra kadar)
+# Bilgi amaçlı kırılım (ön öneriye girmez): keyword modunda relevancy bantları
+RELEVANCY_BANDS = [("near", "Yakın alakalı (ilgililik ≥ 75)", 75, None), ("mid", "Orta (ilgililik 50–75)", 50, 75)]
 
 
 def _num(v):
@@ -61,7 +69,7 @@ def _num(v):
         return None
 
 
-def weighted_top_acos(rows: list, rank_field: str, price_of=None, n: int = TOP_ACOS_N) -> dict:
+def weighted_top_acos(rows: list, rank_field: str, price_of=None, n: int = TOP_ACOS_N, bands=None) -> dict:
     """
     rows: keyword satırları; rank_field: "relevancy" (keyword modu) ya da "trafficPercentage" (ASIN).
     price_of(row) -> fiyat (keyword modunda satırın avgPrice'ı, ASIN modunda ürünün fiyatı).
@@ -69,13 +77,10 @@ def weighted_top_acos(rows: list, rank_field: str, price_of=None, n: int = TOP_A
     spend, sales, acos}], total_spend, total_sales, no_sales (harcama var satış yok), skipped.
     """
     price_of = price_of or (lambda r: r.get("avgPrice"))
-    indexed = list(enumerate(rows or []))
-    def rank_key(item):
-        i, r = item
-        rv = _num(r.get(rank_field))
-        return (0 if rv is not None else 1, -(rv or 0), i)   # sayısal sıralama değeri olmayanlar sona
+    # Sıralama değeri olmayan ya da ≤0 olan satır ilgili sayılmaz (ör. trafik payı 0 olan keyword)
+    indexed = [(i, r) for i, r in enumerate(rows or []) if (_num(r.get(rank_field)) or 0) > 0]
     used, skipped = [], []
-    for _, r in sorted(indexed, key=rank_key):
+    for _, r in sorted(indexed, key=lambda item: (-_num(item[1].get(rank_field)), item[0])):
         if len(used) >= n:
             break
         bid, clicks, purch, price = _num(r.get("bid")), _num(r.get("clicks")), _num(r.get("purchases")), _num(price_of(r))
@@ -89,9 +94,17 @@ def weighted_top_acos(rows: list, rank_field: str, price_of=None, n: int = TOP_A
     total_spend = sum(u["spend"] for u in used)
     total_sales = sum(u["sales"] for u in used)
     value = (total_spend / total_sales) if total_sales > 0 else None
-    return {"value": value, "count": len(used), "n": n, "rank_field": rank_field, "keywords": used,
-            "total_spend": total_spend, "total_sales": total_sales,
-            "no_sales": bool(used) and total_sales <= 0 and total_spend > 0, "skipped": skipped}
+    out = {"value": value, "count": len(used), "n": n, "rank_field": rank_field, "keywords": used,
+           "total_spend": total_spend, "total_sales": total_sales,
+           "no_sales": bool(used) and total_sales <= 0 and total_spend > 0, "skipped": skipped}
+    if bands:   # bilgi amaçlı alt kırılım — aynı keyword'ler, aynı formül
+        out["bands"] = []
+        for key, label, lo, hi in bands:
+            sub = [u for u in used if u["rank"] >= lo and (hi is None or u["rank"] < hi)]
+            sp, sa = sum(u["spend"] for u in sub), sum(u["sales"] for u in sub)
+            out["bands"].append({"key": key, "label": label, "count": len(sub),
+                                 "value": (sp / sa) if sa > 0 else None, "spend": sp, "sales": sa})
+    return out
 
 
 def _span(lo: int, hi: int) -> str:
@@ -153,6 +166,48 @@ def calc_profit(cogs: float, sale_price: float, fba_fee: float, referral_fee: fl
     }
 
 
+# ---------------------------------------------------------------------------
+# KÂR HESAPLAYICISININ BAŞLANGIÇ DEĞERLERİ — TEK KAYNAK (sunucu).
+# Panel analiz sonucunu açar açmaz kâr hesaplayıcısını bu değerlerle doldurup Kriter 06'yı (Net Kâr Marjı)
+# hesaplar. Sunucu ön öneriyi AYNI değerlerle hesaplamazsa (eskiden net_margin=None idi) panelde "Sınırda"
+# görünen analiz Geçmiş/Ana Sayfa'ya "Uygun" yazılıyordu. Panel bu sayıları yanıttaki `profit_inputs`'tan
+# alır (yeniden yuvarlamaz) → iki taraf birebir aynı marjı bulur.
+# Birimler panel alanlarıyla aynı: dolar, oranlar YÜZDE sayısı (ref_rate 15 = %15).
+# ---------------------------------------------------------------------------
+PROFIT_DEFAULTS = {"cogs": 6.0, "sale": 37.75, "fba": 5.5, "ref_rate": 15.0, "acos": 40.0, "ret": 3.0, "gen": 1.0}
+
+
+def initial_profit_inputs(avg_price, weighted_acos, return_rate, pre_cost: dict | None = None) -> dict:
+    """avg_price $, weighted_acos / return_rate 0-1 oran (None → varsayılan), pre_cost {cogs, fba, gen}
+    (analiz öncesi girilen maliyet; yalnızca dolu alanlar). `sources` hangi değerin nereden geldiğini söyler."""
+    inp = dict(PROFIT_DEFAULTS)
+    src = {k: "default" for k in inp}
+    price = _num(avg_price)
+    if price and price > 0:
+        inp["sale"], src["sale"] = round(price, 2), "market"
+    a = _num(weighted_acos)
+    if a is not None:
+        inp["acos"], src["acos"] = round(a * 100, 1), "market"
+    r = _num(return_rate)
+    if r is not None:
+        inp["ret"], src["ret"] = round(r * 100, 2), "market"
+    for k in ("cogs", "fba", "gen"):
+        v = _num((pre_cost or {}).get(k))
+        if v is not None and v >= 0:
+            inp[k], src[k] = v, "pre_cost"
+    return {**inp, "sources": src}
+
+
+def net_margin_from_inputs(inp: dict) -> float | None:
+    """Panelin recalcProfit'iyle aynı: referral $ = oran × fiyat; fiyat yoksa/0 ise marj hesaplanmaz."""
+    sale = inp.get("sale") or 0
+    if sale <= 0:
+        return None
+    return calc_profit(cogs=inp["cogs"], sale_price=sale, fba_fee=inp["fba"],
+                       referral_fee=inp["ref_rate"] / 100 * sale, acos=inp["acos"] / 100,
+                       return_rate=inp["ret"] / 100, overhead_rate=inp["gen"] / 100)["margin"]
+
+
 @dataclass
 class PreAssessmentCriterion:
     label: str
@@ -183,7 +238,7 @@ def pre_assessment(avg_price: float | None, gross_margin: float | None, acos: fl
                                 flag(avg_price, th["min_avg_price"], ">="), unit="usd"),
         PreAssessmentCriterion("Gross Margin", gross_margin, th["min_gross_margin"], ">=",
                                 flag(gross_margin, th["min_gross_margin"], ">="), unit="percent"),
-        # Kriter 03: ilk 5 keyword'ün ağırlıklı ACOS'u (weighted_top_acos). Harcama var ama hiç satış
+        # Kriter 03: ilgili ilk 20 keyword'ün ağırlıklı ACOS'u (weighted_top_acos). Harcama var ama hiç satış
         # yoksa ACOS sonsuzdur -> değer yok ama kriter OLUMSUZ.
         PreAssessmentCriterion("ACOS", acos, th["max_acos"], "<=",
                                 "OLUMSUZ" if (acos is None and (acos_detail or {}).get("no_sales"))

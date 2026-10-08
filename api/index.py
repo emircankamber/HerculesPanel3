@@ -36,7 +36,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from mcp_client import call_tool
-from scoring import calc_keyword_ad_metrics, calc_profit, pre_assessment, DEFAULT_THRESHOLDS, verdict_rule, weighted_top_acos
+from scoring import calc_keyword_ad_metrics, calc_profit, pre_assessment, DEFAULT_THRESHOLDS, verdict_rule, weighted_top_acos, \
+    initial_profit_inputs, net_margin_from_inputs, ACOS_POOL_SIZE, RELEVANCY_BANDS
 import signal_engine as se
 
 # Bayesian (scipy) ve Portfolio (ortools) opsiyonel — Vercel deploy boyutunu
@@ -334,7 +335,20 @@ async def resolve_category_node(seed_keyword: str, marketplace: str, preferred_d
 # ---------------------------------------------------------------------------
 # Ana analiz endpoint'i
 # ---------------------------------------------------------------------------
+class PreCost(BaseModel):
+    """Analiz öncesi girilen maliyet (opsiyonel; panel localStorage'dan gönderir). Boş alan = varsayılan."""
+    cogs: float | None = Field(None, ge=0, le=100000)
+    fba: float | None = Field(None, ge=0, le=100000)
+    gen: float | None = Field(None, ge=0, le=100)
+
+
+def _return_rate(demand_trend: dict) -> float | None:
+    d = demand_trend.get("data") if isinstance(demand_trend, dict) else None
+    return d["returnRatio"] / 100 if isinstance(d, dict) and d.get("returnRatio") is not None else None
+
+
 class AnalyzeRequest(BaseModel):
+    pre_cost: PreCost | None = None
     keyword: str
     marketplace: str = "US"
     top_relevancy: int = 50
@@ -371,7 +385,9 @@ async def analyze(req: AnalyzeRequest, user: dict = Depends(require_auth)):
             "keyword": req.keyword,
             "marketplace": req.marketplace,
             "minRelevancy": req.top_relevancy,
-            "size": req.keyword_list_size,
+            # Tablo hacme göre ilk keyword_list_size satırı gösterir; Kriter 03 (ACOS) ise bu İLGİLİ havuzun
+            # tamamından ilgililiği en yüksek 20'yi kullanır — ek MCP çağrısı yok, aynı çağrı daha büyük sayfa.
+            "size": max(req.keyword_list_size, ACOS_POOL_SIZE),
             "order": {"field": "searches", "desc": True},
         })
 
@@ -495,19 +511,22 @@ async def analyze(req: AnalyzeRequest, user: dict = Depends(require_auth)):
                 bid=main_row.get("bid"), avg_price=main_row.get("avgPrice"),
                 impressions=main_row.get("impressions"), searches=main_row.get("searches"),
             )}
-        # Tabloda ana keyword'ün satırını da EXACT veriyle değiştir (broad değil) —
+        # Ana keyword'ün satırını EXACT veriyle değiştir (broad değil) —
         # kullanıcı tabloda ve ön değerlendirmede tutarlı, tam eşleşmiş veri görsün.
+        # keyword_rows burada TÜM ilgili havuz (ACOS_POOL_SIZE); tablo aşağıda ilk keyword_list_size'a kesilir.
+        main_idx = None
         if main_row:
-            replaced = False
             for i, r in enumerate(keyword_rows):
                 if r.get("keyword", "").lower() == req.keyword.lower():
                     # Exact satır geniş satırın yerine geçer; exact yanıtta olmayan alanlar
                     # (ör. relevancy — Kriter 03'ün sıralaması buna dayanır) geniş satırdan korunur.
                     keyword_rows[i] = {**r, **main_row}
-                    replaced = True
+                    main_idx = i
                     break
-            if not replaced:
-                keyword_rows.insert(0, main_row)
+        acos_pool = keyword_rows
+        keyword_rows = acos_pool[:req.keyword_list_size]   # tablo: hacme göre ilk N (eskisi gibi)
+        if main_row and (main_idx is None or main_idx >= req.keyword_list_size):
+            keyword_rows.insert(0, acos_pool[main_idx] if main_idx is not None else main_row)
 
         # 6) Top brand share (brand_conc'tan) — GERÇEK ALAN ADI: totalRevenueRatio
         #    (brand_conc "data" doğrudan liste, "share"/"percentage" değil)
@@ -531,8 +550,13 @@ async def analyze(req: AnalyzeRequest, user: dict = Depends(require_auth)):
         # pre_assessment zaten DEFAULT_THRESHOLDS'a düşer (bkz. scoring.py).
         user_thresholds = await db.get_user_thresholds(uid)
 
-        # Kriter 03: relevancy'si en yüksek 5 keyword'ün ağırlıklı ACOS'u (her keyword kendi avgPrice'ıyla)
-        acos_detail = weighted_top_acos(keyword_rows, "relevancy", lambda r: r.get("avgPrice"))
+        # Kriter 03: ilgili havuzdan relevancy'si en yüksek 20 keyword'ün ağırlıklı ACOS'u (her keyword kendi avgPrice'ıyla)
+        acos_detail = weighted_top_acos(acos_pool, "relevancy", lambda r: r.get("avgPrice"), bands=RELEVANCY_BANDS)
+        # Kriter 06 (Net Kâr Marjı): panelin kâr hesaplayıcısıyla AYNI başlangıç değerleri (scoring.initial_profit_inputs)
+        # → kaydedilen ön öneri (Geçmiş / Ana Sayfa) panelde ilk görünenle aynı olur.
+        profit_inputs = initial_profit_inputs(stats_data.get("avgPrice"), acos_detail["value"],
+                                              _return_rate(demand_trend),
+                                              req.pre_cost.model_dump() if req.pre_cost else None)
         assessment = pre_assessment(
             avg_price=stats_data.get("avgPrice"),
             gross_margin=gross_margin,
@@ -540,7 +564,7 @@ async def analyze(req: AnalyzeRequest, user: dict = Depends(require_auth)):
             acos_detail=acos_detail,
             top_brand_share=top_brand_share,
             strong_new_brands=strong_new_brands_count,  # top 10 rakip availableDate proxy'si (bkz. yukarıdaki not)
-            net_margin=None,
+            net_margin=net_margin_from_inputs(profit_inputs),
             thresholds=user_thresholds,
         )
 
@@ -550,7 +574,6 @@ async def analyze(req: AnalyzeRequest, user: dict = Depends(require_auth)):
             "category_used": category_used_label,
             "fetched_at_iso": datetime.now(timezone.utc).isoformat(),  # her arama gerçekten canlı mı doğrulamak için
             "category_candidates": category_candidates,
-            "keyword_data_raw": kw_data,
             "keyword_rows": keyword_rows,
             "market_stats": stats_data,
             "brand_concentration": brand_items,
@@ -569,6 +592,7 @@ async def analyze(req: AnalyzeRequest, user: dict = Depends(require_auth)):
             ),
             "top_competitors": top_competitors,  # otomatik çekildi (competitor_lookup, matchType=3)
             "pre_assessment": assessment,
+            "profit_inputs": profit_inputs,  # kâr hesaplayıcısının başlangıç değerleri (Kriter 06 bunlarla)
         }
 
         await db.save_analysis(req.keyword, req.marketplace, payload, req.requested_by)
@@ -1473,6 +1497,7 @@ async def clear_history_ep(user: dict = Depends(require_auth)):
 # ASIN ANALİZİ (Reverse ASIN) — keyword yerine ASIN ile aynı raporu üretir
 # ---------------------------------------------------------------------------
 class AnalyzeAsinRequest(BaseModel):
+    pre_cost: PreCost | None = None
     asin: str
     marketplace: str = "US"
     keyword_list_size: int = 20
@@ -1510,7 +1535,9 @@ async def analyze_asin(req: AnalyzeAsinRequest, user: dict = Depends(require_aut
 
         # 2) Reverse ASIN — trafik keyword'leri
         rev_raw = await call_tool("traffic_keyword", {
-            "asin": asin, "marketplace": req.marketplace, "size": req.keyword_list_size,
+            "asin": asin, "marketplace": req.marketplace,
+            # Tablo hacme göre ilk keyword_list_size; Kriter 03 havuzun tamamından trafik payı en yüksek 20
+            "size": max(req.keyword_list_size, ACOS_POOL_SIZE),
             "order": {"field": "searches", "desc": True},
         })
         rev_items = rev_raw.get("data", {}).get("items", []) if isinstance(rev_raw.get("data"), dict) else []
@@ -1539,8 +1566,13 @@ async def analyze_asin(req: AnalyzeAsinRequest, user: dict = Depends(require_aut
 
         # Ana satır = en yüksek trafik payına sahip keyword
         main_row = max(keyword_rows, key=lambda r: r.get("trafficPercentage") or 0, default=None)
-        # Kriter 03: trafik payı en yüksek 5 keyword'ün ağırlıklı ACOS'u (fiyat = ürünün kendi fiyatı)
+        # Kriter 03: trafik payı en yüksek 20 keyword'ün ağırlıklı ACOS'u (fiyat = ürünün kendi fiyatı).
+        # Trafik payı 0 olan keyword (ürüne trafik getirmiyor) sayılmaz. Tablo hacme göre ilk N.
         acos_detail = weighted_top_acos(keyword_rows, "trafficPercentage", lambda r: asin_price)
+        table = keyword_rows[:req.keyword_list_size]
+        if main_row is not None and not any(r is main_row for r in table):
+            table.insert(0, main_row)   # ana (en çok trafik getiren) keyword tabloda hep görünsün
+        keyword_rows = table
 
         # 3) Pazar analizi (ürünün kendi kategorisiyle)
         market_stats = brand_conc = price_dist = launch_dist = demand_trend = {}
@@ -1592,10 +1624,14 @@ async def analyze_asin(req: AnalyzeAsinRequest, user: dict = Depends(require_aut
         gross_margin = (raw_gm / 100 if raw_gm and raw_gm > 1 else raw_gm) if raw_gm is not None else None
 
         user_thresholds = await db.get_user_thresholds(uid)
+        profit_inputs = initial_profit_inputs(stats_data.get("avgPrice"), acos_detail["value"],
+                                              _return_rate(demand_trend),
+                                              req.pre_cost.model_dump() if req.pre_cost else None)
         assessment = pre_assessment(
             avg_price=stats_data.get("avgPrice"), gross_margin=gross_margin,
             acos=acos_detail["value"], acos_detail=acos_detail,
-            top_brand_share=top_brand_share, strong_new_brands=strong_new_brands_count, net_margin=None,
+            top_brand_share=top_brand_share, strong_new_brands=strong_new_brands_count,
+            net_margin=net_margin_from_inputs(profit_inputs),
             thresholds=user_thresholds)
 
         payload = {
@@ -1627,6 +1663,7 @@ async def analyze_asin(req: AnalyzeAsinRequest, user: dict = Depends(require_aut
                 else None),
             "top_competitors": top_competitors,
             "pre_assessment": assessment,
+            "profit_inputs": profit_inputs,
         }
 
         await db.save_analysis(cache_key, req.marketplace, payload, user.get("email"))

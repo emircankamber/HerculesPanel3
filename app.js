@@ -327,12 +327,12 @@ async function runAnalysis(keyword, marketplace, categoryOverride = "") {
     const res = isAsin
       ? await apiFetch(`${API_BASE}/api/analyze-asin`, {
           method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ asin: keyword, marketplace }),
+          body: JSON.stringify({ asin: keyword, marketplace, ...preCostBody() }),
         })
       : await apiFetch(`${API_BASE}/api/analyze`, {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            keyword, marketplace,
+            keyword, marketplace, ...preCostBody(),
             ...(categoryOverride ? { category_override_node_id: categoryOverride } : {}),
           }),
         });
@@ -437,7 +437,7 @@ function renderPanel(data) {
     const REASON = {
       "Ort. Satış Fiyatı": "ortalama fiyat düşük (kar marjı sıkışır)",
       "Gross Margin": "pazarın brüt kar marjı hedefin altında",
-      "ACOS": "en ilgili 5 keyword'de reklam maliyeti yüksek",
+      "ACOS": "en ilgili 20 keyword'de reklam maliyeti yüksek",
       "En Büyük Marka Payı": "tek bir marka pazara hakim",
       "Güçlü Yeni Marka (1 yıl)": "son 1 yılda pazara girip tutunabilen marka çok az",
       "Net Kar Marjı (kar analizi)": "girdiğiniz maliyetlerle net kar marjı yetersiz",
@@ -565,6 +565,16 @@ function renderPanel(data) {
     const negCount = criteria.filter(x => x.flag === "OLUMSUZ").length;
     const newVerdict = verdictFor(negCount) ?? pa.verdict;
     setVerdict(newVerdict, negCount);
+    // Geçmiş / Ana Sayfa sunucunun kaydettiği öneriyi gösterir (kâr hesaplayıcısının başlangıç değerleriyle);
+    // kullanıcı maliyetleri burada değiştirip öneriyi değiştirirse bunu açıkça söyle.
+    const savedNote = root.querySelector(".verdict-saved-note");
+    if (savedNote) {
+      const differs = data.profit_inputs && pa.verdict && newVerdict !== pa.verdict;
+      savedNote.textContent = differs
+        ? `Kâr hesaplayıcısında değiştirdiğiniz değerlerle yeniden hesaplandı. Geçmiş ve Ana Sayfa'da kayıtlı ön öneri: ${pa.verdict} (başlangıç maliyetleriyle).`
+        : "";
+      savedNote.style.display = differs ? "" : "none";
+    }
     if (summaryEl) summaryEl.innerHTML = buildPlainSummary(criteria, newVerdict);
   }
 
@@ -701,18 +711,30 @@ function renderPanel(data) {
 
   // Gerçek pazar verisiyle önceden doldur (kullanıcı hâlâ istediği gibi değiştirebilir)
   const marketAvgPrice = data.market_stats?.avgPrice;
-  if (marketAvgPrice) root.querySelector(".p-sale").value = marketAvgPrice.toFixed(2);
-  // ACOS ön değeri = Kriter 03 (ilk 5 keyword ağırlıklı, sunucu hesabı); düzenlenebilir
   const acosCrit = (pa.criteria || []).find(c => c.label === "ACOS");
   const weightedAcos = typeof acosCrit?.value === "number" ? acosCrit.value : null;
-  if (weightedAcos != null) root.querySelector(".p-acos").value = (weightedAcos * 100).toFixed(1);
-  if (data.market_return_rate != null) root.querySelector(".p-ret").value = (data.market_return_rate * 100).toFixed(2);
-  // Analiz öncesi girilen maliyetler (opsiyonel): yalnızca DOLU alanlar Kâr bölümüne yazılır
-  const preCost = readPreCost();
+  const pi = data.profit_inputs;
+  let preCost;
+  if (pi) {
+    // TEK KAYNAK: sunucunun Kriter 06'yı (ve kaydedilen ön öneriyi) hesapladığı değerler (scoring.initial_profit_inputs).
+    // Yeniden yuvarlanmadan yazılır → panelin ilk marjı ve ön önerisi Geçmiş/Ana Sayfa'dakiyle birebir aynı.
+    const FIELD = { cogs: ".p-cogs", sale: ".p-sale", fba: ".p-fba", ref_rate: ".p-ref", acos: ".p-acos", ret: ".p-ret", gen: ".p-gen" };
+    Object.entries(FIELD).forEach(([k, sel]) => { if (typeof pi[k] === "number") root.querySelector(sel).value = String(pi[k]); });
+    const src = pi.sources || {};
+    preCost = Object.fromEntries(["cogs", "fba", "gen"].map(k => [k, src[k] === "pre_cost" ? pi[k] : null]));
+  } else {
+    // Eski yanıt (profit_inputs yok): önceki davranış
+    if (marketAvgPrice) root.querySelector(".p-sale").value = marketAvgPrice.toFixed(2);
+    if (weightedAcos != null) root.querySelector(".p-acos").value = (weightedAcos * 100).toFixed(1);
+    if (data.market_return_rate != null) root.querySelector(".p-ret").value = (data.market_return_rate * 100).toFixed(2);
+    preCost = readPreCost();
+    ["cogs", "fba", "gen"].forEach(k => { if (preCost[k] != null) root.querySelector(`.p-${k}`).value = preCost[k]; });
+  }
+  // Analiz öncesi girilen maliyetler (opsiyonel): yalnızca DOLU alanlar Kâr bölümüne yazıldı
   const preUsed = [];
-  if (preCost.cogs != null) { root.querySelector(".p-cogs").value = preCost.cogs; preUsed.push(`COGS $${preCost.cogs.toFixed(2)}`); }
-  if (preCost.fba != null) { root.querySelector(".p-fba").value = preCost.fba; preUsed.push(`FBA $${preCost.fba.toFixed(2)}`); }
-  if (preCost.gen != null) { root.querySelector(".p-gen").value = preCost.gen; preUsed.push(`Genel gider %${preCost.gen}`); }
+  if (preCost.cogs != null) preUsed.push(`COGS $${preCost.cogs.toFixed(2)}`);
+  if (preCost.fba != null) preUsed.push(`FBA $${preCost.fba.toFixed(2)}`);
+  if (preCost.gen != null) preUsed.push(`Genel gider %${preCost.gen}`);
   const preNote = root.querySelector(".profit-precost-note");
   if (preNote && preUsed.length) {
     preNote.textContent = `✓ Analiz öncesi girilen maliyetler kullanıldı — ${preUsed.join(" · ")}.`;
@@ -978,7 +1000,7 @@ function fmtCompact(v) {
 const CRIT_HELP = {
   "Ort. Satış Fiyatı": "Pazardaki ürünlerin ortalama satış fiyatı. Düşük fiyatlı pazarlarda kar marjı sıkışır.",
   "Gross Margin": "Pazardaki ürünlerin ortalama brüt kar marjı. Yüksek olması, fiyatlandırma alanı olduğunu gösterir.",
-  "ACOS": "En ilgili 5 keyword'e (ASIN modunda trafik payı en yüksek 5) birlikte reklam verilse oluşacak toplam harcamanın toplam satışa oranı: Σ(bid × tık) ÷ Σ(satış × fiyat). Yüksekse reklamla satmak pahalı demek.",
+  "ACOS": "İlgililiği en yüksek 20 keyword'e (SellerSprite ilgililik ≥ 50 havuzundan; ASIN modunda trafik payı en yüksek 20) birlikte reklam verilse oluşacak toplam harcamanın toplam satışa oranı: Σ(bid × tık) ÷ Σ(satış × fiyat). Yüksekse reklamla satmak pahalı demek.",
   "En Büyük Marka Payı": "Pazarın en büyük markasının ciro payı. Tek marka baskınsa girmek zordur.",
   "Güçlü Yeni Marka (1 yıl)": "Son 1 yılda pazara girip üst sıralara çıkabilmiş marka sayısı. Az ise pazar yeni girenlere kapalı demek.",
   "Net Kar Marjı (kar analizi)": "Aşağıdaki kar analizi hesaplayıcısına girdiğiniz maliyetlere göre hesaplanan net kar marjınız.",
@@ -1044,9 +1066,9 @@ function buildCriterionContext(data) {
       sub: "Kategori ortalaması (avgProfit)",
       viz: (c) => typeof c.value === "number" ? ringSvg(c.value, flagColor(c)) : "",
     },
-    // Kriter 03 — sunucu hesaplar (scoring.weighted_top_acos): Σ(bid×clicks) ÷ Σ(purchases×fiyat), ilk 5 keyword
+    // Kriter 03 — sunucu hesaplar (scoring.weighted_top_acos): Σ(bid×clicks) ÷ Σ(purchases×fiyat), ilgili ilk 20 keyword
     "ACOS": {
-      title: "ACOS (ilk 5 keyword, ağırlıklı, hesaplanan)",
+      title: `ACOS (ilgili ilk ${data.pre_assessment?.acos_detail?.n ?? 20} keyword, ağırlıklı, hesaplanan)`,
       sub: (() => {
         const d = data.pre_assessment?.acos_detail;
         if (!d || !d.count) return "";
@@ -1067,7 +1089,9 @@ function buildCriterionContext(data) {
           <table class="data-table text-[11.5px] mt-1"><thead><tr><th class="l">Keyword</th><th>ACOS</th><th>Bid</th><th>Tık</th><th>Satış</th><th>Fiyat</th><th>${rankLbl}</th></tr></thead>
           <tbody>${rows}<tr class="font-semibold"><td class="l">Toplam</td><td>${d.value == null ? "—" : fmtPct(d.value)}</td>
           <td></td><td></td><td></td><td></td><td></td></tr></tbody></table>
-          <div class="text-[11px] text-secondary mt-1">Harcama ${fmtUsd(d.total_spend)} ÷ satış ${fmtUsd(d.total_sales)}. Eksik verili keyword'ler atlanır.</div></div>`;
+          <div class="text-[11px] text-secondary mt-1">Harcama ${fmtUsd(d.total_spend)} ÷ satış ${fmtUsd(d.total_sales)}. Eksik verili keyword'ler atlanır.</div>
+          ${(d.bands || []).length ? `<div class="text-[11px] mt-2"><span class="font-semibold">Kırılım (bilgi amaçlı, ön öneriye girmez):</span> ${d.bands.map(b =>
+            `${esc(b.label)}: <b>${b.value == null ? (b.count ? "satış yok" : "—") : fmtPct(b.value)}</b> <span class="text-secondary">(${b.count} kw)</span>`).join(" · ")}</div>` : ""}</div>`;
       },
     },
     "En Büyük Marka Payı": {
@@ -3055,21 +3079,91 @@ function ckAnalysisKey(data) {
   return data.analysis_mode === "asin" && data.asin ? `ASIN:${data.asin}` : data.keyword;
 }
 
+/** Ürün Analizi sonucundaki "Kontrol Listesi Başlat" ve Kontrol Listesi sayfasındaki seçici aynı yolu kullanır. */
 async function startChecklist(data, btn) {
+  return createChecklist(ckAnalysisKey(data), data.marketplace, btn);
+}
+
+async function createChecklist(analysisKey, marketplace, btn) {
   if (!currentUser.role) { showLogin("Kontrol listesi için kayıtlı bir hesapla giriş yapın.", !authRequiredGlobal); return; }
+  // Aynı ürün için AÇIK bir listen varsa yanlışlıkla ikinci kopyayı açma
+  const dup = ckState.lists.find(l => l.is_mine && l.status === "open" && l.analysis_key === analysisKey && l.marketplace === marketplace);
+  if (dup && !confirm(`"${dup.title || analysisKey}" için zaten açık bir listen var. Yine de yeni bir liste oluşturulsun mu?`)) return;
   const original = btn.innerHTML; btn.disabled = true; btn.textContent = "oluşturuluyor…";
   try {
     const r = await apiFetch(`${API_BASE}/api/checklists`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ analysis_key: ckAnalysisKey(data), marketplace: data.marketplace }),
+      body: JSON.stringify({ analysis_key: analysisKey, marketplace }),
     });
     const b = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(apiErrorText(b, r.status));
     ckState.current = b;
+    $("#ck-new").style.display = "none";
     showView("checklists");
   } catch (err) {
     alert(`Kontrol listesi oluşturulamadı: ${err.message}`);
   } finally { btn.disabled = false; btn.innerHTML = original; }
+}
+
+// ---- Yeni liste seçici: kullanıcının kendi analiz geçmişi (GET /api/recent; MCP çağrısı yok) ----
+const ckNew = { rows: [] };
+
+async function openNewChecklistPicker() {
+  const box = $("#ck-new");
+  box.style.display = "";
+  const list = $("#ck-new-list");
+  list.innerHTML = `<div class="text-xs text-secondary">yükleniyor…</div>`;
+  try {
+    const recent = await ckApi("/api/recent?limit=200");
+    const seen = new Set();
+    // (anahtar, pazar) başına en son analiz — liste zaten yeniden eskiye sıralı
+    ckNew.rows = (Array.isArray(recent) ? recent : []).filter(r => {
+      const k = `${r.keyword}\u0000${r.marketplace}`;
+      if (seen.has(k)) return false;
+      seen.add(k); return true;
+    });
+    renderNewChecklistPicker();
+    $("#ck-new-q").focus();
+  } catch (err) {
+    list.innerHTML = `<div class="text-xs text-error">Analiz geçmişi yüklenemedi: ${esc(err.message)}</div>`;
+  }
+}
+
+function renderNewChecklistPicker() {
+  const q = $("#ck-new-q").value.trim().toLocaleLowerCase("tr");
+  const rows = ckNew.rows.filter(r => !q || String(r.keyword).toLocaleLowerCase("tr").includes(q)).slice(0, 50);
+  const list = $("#ck-new-list");
+  if (!ckNew.rows.length) {
+    list.innerHTML = `<div class="text-sm text-secondary">Henüz analiz ettiğin bir ürün yok. "Yeni ürün analiz et" ile başla; analiz bitince burada görünür.</div>`;
+    return;
+  }
+  list.innerHTML = rows.length ? "" : `<div class="text-sm text-secondary">Aramayla eşleşen analiz yok.</div>`;
+  rows.forEach(r => {
+    const isAsin = String(r.keyword).startsWith("ASIN:");
+    const label = isAsin ? String(r.keyword).slice(5) : r.keyword;
+    const mine = ckState.lists.filter(l => l.is_mine && l.analysis_key === r.keyword && l.marketplace === r.marketplace);
+    const vChip = r.verdict ? `<span class="chip ${DECISION_CHIP[r.verdict] || "na"}">${esc(r.verdict)}</span>` : "";
+    const row = document.createElement("div");
+    row.className = "flex flex-wrap items-center justify-between gap-2 rounded-lg border border-hairline px-3 py-2";
+    row.innerHTML = `
+      <div class="min-w-0">
+        <div class="flex flex-wrap items-center gap-1.5"><span class="font-semibold text-sm break-words">${esc(label)}</span>${isAsin ? '<span class="chip na">ASIN</span>' : ""}<span class="chip na">${esc(r.marketplace)}</span>${vChip}</div>
+        <div class="text-[11px] text-secondary mt-0.5">Son analiz ${esc(fmtStamp(r.fetched_at))}${mine.length ? ` · bu ürün için ${mine.length} listen var` : ""}</div>
+      </div>
+      <div class="flex gap-2 shrink-0">
+        ${mine.length ? '<button type="button" class="ck-new-goto btn btn-outline btn-sm"><span class="material-symbols-outlined">visibility</span>Listeyi aç</button>' : ""}
+        <button type="button" class="ck-new-create btn btn-primary btn-sm"><span class="material-symbols-outlined">checklist</span>Liste oluştur</button>
+      </div>`;
+    row.querySelector(".ck-new-create").addEventListener("click", (e) => createChecklist(r.keyword, r.marketplace, e.currentTarget));
+    row.querySelector(".ck-new-goto")?.addEventListener("click", async () => {
+      try {
+        ckState.current = await ckApi(`/api/checklists/${encodeURIComponent(mine[0].id)}`);
+        $("#ck-new").style.display = "none";
+        renderChecklistList(); renderChecklistDetail();
+      } catch (err) { ckSetStatus(`Hata: ${err.message}`, "error"); }
+    });
+    list.appendChild(row);
+  });
 }
 
 async function ckApi(url, opts = {}) {
@@ -3107,7 +3201,7 @@ function ckProgressBar(p) {
 function renderChecklistList() {
   const box = $("#ck-list");
   $("#ck-list-count").textContent = ckState.lists.length ? `${ckState.lists.length} liste` : "";
-  box.innerHTML = ckState.lists.length ? "" : `<div class="card card-pad text-sm text-secondary w-full">Henüz liste yok. Ürün Analizi ekranındaki <b>Kontrol Listesi Başlat</b> butonuyla oluştur.</div>`;
+  box.innerHTML = ckState.lists.length ? "" : `<div class="card card-pad text-sm text-secondary w-full">Henüz liste yok. Yukarıdaki <b>Yeni Ürün Listesi</b> ile daha önce analiz ettiğin bir ürünü seç ya da Ürün Analizi sonucundaki <b>Kontrol Listesi Başlat</b> butonunu kullan.</div>`;
   ckState.lists.forEach(l => {
     const pb = ckProgressBar(l.progress);
     const b = document.createElement("button");
@@ -3378,6 +3472,12 @@ function renderTemplateEditor() {
 
 (function bindChecklistView() {
   $("#ck-tpl-open").addEventListener("click", openTemplateEditor);
+  $("#ck-new-open").addEventListener("click", () => {
+    if (!currentUser.role) { showLogin("Kontrol listesi için kayıtlı bir hesapla giriş yapın.", !authRequiredGlobal); return; }
+    openNewChecklistPicker();
+  });
+  $("#ck-new-close").addEventListener("click", () => { $("#ck-new").style.display = "none"; });
+  $("#ck-new-q").addEventListener("input", renderNewChecklistPicker);
   $("#ck-tpl-close").addEventListener("click", () => { $("#ck-tpl").style.display = "none"; $("#ck-tpl-msg").textContent = ""; });
   $("#ck-tpl-save").addEventListener("click", async () => {
     const msg = $("#ck-tpl-msg");
@@ -4022,6 +4122,13 @@ function readPreCost() {
     out[k] = Number.isFinite(n) && n >= 0 ? n : null;
   }
   return out;
+}
+
+/** Analiz isteğine eklenir: sunucu Kriter 06'yı (ve kaydedilen ön öneriyi) bu maliyetlerle hesaplar. */
+function preCostBody() {
+  const pc = readPreCost();
+  const filled = Object.fromEntries(Object.entries(pc).filter(([, v]) => v != null));
+  return Object.keys(filled).length ? { pre_cost: filled } : {};
 }
 
 function syncPreCostState() {

@@ -416,11 +416,25 @@
             </div>
             <div class="flex flex-wrap gap-2 shrink-0">
               <button type="button" id="ck-tpl-open" class="btn btn-outline" style="display:none;"><span class="material-symbols-outlined">tune</span>Şablonu Düzenle</button>
-              <button type="button" class="btn btn-primary" data-goto="search"><span class="material-symbols-outlined">add_circle</span>Yeni Ürün Listesi</button>
+              <button type="button" id="ck-new-open" class="btn btn-primary"><span class="material-symbols-outlined">add_circle</span>Yeni Ürün Listesi</button>
             </div>
           </div>
         </div>
         <div id="ck-status" class="status-line mt-4"></div>
+
+        <!-- Yeni liste: kullanıcının daha önce analiz ettiği ürünlerden seç (MCP çağrısı YOK; sunucu kayıtlı analizden snapshot alır) -->
+        <section id="ck-new" class="card card-pad mt-6" style="display:none;">
+          <div class="flex flex-wrap items-start justify-between gap-3">
+            <div class="max-w-2xl"><h3 class="font-display text-lg font-semibold">Yeni ürün listesi başlat</h3>
+              <p class="text-xs text-secondary mt-1">Daha önce analiz ettiğin ürünlerden birini seç. Liste, o ürünün <b>kayıtlı son analizinden</b> oluşturulur — yeniden SellerSprite çağrısı yapılmaz. Listede olmayan bir ürün için önce Ürün Analizi'ni çalıştır.</p></div>
+            <div class="flex flex-wrap gap-2 shrink-0">
+              <button type="button" class="btn btn-outline" data-goto="search"><span class="material-symbols-outlined">monitoring</span>Yeni ürün analiz et</button>
+              <button type="button" id="ck-new-close" class="btn btn-outline">Kapat</button>
+            </div>
+          </div>
+          <input type="search" id="ck-new-q" class="field w-full sm:w-80 mt-4" placeholder="Keyword ya da ASIN ara…" autocomplete="off">
+          <div id="ck-new-list" class="flex flex-col gap-2 mt-3"></div>
+        </section>
 
         <div id="ck-guest" class="card card-pad mt-6 text-center py-12" style="display:none;">
           <span class="material-symbols-outlined text-outline" style="font-size:36px">lock</span>
@@ -1417,6 +1431,7 @@
           <span class="verdict-badge"></span>
           <span class="verdict-hint text-xs text-secondary"></span>
         </div>
+        <p class="verdict-saved-note text-xs text-tertiary mt-2" style="display:none;"></p>
         <p class="text-[13.5px] text-on-surface-variant leading-relaxed mt-4">Algoritmik ön öneri 6 kritere dayanır: <span class="verdict-rule-text"></span>. Tek bir olumsuz kriter tek başına eleme sebebi değildir.</p>
       </div>
 
