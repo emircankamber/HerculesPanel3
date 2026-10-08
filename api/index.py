@@ -685,17 +685,33 @@ async def profit(req: ProfitRequest, user: dict = Depends(require_auth)):
 # Pazar kararını kaydet (ekibin manuel Uygun/Sınırda/Elenmiş kararı)
 # ---------------------------------------------------------------------------
 class DecisionRequest(BaseModel):
-    keyword: str
-    marketplace: str = "US"
-    decision: str  # "Uygun" | "Sınırda" | "Elenmiş"
-    note: str = ""
+    keyword: str = Field(..., min_length=1, max_length=500)
+    marketplace: str = Field("US", max_length=10)
+    decision: str = Field(..., pattern=r"^(Uygun|Sınırda|Elenmiş)$")
+    note: str = Field("", max_length=2000)
     decided_by: str = ""
+
+
+_ASIN_TITLE_RE = re.compile(r"^(B0[A-Z0-9]{8})\s+—\s", re.I)
+
+
+def _analysis_key(keyword: str) -> str:
+    """Karar/sorgu anahtarını birleştirir: ASIN analizlerinde sorgu "ASIN:B0.." ile, (eski panelde) karar ise
+    "B0.. — başlık" ile kaydediliyordu → Raporlar'da aynı ürün iki satır oluyordu. Hepsi "ASIN:B0.."."""
+    kw = str(keyword or "").strip()
+    m = _ASIN_TITLE_RE.match(kw)
+    if m:
+        return f"ASIN:{m.group(1).upper()}"
+    if kw[:5].upper() == "ASIN:":
+        return "ASIN:" + kw[5:].strip().upper()
+    return kw
 
 
 @app.post("/api/decision")
 async def save_decision(req: DecisionRequest, user: dict = Depends(require_auth)):
     uid = user.get("user_id", 0)
-    await db.save_decision(uid, req.keyword, req.marketplace, req.decision, req.note, user.get("email", req.decided_by))
+    await db.save_decision(uid, _analysis_key(req.keyword), req.marketplace, req.decision, req.note.strip(),
+                           user.get("email", req.decided_by))
     return {"ok": True}
 
 
@@ -792,19 +808,29 @@ class ReportRow(BaseModel):
 # ---------------------------------------------------------------------------
 REPORTS_PAGE_SIZE = 20
 REPORTS_RECENT_LIMIT = 200
-REPORT_STATUSES = ("all", "decided", "pending")
+# all | decided | pending (karar yok) | uygun | sinirda | elenmis (o kararı verilenler) | conflict (karar ≠ ön öneri)
+REPORT_STATUSES = ("all", "decided", "pending", "uygun", "sinirda", "elenmis", "conflict")
+REPORT_DECISION_OF = {"uygun": "Uygun", "sinirda": "Sınırda", "elenmis": "Elenmiş"}
+REPORT_SORTS = ("new", "old", "az")
 
 
 async def _report_items(user_id) -> list[dict]:
     grouped = await db.list_decisions_grouped(user_id)
     recent = await db.list_recent(user_id, REPORTS_RECENT_LIMIT)
+    names = await db.email_name_map()
     items: dict = {}
-    key = lambda kw, m: f"{str(kw).lower()}|{m}"
+    key = lambda kw, m: f"{_analysis_key(kw).lower()}|{m}"
     for decision, rows in (grouped or {}).items():
         for it in rows or []:
-            items[key(it["keyword"], it["marketplace"])] = {
-                "keyword": it["keyword"], "marketplace": it["marketplace"], "decision": decision,
-                "note": it.get("note") or "", "decided_at": it.get("decided_at"), "decided_by": it.get("decided_by") or "",
+            k = key(it["keyword"], it["marketplace"])
+            prev = items.get(k)
+            # Eski "B0.. — başlık" ve yeni "ASIN:B0.." kararı aynı ürüne düşebilir → en yenisi kalır
+            if prev and (prev["decided_at"] or 0) >= (it.get("decided_at") or 0):
+                continue
+            items[k] = {
+                "keyword": _analysis_key(it["keyword"]), "marketplace": it["marketplace"], "decision": decision,
+                "note": it.get("note") or "", "decided_at": it.get("decided_at"),
+                "decided_by": _person(names, it.get("decided_by")) or "",
                 "verdict": None, "queried_at": None}
     for r in recent:
         cur = items.get(key(r["keyword"], r["marketplace"]))
@@ -813,8 +839,11 @@ async def _report_items(user_id) -> list[dict]:
                 cur["queried_at"], cur["verdict"] = r["fetched_at"], r["verdict"]
         else:
             items[key(r["keyword"], r["marketplace"])] = {
-                "keyword": r["keyword"], "marketplace": r["marketplace"], "decision": None, "note": "",
+                "keyword": _analysis_key(r["keyword"]), "marketplace": r["marketplace"], "decision": None, "note": "",
                 "decided_at": None, "decided_by": "", "verdict": r["verdict"], "queried_at": r["fetched_at"]}
+    for it in items.values():
+        # Ekip kararı algoritmik ön öneriden farklı mı (ikisi de varsa)
+        it["conflict"] = bool(it["decision"] and it["verdict"] and it["decision"] != it["verdict"])
     return sorted(items.values(), key=_report_ts, reverse=True)
 
 
@@ -822,7 +851,8 @@ def _report_ts(it) -> int:
     return max(it.get("decided_at") or 0, it.get("queried_at") or 0)
 
 
-def _report_filter(items: list, status: str, q: str, range_days: int | None, market: str, now: float):
+def _report_filter(items: list, status: str, q: str, range_days: int | None, market: str, now: float,
+                   sort: str = "new"):
     """(liste filtresi uygulanmış kayıtlar, KPI kümesi = yalnızca aralık + pazar filtresi)."""
     in_range = [it for it in items
                 if (range_days is None or now - _report_ts(it) <= range_days * 86400)
@@ -834,9 +864,17 @@ def _report_filter(items: list, status: str, q: str, range_days: int | None, mar
             continue
         if status == "pending" and it["decision"]:
             continue
+        if status in REPORT_DECISION_OF and it["decision"] != REPORT_DECISION_OF[status]:
+            continue
+        if status == "conflict" and not it["conflict"]:
+            continue
         if needle and needle not in f"{it['keyword']} {it['note']}".lower():
             continue
         out.append(it)
+    if sort == "old":
+        out.sort(key=_report_ts)
+    elif sort == "az":
+        out.sort(key=lambda it: (str(it["keyword"]).lower(), it["marketplace"]))
     return out, in_range
 
 
@@ -851,20 +889,23 @@ def _report_range(range_: str) -> int | None:
 @app.get("/api/reports")
 async def reports(status: str = Query("all"), q: str = Query("", max_length=200), range: str = Query("all", max_length=8),
                   market: str = Query("all", max_length=10), page: int = Query(1, ge=1),
-                  user: dict = Depends(require_auth)):
+                  sort: str = Query("new"), user: dict = Depends(require_auth)):
     """Raporlar sayfası: filtrelenmiş liste SAYFALI; KPI'lar (aralık + pazar filtresiyle) tüm kümeden."""
     if status not in REPORT_STATUSES:
         raise HTTPException(422, "Geçersiz durum filtresi")
+    if sort not in REPORT_SORTS:
+        raise HTTPException(422, "Geçersiz sıralama")
     items = await _report_items(user.get("user_id", 0))
     now = time.time()
-    rows, in_range = _report_filter(items, status, q, _report_range(range), market, now)
+    rows, in_range = _report_filter(items, status, q, _report_range(range), market, now, sort)
     pg, page_rows = _page_slice(rows, page, REPORTS_PAGE_SIZE)
     count = lambda d: sum(1 for it in in_range if it["decision"] == d)
     return {"items": page_rows, "total": len(rows), "all_count": len(items),
             "page": pg["page"], "pages": pg["pages"], "page_size": REPORTS_PAGE_SIZE,
             "kpi": {"total": len(in_range), "week": sum(1 for it in in_range if now - _report_ts(it) <= 7 * 86400),
                     "uygun": count("Uygun"), "sinirda": count("Sınırda"), "elenmis": count("Elenmiş"),
-                    "undecided": sum(1 for it in in_range if not it["decision"])}}
+                    "undecided": sum(1 for it in in_range if not it["decision"]),
+                    "conflict": sum(1 for it in in_range if it["conflict"])}}
 
 
 class ReportFilters(BaseModel):
@@ -872,6 +913,7 @@ class ReportFilters(BaseModel):
     q: str = Field("", max_length=200)
     range: str = Field("all", max_length=8)
     market: str = Field("all", max_length=10)
+    sort: str = Field("new", pattern=r"^(new|old|az)$")
 
 
 class ExportReportsRequest(BaseModel):
@@ -890,7 +932,7 @@ async def export_reports(req: ExportReportsRequest, user: dict = Depends(require
         if f.status not in REPORT_STATUSES:
             raise HTTPException(422, "Geçersiz durum filtresi")
         rows, _ = _report_filter(await _report_items(user.get("user_id", 0)), f.status, f.q,
-                                 _report_range(f.range), f.market, time.time())
+                                 _report_range(f.range), f.market, time.time(), f.sort)
         rows = [{"keyword": it["keyword"] or "", "marketplace": it["marketplace"] or "", "decision": it["decision"] or "",
                  "verdict": it["verdict"] or "", "note": it["note"] or "", "decided_at": it["decided_at"] or None,
                  "queried_at": it["queried_at"] or None, "decided_by": it["decided_by"] or ""} for it in rows]
@@ -1511,20 +1553,16 @@ async def delete_decision_ep(req: DeleteKeywordRequest, user: dict = Depends(req
 
 @app.post("/api/history/delete")
 async def delete_history_ep(req: DeleteKeywordRequest, user: dict = Depends(require_auth)):
-    await db.delete_analysis(user.get("user_id", 0), req.keyword, req.marketplace)
-    return {"ok": True, "deleted_by": user["email"]}
+    """Geçmişten silinen ürün Raporlar'da ve Ana Sayfa'nın Uygun/Sınırda/Elenmiş sayılarında da kalmasın:
+    kişinin bu ürün için verdiği kararlar da silinir (yalnızca KENDİ kayıtları)."""
+    uid = user.get("user_id", 0)
+    await db.delete_analysis(uid, req.keyword, req.marketplace)
+    removed = await db.delete_decisions_for(uid, _analysis_key(req.keyword), req.marketplace)
+    return {"ok": True, "deleted_by": user["email"], "decisions_deleted": removed}
 
 
-@app.post("/api/decisions/clear")
-async def clear_decisions_ep(user: dict = Depends(require_auth)):
-    await db.clear_all_decisions(user.get("user_id", 0))
-    return {"ok": True}
-
-
-@app.post("/api/history/clear")
-async def clear_history_ep(user: dict = Depends(require_auth)):
-    await db.clear_all_analyses(user.get("user_id", 0))
-    return {"ok": True}
+# Toplu silme uçları (/api/decisions/clear, /api/history/clear) bilinçli olarak YOK: kararlar ve geçmiş
+# yalnızca tek tek silinir (yanlışlıkla tüm kararların gitmesini önlemek için — kullanıcı isteği).
 
 
 

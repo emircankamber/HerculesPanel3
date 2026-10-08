@@ -601,6 +601,20 @@ satır kapsayıcının `overflow:hidden`'ı ile gizleniyor. Favicon: `assets/her
   kayıt, en son karar/sorgu), filtreler, KPI'lar (yalnızca aralık + pazar filtresiyle) ve sayfalama
   (`REPORTS_PAGE_SIZE`=20) sunucuda. Excel `POST /api/export/reports {filters}` satırları sunucuda üretir
   (tüm sayfalar; eski `rows` yolu duruyor). Eski panelle aynı veride sıra, alanlar, KPI ve Excel birebir doğrulandı.
+  Filtre `status`: all | decided | pending | uygun | sinirda | elenmis | conflict (karar ≠ ön öneri, `item.conflict`);
+  `sort`: new | old | az. KPI kartları ve Karar Dağılımı satırları tıklanınca bu filtreyi kurar (2. tık kaldırır).
+  Satırdan doğrudan karar verilir/değiştirilir (`POST /api/decision`, MCP YOK; "Ön öneriyi onayla" kısayolu) ve
+  kayıtlı analizden kontrol listesi açılır. `decided_by` çıktıda AD SOYAD (`_person`).
+- **Karar/sorgu anahtarı tek:** `index._analysis_key()` — ASIN analizlerinde sorgu "ASIN:B0.." ile, eski panelde
+  karar "B0.. — başlık" ile kaydediliyordu → Raporlar'da aynı ürün İKİ satırdı. Panel artık kararı `ckAnalysisKey`
+  ile gönderir, sunucu `/api/decision`'da ve Raporlar birleştirmesinde eski biçimi "ASIN:B0.."ya çevirir.
+  `runAnalysis` "ASIN:" önekini ayıklar (eskiden Raporlar'daki "Yeniden Analiz Et" ASIN'i keyword sanıyordu).
+  `/api/decision` karar değerini doğrular (Uygun|Sınırda|Elenmiş, 422).
+- **Geçmişten silme kararı da siler:** `POST /api/history/delete` → `db.delete_decisions_for` (kişinin KENDİ
+  kararları; ASIN'de eski "B0.. — başlık" biçimi dahil); toplu silme ("Tümünü Temizle") YOK — kullanıcı isteğiyle kaldırıldı, geçmiş ve kararlar
+  yalnızca TEK TEK silinir (uçları da yok, geri ekleme). Böylece ürün
+  Raporlar'dan ve Ana Sayfa'nın Uygun/Sınırda/Elenmiş sayılarından da kalkar. (Kararlar sayfasından karar silmek
+  geçmişe dokunmaz.)
 
 ## Tailwind — derlenmiş CSS (CDN YOK)
 

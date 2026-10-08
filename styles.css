@@ -282,6 +282,18 @@ select.field{padding-right:28px;}
 .rep-item{padding:20px;border-bottom:1px solid var(--hairline);}
 .rep-item:last-child{border-bottom:0;}
 @media (max-width:640px){ .rep-item{padding:16px;} }
+.rep-kpi{cursor:pointer;transition:box-shadow .15s,border-color .15s;}
+.rep-kpi:hover{box-shadow:0 0 0 1px var(--outline-variant);}
+.rep-kpi:focus-visible{outline:2px solid var(--primary);outline-offset:2px;}
+.rep-kpi.active{box-shadow:0 0 0 2px var(--primary);}
+.rep-legend-row{cursor:pointer;border-radius:8px;padding:2px 6px;margin:0 -6px;}
+.rep-legend-row:hover,.rep-legend-row.active{background:var(--surface-low);}
+.rep-dec{display:flex;flex-wrap:wrap;gap:6px;align-items:center;}
+.rep-dec-btn{font-size:12px;font-weight:600;padding:4px 10px;border-radius:999px;border:1px solid var(--outline-variant);background:transparent;color:var(--on-surface-variant);cursor:pointer;}
+.rep-dec-btn:hover{background:var(--surface-low);}
+.rep-dec-btn.on.ok{background:var(--primary);border-color:var(--primary);color:#fff;}
+.rep-dec-btn.on.warn{background:var(--tertiary);border-color:var(--tertiary);color:#fff;}
+.rep-dec-btn.on.bad{background:var(--error);border-color:var(--error);color:#fff;}
 
 /* ---------- Ayarlar ---------- */
 .set-field{background:var(--surface-low);border:1px solid transparent;border-radius:12px;padding:16px;transition:border-color .15s,background .15s;}
