@@ -92,10 +92,45 @@ async def _all_exceptions_as_json(request, exc: Exception):
     )
 
 
+# Veritabanı açılışı: hata uygulamayı ÇÖKERTMEZ. Eskiden init_db() açılışta patlarsa (yanlış/eksik DATABASE_URL,
+# Neon erişilemez, kota) uygulama hiç başlamıyor, Vercel her isteğe açıklamasız "500" dönüyordu — panelde yalnızca
+# "HTTP 500", giriş bile yapılamıyordu. Artık hata saklanır, her /api isteğinde yeniden denenir; hâlâ başarısızsa
+# panelde okunabilir NEDENİ olan JSON 503 döner.
+_DB_STATE = {"ok": False, "error": None}
+_URL_RE = re.compile(r"\b\w+://\S+")
+
+
+async def _ensure_db() -> str | None:
+    """Başarılıysa None, değilse okunabilir hata metni (bağlantı adresi/parola içermez)."""
+    if _DB_STATE["ok"]:
+        return None
+    try:
+        # Şema sürümü güncelse tek sorgu; değilse tüm migrasyonlar (+ sertifika tohumu) tek bağlantıda.
+        await db.init_db()
+        _DB_STATE.update(ok=True, error=None)
+        return None
+    except Exception as e:  # noqa: BLE001 — her türlü bağlantı/migrasyon hatası
+        msg = _URL_RE.sub("[adres gizlendi]", f"{type(e).__name__}: {e}")[:300]
+        _DB_STATE["error"] = msg
+        print(f"[init_db] veritabanı hazırlanamadı: {msg}", flush=True)
+        return msg
+
+
 @app.on_event("startup")
 async def startup():
-    # Şema sürümü güncelse tek sorgu; değilse tüm migrasyonlar (+ sertifika tohumu) tek bağlantıda.
-    await db.init_db()
+    await _ensure_db()
+
+
+@app.middleware("http")
+async def _db_guard(request, call_next):
+    if request.url.path.startswith("/api/") and not _DB_STATE["ok"]:
+        err = await _ensure_db()
+        if err:
+            return Response(
+                content=json.dumps({"detail": "Veritabanına bağlanılamadı — Vercel ortam değişkenlerini "
+                                              f"(DATABASE_URL / POSTGRES_URL) ve Neon'u kontrol edin. Hata: {err}"}),
+                status_code=503, media_type="application/json")
+    return await call_next(request)
 
 
 # İsteğe özel (her istek kendi görevinde/bağlamında çalışır): require_session'ın getirdiği rol + ekip bilgisi.
