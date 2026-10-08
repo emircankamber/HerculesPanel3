@@ -85,10 +85,15 @@ Gerçek alan adları (varsayılanlar YANLIŞ çıktı):
 - Launch time bar etiketleri Çince geliyor (`"3年以上"` = "3+ yıl") —
   `app.js`'deki `LAUNCH_LABEL_TR` eşlemesi bunu çeviriyor.
 
-### 7. `mcp` Python paketi sürümü — `>=1.9.4` şart
-`mcp==1.2.0`'da Streamable HTTP transport (`streamable_http.py`) YOK, bu
-sürüm `1.8.0`'dan itibaren eklendi. `requirements.txt`'te `mcp>=1.9.4,<2.0.0`
-sabit — düşürme.
+### 7. Paket sürümleri — `requirements.txt` SABİT (==), aralık YAZMA
+`mcp==1.2.0`'da Streamable HTTP transport (`streamable_http.py`) YOK (1.8.0'dan itibaren var) — `mcp` en az 1.9.4.
+**Vercel her deploy'da paketleri sıfırdan kurar.** Eskiden `mcp>=1.9.4,<2.0.0` ve `pydantic>=2.10.1,<3.0.0` aralık
+olarak yazılıydı; pydantic 2.14.0 çıkınca `mcp 1.12.4` import anında çöktü (`ImportError: eval_type_backport`),
+uygulama hiç başlamadı ve TÜM uçlar açıklamasız 500 döndü (giriş bile yapılamadı) — kodda hiçbir değişiklik
+yokken, bir sonraki deploy'la. Artık `mcp==1.12.4`, `pydantic==2.13.5`, `pydantic-settings`, `sse-starlette`
+sabit. Yükseltirken temiz ortamda (`uv venv` + `uv pip install -r requirements.txt`) uygulamayı import edip test et.
+- Açılışta veritabanı hazırlanamazsa (yanlış DATABASE_URL, Neon erişilemez) uygulama artık ÇÖKMEZ:
+  `index._ensure_db` hatayı saklar, her /api isteğinde yeniden dener, başarısızsa okunabilir JSON 503 döner.
 
 ### 8. "Keyword Conversion Rate" — SellerSprite'ın web arayüzündeki rakamı
 BİREBİR ÇEKEMİYORUZ. O sayfa muhtemelen ABA 3-tık dönüşüm payı metodolojisi
