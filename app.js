@@ -225,7 +225,7 @@ document.addEventListener("DOMContentLoaded", () => {
   });
   const clearHist = document.getElementById("clear-history-btn");
   if (clearHist) clearHist.addEventListener("click", async () => {
-    if (!confirm("TÜM sorgu geçmişi kalıcı olarak silinecek. Emin misiniz?")) return;
+    if (!confirm("TÜM sorgu geçmişi ve bu ürünler için verdiğin TÜM pazar kararları kalıcı olarak silinecek (Raporlar ve Ana Sayfa'dan da kalkar). Emin misiniz?")) return;
     await apiFetch(`${API_BASE}/api/history/clear`, { method: "POST" });
     loadHistory();
   });
@@ -307,6 +307,8 @@ async function runAnalysis(keyword, marketplace, categoryOverride = "") {
   // analizde yalnızca ASIN'i gönder (aksi halde başlık keyword olarak aranırdı).
   const asinPrefix = keyword.match(/^(B0[A-Z0-9]{8})\s+—\s/i);
   if (asinPrefix) keyword = asinPrefix[1];
+  // Kayıt anahtarı "ASIN:B0.." (Geçmiş, Raporlar, Kararlar) → yalnızca ASIN
+  keyword = keyword.replace(/^ASIN:\s*/i, "");
 
   $("#kw-input").value = keyword;
   $("#market-input").value = marketplace;
@@ -916,7 +918,8 @@ function renderPanel(data) {
     await apiFetch(`${API_BASE}/api/decision`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ keyword: data.keyword, marketplace: data.marketplace, decision, note }),
+      // ASIN modunda karar da sorgu kaydıyla aynı anahtarla ("ASIN:B0..") — Raporlar'da tek satır olsun
+      body: JSON.stringify({ keyword: ckAnalysisKey(data), marketplace: data.marketplace, decision, note }),
     });
     root.querySelector(".decision-saved-msg").textContent = `✓ kaydedildi · ${new Date().toLocaleTimeString("tr-TR")}`;
   });
@@ -1246,7 +1249,7 @@ async function loadHistory() {
         </span>`;
       div.querySelector(".card-delete-btn").addEventListener("click", async (ev) => {
         ev.stopPropagation();
-        if (!confirm(`"${r.keyword}" geçmiş kaydı silinsin mi?`)) return;
+        if (!confirm(`"${r.keyword}" geçmiş kaydı silinsin mi? Bu ürün için verdiğin pazar kararı da silinir (Raporlar ve Ana Sayfa'dan kalkar).`)) return;
         await apiFetch(`${API_BASE}/api/history/delete`, {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ keyword: r.keyword, marketplace: r.marketplace }),
@@ -1931,11 +1934,13 @@ function renderCompetitorTable() {
 // Raporlar — GET /api/reports (kullanıcıya özel). Kararlar + son 200 sorgunun (keyword, pazar) başına
 // birleştirilmesi, filtreler, KPI'lar ve SAYFALAMA sunucuda; panel yalnızca bir sayfayı çizer.
 // ---------------------------------------------------------------------------
-const repState = { status: "all", query: "", range: "all", market: "all", page: 1, data: null, timer: null, seq: 0 };
+const repState = { status: "all", query: "", range: "all", market: "all", sort: "new", page: 1, data: null, timer: null, seq: 0, editing: null };
 const DECISION_CHIP = { "Uygun": "ok", "Sınırda": "warn", "Elenmiş": "bad" };
+const REP_STATUS_OF = { "Uygun": "uygun", "Sınırda": "sinirda", "Elenmiş": "elenmis" };
+const repKey = (it) => `${it.keyword}|${it.marketplace}`;
 
 function repParams() {
-  return { status: repState.status, q: repState.query, range: repState.range, market: repState.market };
+  return { status: repState.status, q: repState.query, range: repState.range, market: repState.market, sort: repState.sort };
 }
 
 /** Filtre değişince 1. sayfaya döner; sayfa düğmeleri loadReports(true) ile sayfayı korur. */
@@ -1956,6 +1961,13 @@ async function loadReports(keepPage) {
     if (seq !== repState.seq) return;
     list.innerHTML = `<p class="p-6 text-sm text-error">Raporlar yüklenemedi: ${esc(err.message)}</p>`;
   }
+}
+
+/** Durum filtresini değiştir (sekmeler, KPI kartları ve dağılım listesi aynı filtreyi kullanır). */
+function setReportStatus(status) {
+  repState.status = repState.status === status && status !== "all" ? "all" : status;   // aynı karta 2. tık = kaldır
+  repState.editing = null;
+  loadReports();
 }
 
 function renderReports() {
@@ -1980,6 +1992,11 @@ function renderReports() {
   $("#rep-b-uygun").style.width = pct(cU, decidedTotal) + "%";
   $("#rep-b-elenmis").style.width = pct(cE, decidedTotal) + "%";
   $("#rep-b-sinirda").style.width = pct(cS, decidedTotal) + "%";
+  // Aktif filtre görünürlüğü: sekmeler + kartlar
+  $$("#rep-status .tab-btn").forEach(t => t.classList.toggle("active", t.dataset.status === repState.status));
+  $$(".rep-kpi").forEach(c => c.classList.toggle("active", c.dataset.filter === repState.status && repState.status !== "all"));
+  $("#rep-c-pending").textContent = undecided ? `(${undecided})` : "";
+  $("#rep-c-conflict").textContent = k.conflict ? `(${k.conflict})` : "";
 
   // --- Karar dağılımı ---
   $("#rep-dist-total").textContent = fmtNum(decidedTotal);
@@ -1993,16 +2010,23 @@ function renderReports() {
       plugins: { legend: { display: false }, tooltip: { enabled: !!decidedTotal } } },
   });
   $("#rep-dist-legend").innerHTML = dist.map(([l, n, col]) => `
-    <div class="flex items-center justify-between gap-2">
+    <div class="rep-legend-row flex items-center justify-between gap-2 ${repState.status === REP_STATUS_OF[l] ? "active" : ""}" data-filter="${REP_STATUS_OF[l]}" role="button" tabindex="0" title="Yalnızca ${l} kararlarını göster">
       <span class="flex items-center gap-2"><span class="w-2.5 h-2.5 rounded-full" style="background:${col}"></span>${l}</span>
       <span class="tabular font-medium">%${pct(n, decidedTotal)} (${n})</span>
     </div>`).join("");
+  $$("#rep-dist-legend .rep-legend-row").forEach(r => {
+    r.addEventListener("click", () => setReportStatus(r.dataset.filter));
+    r.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setReportStatus(r.dataset.filter); } });
+  });
 
   // --- Liste (yalnızca bu sayfa) ---
-  $("#rep-count").textContent = `${b.total} dosya listeleniyor`;
+  const filterLabel = { uygun: "Uygun kararlar", sinirda: "Sınırda kararlar", elenmis: "Elenmiş kararlar", conflict: "Ön öneriyle çelişen kararlar",
+                        decided: "Karar verilenler", pending: "Karar bekleyenler" }[repState.status];
+  $("#rep-count").innerHTML = `${b.total} dosya listeleniyor${filterLabel ? ` · <b>${esc(filterLabel)}</b> <button type="button" id="rep-clear-filter" class="crit-more !text-xs">filtreyi kaldır ✕</button>` : ""}`;
+  $("#rep-clear-filter")?.addEventListener("click", () => setReportStatus("all"));
   $("#rep-pager-row").style.display = b.total > b.page_size ? "" : "none";
   $("#rep-range-text").textContent = b.total ? `${fmtNum((b.page - 1) * b.page_size + 1)}–${fmtNum(Math.min(b.total, b.page * b.page_size))} / ${fmtNum(b.total)} kayıt` : "";
-  renderPager($("#rep-pager"), b.page, b.pages, (p) => { repState.page = p; loadReports(true).then(() => $("#rep-list").scrollIntoView({ block: "nearest" })); });
+  renderPager($("#rep-pager"), b.page, b.pages, (p) => { repState.page = p; repState.editing = null; loadReports(true).then(() => $("#rep-list").scrollIntoView({ block: "nearest" })); });
   const list = $("#rep-list");
   if (!items.length) {
     list.innerHTML = `<p class="p-6 text-sm text-secondary">${b.all_count ? "Filtreye uyan kayıt yok." : "Henüz analiz ya da karar kaydı yok."}</p>`;
@@ -2013,24 +2037,31 @@ function renderReports() {
   items.forEach(it => {
     const div = document.createElement("div");
     div.className = "rep-item";
+    const isAsin = /^ASIN:/i.test(it.keyword);
+    const label = isAsin ? it.keyword.replace(/^ASIN:\s*/i, "") : it.keyword;
     const statusChip = it.decision
       ? `<span class="chip ${DECISION_CHIP[it.decision] || "na"}">${esc(it.decision)} · ekip kararı</span>`
       : `<span class="chip na">İnceleniyor · karar yok</span>`;
     const verdictHtml = it.verdict
       ? `<span class="chip ${DECISION_CHIP[it.verdict] || "na"}">${esc(it.verdict)}</span>` : `<span class="text-secondary">—</span>`;
+    const editing = repState.editing === repKey(it);
+    const pick = editing ? repState.pick : it.decision;
+    const decBtns = ["Uygun", "Sınırda", "Elenmiş"].map(d =>
+      `<button type="button" class="rep-dec-btn ${DECISION_CHIP[d]} ${pick === d ? "on" : ""}" data-dec="${d}" aria-pressed="${pick === d}">${d}</button>`).join("");
     div.innerHTML = `
       <div class="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
         <div class="flex gap-3 min-w-0">
-          <span class="w-10 h-10 shrink-0 rounded-lg bg-surface-container-low grid place-items-center text-primary"><span class="material-symbols-outlined">${/^B0[A-Z0-9]{8}/i.test(it.keyword) ? "inventory_2" : "manage_search"}</span></span>
+          <span class="w-10 h-10 shrink-0 rounded-lg bg-surface-container-low grid place-items-center text-primary"><span class="material-symbols-outlined">${isAsin ? "inventory_2" : "manage_search"}</span></span>
           <div class="min-w-0">
-            <div class="font-display font-semibold text-[16px] leading-snug break-words">${esc(it.keyword)}</div>
+            <div class="font-display font-semibold text-[16px] leading-snug break-words">${esc(label)}</div>
             <div class="flex flex-wrap items-center gap-2 text-xs text-secondary mt-1">
+              ${isAsin ? '<span class="chip na">ASIN</span>' : ""}
               <span class="chip chip-dot na">${esc(it.marketplace)} Pazarı</span>
               <span>${fmtDate(Math.max(it.decided_at || 0, it.queried_at || 0))}</span>
             </div>
           </div>
         </div>
-        <div class="shrink-0">${statusChip}</div>
+        <div class="shrink-0 flex flex-wrap gap-1.5 sm:justify-end">${statusChip}${it.conflict ? `<span class="chip warn" title="Ekip kararı (${esc(it.decision)}) algoritmik ön öneriden (${esc(it.verdict)}) farklı">Öneriyle farklı</span>` : ""}</div>
       </div>
       <div class="grid grid-cols-2 md:grid-cols-4 gap-3 rounded-xl bg-surface-container-low p-3 mt-4 text-xs">
         <div><div class="text-secondary">Pazar kararı</div><div class="font-semibold text-sm mt-0.5">${esc(it.decision || "—")}</div></div>
@@ -2038,24 +2069,69 @@ function renderReports() {
         <div><div class="text-secondary">Karar tarihi</div><div class="font-medium text-sm mt-0.5">${it.decided_at ? fmtDate(it.decided_at) : "—"}</div></div>
         <div><div class="text-secondary">Son sorgu</div><div class="font-medium text-sm mt-0.5">${it.queried_at ? fmtDate(it.queried_at) : "—"}</div></div>
       </div>
-      ${it.note ? `<div class="text-[13px] text-on-surface-variant italic mt-3 break-words">"${esc(it.note)}"</div>` : ""}
+      ${it.note && !editing ? `<div class="text-[13px] text-on-surface-variant italic mt-3 break-words">"${esc(it.note)}"</div>` : ""}
+      <div class="mt-3 flex flex-wrap items-center gap-2">
+        <span class="text-xs text-secondary">${it.decision ? "Kararı değiştir:" : "Karar ver:"}</span>
+        <div class="rep-dec">${decBtns}</div>
+        ${!it.decision && it.verdict && !editing ? `<button type="button" class="rep-accept crit-more !text-xs" title="Algoritmik ön öneriyi ekip kararı olarak kaydet">Ön öneriyi onayla (${esc(it.verdict)})</button>` : ""}
+      </div>
+      ${editing ? `<div class="rep-edit mt-2 flex flex-col gap-2">
+        <textarea class="field rep-note w-full !h-auto min-h-[64px] py-2" maxlength="2000" rows="2" placeholder="Not (opsiyonel) — neden bu karar?">${esc(repState.note ?? it.note ?? "")}</textarea>
+        <div class="flex flex-wrap items-center gap-2">
+          <button type="button" class="rep-save btn btn-primary btn-sm"><span class="material-symbols-outlined">save</span>${esc(pick)} olarak kaydet</button>
+          <button type="button" class="rep-cancel btn btn-outline btn-sm">Vazgeç</button>
+          <span class="rep-msg text-xs text-error"></span>
+        </div></div>` : ""}
       <div class="flex flex-wrap items-center justify-between gap-2 mt-3">
         <span class="text-xs text-secondary">${it.decided_by ? "Karar: " + esc(it.decided_by) : ""}</span>
-        <button type="button" class="rep-open crit-more !text-[13px]">Yeniden Analiz Et <span class="material-symbols-outlined" style="font-size:16px">arrow_forward</span></button>
+        <div class="flex flex-wrap gap-3">
+          <button type="button" class="rep-ck crit-more !text-[13px]" title="Kayıtlı analizden kontrol listesi oluştur (SellerSprite çağrısı yok)">Kontrol Listesi <span class="material-symbols-outlined" style="font-size:16px">checklist</span></button>
+          <button type="button" class="rep-open crit-more !text-[13px]">Yeniden Analiz Et <span class="material-symbols-outlined" style="font-size:16px">arrow_forward</span></button>
+        </div>
       </div>`;
+    const startEdit = (dec) => { repState.editing = repKey(it); repState.pick = dec; repState.note = undefined; renderReports(); };
+    div.querySelectorAll(".rep-dec-btn").forEach(btn => btn.addEventListener("click", () => {
+      if (editing) { repState.note = div.querySelector(".rep-note").value; repState.pick = btn.dataset.dec; renderReports(); }
+      else startEdit(btn.dataset.dec);
+    }));
+    div.querySelector(".rep-accept")?.addEventListener("click", () => startEdit(it.verdict));
+    div.querySelector(".rep-cancel")?.addEventListener("click", () => { repState.editing = null; renderReports(); });
+    div.querySelector(".rep-save")?.addEventListener("click", async (e) => {
+      const btn = e.currentTarget, msg = div.querySelector(".rep-msg");
+      btn.disabled = true;
+      try {
+        const res = await apiFetch(`${API_BASE}/api/decision`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ keyword: it.keyword, marketplace: it.marketplace, decision: repState.pick,
+                                 note: div.querySelector(".rep-note").value.trim() }),
+        });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(apiErrorText(body, res.status));
+        repState.editing = null;
+        await loadReports(true);
+      } catch (err) { msg.textContent = `Kaydedilemedi: ${err.message}`; btn.disabled = false; }
+    });
+    div.querySelector(".rep-ck").addEventListener("click", (e) => createChecklist(it.keyword, it.marketplace, e.currentTarget));
     div.querySelector(".rep-open").addEventListener("click", () => {
       showView("search");
       runAnalysis(it.keyword, it.marketplace);
     });
     list.appendChild(div);
   });
+  const ed = list.querySelector(".rep-note");
+  if (ed && repState.note === undefined) ed.focus();
 }
 
 (function bindReportsView() {
   $("#rep-search").addEventListener("input", (e) => {
     repState.query = e.target.value.trim(); clearTimeout(repState.timer); repState.timer = setTimeout(loadReports, 250);
   });
-  bindSegment($("#rep-status"), "status", (s) => { repState.status = s; loadReports(); });
+  bindSegment($("#rep-status"), "status", (s) => { repState.status = s; repState.editing = null; loadReports(); });
+  $("#rep-sort").addEventListener("change", (e) => { repState.sort = e.target.value; loadReports(); });
+  $$(".rep-kpi").forEach(card => {
+    card.addEventListener("click", () => setReportStatus(card.dataset.filter));
+    card.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setReportStatus(card.dataset.filter); } });
+  });
   $("#rep-range").addEventListener("change", (e) => { repState.range = e.target.value; loadReports(); });
   $("#rep-market").addEventListener("change", (e) => { repState.market = e.target.value; loadReports(); });
   // Excel (.xlsx), eski CSV ile aynı sütunlar. Sunucu metinleri formül değil METİN yazar (formül enjeksiyonu koruması).

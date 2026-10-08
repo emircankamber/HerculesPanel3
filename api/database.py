@@ -486,6 +486,20 @@ async def delete_decision(user_id: int, keyword: str, marketplace: str):
         (user_id, keyword, marketplace))
 
 
+async def delete_decisions_for(user_id: int, key: str, marketplace: str) -> int:
+    """Geçmişten silinen ürünün kararlarını da siler (yalnızca kişinin KENDİ kayıtları). key = sorgu anahtarı
+    ("ASIN:B0.." ya da keyword); eski panelin ASIN kararları "B0.. — başlık" biçiminde de olabilir → onlar da."""
+    conds, params = ["LOWER(keyword) = LOWER(?)"], [key]
+    if key[:5].upper() == "ASIN:":
+        asin = key[5:].strip().upper()
+        conds.append("UPPER(keyword) LIKE ?")
+        params.append(f"{asin} —%")
+    rows = await execute_fetch(
+        f"DELETE FROM market_decision WHERE user_id = ? AND marketplace = ? AND ({' OR '.join(conds)}) RETURNING id",
+        (user_id, marketplace, *params))
+    return len(rows)
+
+
 async def clear_all_decisions(user_id: int):
     await execute("DELETE FROM market_decision WHERE user_id = ?", (user_id,))
 
