@@ -261,7 +261,7 @@ function showView(view) {
   if (view === "team") loadTeamAdmin();
   if (view === "profile") loadProfile();
   if (view === "forum") loadForum();
-  if (view === "trends") updateTrendsStale();
+  if (view === "trends") { updateTrendsStale(); loadTrendCategories(); }
   // Chart.js gizli (display:none) kapsayıcıda 0 boyutla çizer — veri
   // görünümleri yalnızca görünür olduklarında (yeniden) render edilir.
   if (view === "keywords") renderKeywordView();
@@ -2273,10 +2273,13 @@ async function runSettingsAction(btn, fn) {
 // ALAN ANLAMI: growth_rate / growth_4w / growth_12w = searchRankGrowthRate,
 // yani arama SIRALAMASININ yükselme oranı (0.909 ≈ 11. sıradan 1. sıraya).
 // Arama hacmi büyümesi DEĞİLDİR → panelde "Sıralama İvmesi". Hacim = searches.
-// Her tarama 1 MCP çağrısı: filtre değişince otomatik çekme YOK, yalnızca "Tara".
+// Her tarama 1–5 MCP çağrısı (yasak/filtre sonrası sonuç azalırsa sonraki sayfa — SUNUCUDA):
+// filtre değişince otomatik çekme YOK, yalnızca "Tara".
+// KATEGORİ YASAĞI: owner'ın yasakladığı kategoriler sunucuda atılır (yetki de sunucuda); burada
+// yalnızca liste/yönetim arayüzü var. Sayısal filtreler oran ise % girilir, API'ye 0-1 gider.
 // ---------------------------------------------------------------------------
 const SEARCH_MODEL_LABELS = { 1: "Popüler Pazar", 2: "Anormal Hareketli", 3: "Sürekli Büyüyen", 4: "Hızlı Yükselen", 5: "Potansiyel", 6: "Uzun Kuyruk" };
-const trdState = { data: null, lastParams: null, busy: false, sort: "backend" };
+const trdState = { data: null, lastParams: null, busy: false, sort: "backend", cats: null, seen: {} };
 
 /** Görsel URL'ine yalnızca https ise izin ver; aksi halde null */
 function safeHttpsUrl(v) {
@@ -2305,36 +2308,199 @@ function fmtRate(v) {
   return "%" + (Number(v) * 100).toFixed(2);
 }
 
+// [input id, API alanı, ölçek (oran alanlarında % → 0-1), tam sayı mı]
+const TRD_NUM_FILTERS = [
+  ["#trd-minsearch", "min_searches", 1, true], ["#trd-maxsearch", "max_searches", 1, true],
+  ["#trd-minpurch", "min_purchases", 1, true], ["#trd-minprate", "min_purchase_rate", 0.01, false],
+  ["#trd-mingrowth", "min_growth", 0.01, false], ["#trd-maxclick", "max_click_share", 0.01, false],
+  ["#trd-maxbid", "max_bid", 1, false], ["#trd-maxwords", "max_words", 1, true],
+];
+const TRD_TEXT_FILTERS = [["#trd-include", "include_keywords"], ["#trd-exclude", "exclude_keywords"]];
+
+/** Geçersiz sayı varsa { error } döner. */
 function readTrendParams() {
-  const minRaw = $("#trd-minsearch").value.trim();
-  const min = minRaw === "" ? null : Math.max(0, Math.round(Number(minRaw)));
-  return {
+  const out = {
     marketplace: $("#trd-market").value,
     search_model: Number($("#trd-model").value),
     granularity: $("#trd-gran").value,
-    ...(min ? { min_searches: min } : {}),
     size: Number($("#trd-size").value),
   };
+  const cat = $("#trd-category").value;
+  if (cat) out.category = cat;
+  TRD_TEXT_FILTERS.forEach(([sel, key]) => { const v = $(sel).value.trim(); if (v) out[key] = v; });
+  for (const [sel, key, scale, int] of TRD_NUM_FILTERS) {
+    const el = $(sel), raw = el.value.trim();
+    if (raw === "") continue;
+    const n = Number(raw);
+    const min = el.min === "" ? -Infinity : Number(el.min), max = el.max === "" ? Infinity : Number(el.max);
+    if (!isFinite(n) || n < min || n > max) {
+      const label = el.closest("label")?.querySelector("span")?.textContent || key;
+      return { error: `"${label}" ${isFinite(min) ? min : ""}${isFinite(max) ? "–" + max : " veya daha büyük"} aralığında bir sayı olmalı.` };
+    }
+    out[key] = int ? Math.round(n) : Math.round(n * scale * 1e6) / 1e6;
+  }
+  if (out.min_searches != null && out.max_searches != null && out.min_searches > out.max_searches)
+    return { error: "Min. arama hacmi, maks. arama hacminden büyük olamaz." };
+  return out;
+}
+
+function updateTrendFilterCount() {
+  const n = TRD_TEXT_FILTERS.filter(([sel]) => $(sel).value.trim()).length
+          + TRD_NUM_FILTERS.filter(([sel]) => $(sel).value.trim() !== "").length;
+  const chip = $("#trd-filter-count");
+  chip.textContent = n ? `${n} filtre` : "kapalı";
+  chip.className = `chip ${n ? "ok" : "na"} !text-[10px]`;
 }
 
 function updateTrendsStale() {
+  updateTrendFilterCount();
   const stale = !!trdState.lastParams && JSON.stringify(readTrendParams()) !== JSON.stringify(trdState.lastParams);
   $("#trd-stale").style.display = stale ? "block" : "none";
 }
 
+// ---- Kategoriler & yasak listesi (GET /api/trends/categories) ----
+const trdBannedKeys = () => new Set((trdState.cats?.banned || []).map(b => b.name.toLowerCase()));
+
+function renderTrendCategoryOptions() {
+  const market = $("#trd-market").value;
+  const sel = $("#trd-category");
+  const prev = sel.value;
+  const banned = trdBannedKeys();
+  const known = (trdState.cats?.marketplace === market ? trdState.cats.known : []).map(k => k.name);
+  const knownKeys = new Set(known.map(n => n.toLowerCase()));
+  const seen = (trdState.seen[market] || []).filter(n => !knownKeys.has(n.toLowerCase()) && !banned.has(n.toLowerCase()));
+  let html = `<option value="">Tüm kategoriler</option>`;
+  if (known.length) html += `<optgroup label="SellerSprite kategorileri">${known.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join("")}</optgroup>`;
+  if (seen.length) html += `<optgroup label="Son taramada görülen">${seen.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join("")}</optgroup>`;
+  sel.innerHTML = html;
+  sel.value = [...sel.options].some(o => o.value === prev) ? prev : "";
+  const note = $("#trd-cat-note");
+  if (!known.length) {
+    note.textContent = seen.length
+      ? `${market} için kategori kodları doğrulanmadı: liste son taramadan gelir ve filtre taranan sayfalarda panelde uygulanır.`
+      : `${market} için kategori listesi ilk taramadan sonra dolar (kategori kodları yalnızca US için doğrulandı).`;
+    note.style.display = "block";
+  } else {
+    note.style.display = "none";
+  }
+}
+
+function renderTrendBans() {
+  const c = trdState.cats;
+  const card = $("#trd-ban-card");
+  if (!c) { card.style.display = "none"; return; }
+  const manage = !!c.can_manage;
+  // Owner olmayan: yalnızca yasak varsa (salt okunur) göster
+  card.style.display = manage || c.banned.length ? "" : "none";
+  $("#trd-ban-form").style.display = manage ? "" : "none";
+  $("#trd-ban-count").textContent = `${c.banned.length}`;
+  $("#trd-ban-hint").textContent = manage
+    ? "Yasaklı kategorideki keyword'ler (kategorilerinden biri bile yasaklıysa) kimsenin taramasında görünmez. Kartlardaki kategori etiketinden de yasaklayabilirsiniz."
+    : "Bu kategorilerdeki keyword'ler owner kararıyla trendlerde gösterilmez.";
+  const list = $("#trd-ban-list");
+  list.innerHTML = c.banned.length ? "" : `<span class="text-xs text-secondary">Yasaklı kategori yok.</span>`;
+  c.banned.forEach(b => {
+    const chip = document.createElement("span");
+    chip.className = "chip bad inline-flex items-center gap-1";
+    chip.title = `Yasaklayan: ${b.banned_by_name || "—"} · ${fmtStamp(b.banned_at)}`;
+    chip.innerHTML = `${esc(b.name)}${manage ? `<button type="button" class="trd-unban inline-flex" aria-label="Yasağı kaldır"><span class="material-symbols-outlined" style="font-size:14px">close</span></button>` : ""}`;
+    chip.querySelector(".trd-unban")?.addEventListener("click", () => unbanTrendCategory(b.name));
+    list.appendChild(chip);
+  });
+  const banned = trdBannedKeys();
+  const market = $("#trd-market").value;
+  const opts = new Set([...(c.marketplace === market ? c.known.map(k => k.name) : []), ...(trdState.seen[market] || [])]);
+  $("#trd-ban-options").innerHTML = [...opts].filter(n => !banned.has(n.toLowerCase()))
+    .map(n => `<option value="${esc(n)}"></option>`).join("");
+}
+
+async function loadTrendCategories() {
+  const market = $("#trd-market").value;
+  try {
+    const res = await apiFetch(`${API_BASE}/api/trends/categories?marketplace=${encodeURIComponent(market)}`);
+    const data = await res.json().catch(() => null);
+    if (!res.ok) throw new Error(apiErrorText(data, res.status));
+    trdState.cats = data;
+  } catch (err) {
+    $("#trd-cat-note").textContent = `Kategori listesi yüklenemedi: ${err.message}`;
+    $("#trd-cat-note").style.display = "block";
+    return;
+  }
+  renderTrendCategoryOptions();
+  renderTrendBans();
+  updateTrendsStale();
+}
+
+function setBanStatus(text, error = false) {
+  const el = $("#trd-ban-status");
+  el.textContent = text;
+  el.className = `status-line self-center${error ? " error" : ""}`;
+}
+
+/** Yasak sonrası ekrandaki sonuçlardan o kategoridekileri hemen çıkar (sunucu da sonraki taramada atar). */
+function dropBannedFromResults() {
+  const d = trdState.data;
+  if (!d) return;
+  const banned = trdBannedKeys();
+  const before = d.results.length;
+  d.results = d.results.filter(r => !(r.departments || []).some(x => banned.has(String(x).toLowerCase())));
+  if (d.scan) d.scan.hidden_banned += before - d.results.length;
+  renderTrends();
+}
+
+async function banTrendCategory(name) {
+  name = (name || "").trim();
+  if (!name) { setBanStatus("Kategori adı girin.", true); return; }
+  if (!confirm(`"${name}" kategorisi yasaklansın mı? Bu kategorideki keyword'ler herkesin trend taramasından çıkarılır.`)) return;
+  setBanStatus("kaydediliyor…");
+  try {
+    const res = await apiFetch(`${API_BASE}/api/trends/banned-categories?marketplace=${encodeURIComponent($("#trd-market").value)}`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) throw new Error(apiErrorText(data, res.status));
+    trdState.cats = data;
+    $("#trd-ban-input").value = "";
+    setBanStatus(data.added ? `"${name}" yasaklandı.` : `"${name}" zaten yasaklıydı.`);
+    renderTrendCategoryOptions();
+    renderTrendBans();
+    dropBannedFromResults();
+    updateTrendsStale();
+  } catch (err) {
+    setBanStatus(`Hata: ${err.message}`, true);
+  }
+}
+
+async function unbanTrendCategory(name) {
+  if (!confirm(`"${name}" yasağı kaldırılsın mı? Sonraki taramalarda bu kategori yeniden görünür.`)) return;
+  setBanStatus("kaydediliyor…");
+  try {
+    const qs = `name=${encodeURIComponent(name)}&marketplace=${encodeURIComponent($("#trd-market").value)}`;
+    const res = await apiFetch(`${API_BASE}/api/trends/banned-categories?${qs}`, { method: "DELETE" });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) throw new Error(apiErrorText(data, res.status));
+    trdState.cats = data;
+    setBanStatus(`"${name}" yasağı kaldırıldı — görmek için yeniden tarayın.`);
+    renderTrendCategoryOptions();
+    renderTrendBans();
+    updateTrendsStale();
+  } catch (err) {
+    setBanStatus(`Hata: ${err.message}`, true);
+  }
+}
+
 async function scanTrends() {
   if (trdState.busy) return;
-  const minRaw = $("#trd-minsearch").value.trim();
   const status = $("#trd-status");
-  if (minRaw !== "" && (!isFinite(Number(minRaw)) || Number(minRaw) < 0)) {
-    status.textContent = "Min. arama hacmi 0 veya daha büyük bir sayı olmalı.";
+  const params = readTrendParams();
+  if (params.error) {
+    status.textContent = params.error;
     status.className = "status-line error";
     return;
   }
-  const params = readTrendParams();
   trdState.busy = true;
   $("#trd-scan").disabled = true;
-  status.textContent = `${SEARCH_MODEL_LABELS[params.search_model]} keyword'ler taranıyor… (1 MCP çağrısı)`;
+  status.textContent = `${SEARCH_MODEL_LABELS[params.search_model]} keyword'ler taranıyor… (1–5 MCP çağrısı)`;
   status.className = "status-line loading";
   try {
     const res = await apiFetch(`${API_BASE}/api/discovery/trending`, {
@@ -2346,8 +2512,15 @@ async function scanTrends() {
     if (!data || !Array.isArray(data.results)) throw new Error("Backend beklenmeyen bir yanıt döndürdü.");
     trdState.data = { ...data, _params: params, _at: new Date() };
     trdState.lastParams = params;
-    status.textContent = `Tarama tamamlandı · ${data.results.length} keyword`;
+    const sc = data.scan || {};
+    status.textContent = `Tarama tamamlandı · ${data.results.length} keyword`
+      + (sc.scanned != null ? ` · ${fmtNum(sc.scanned)} keyword tarandı (${sc.pages} MCP çağrısı)` : "")
+      + (sc.hidden_banned ? ` · ${fmtNum(sc.hidden_banned)} yasaklı kategoriden gizlendi` : "")
+      + (sc.filtered_out ? ` · ${fmtNum(sc.filtered_out)} filtreye takıldı` : "");
     status.className = "status-line";
+    if (Array.isArray(data.departments_seen)) trdState.seen[params.marketplace] = data.departments_seen;
+    renderTrendCategoryOptions();
+    renderTrendBans();
     renderTrends();
   } catch (err) {
     status.textContent = `Hata: ${err.message}`;
@@ -2366,19 +2539,32 @@ function renderTrends() {
   if (!d) return;
   const p = d._params;
   $("#trd-summary-chip").textContent = `${d.search_model_label || SEARCH_MODEL_LABELS[p.search_model]} · ${d.results.length} aday`;
-  $("#trd-meta").textContent = `${p.marketplace} · ${p.granularity === "monthly" ? "aylık" : "haftalık"}${d.total != null ? ` · toplam ${fmtNum(d.total)} eşleşme` : ""} · ${d._at.toLocaleTimeString("tr-TR")}`;
+  $("#trd-meta").textContent = `${p.marketplace} · ${p.granularity === "monthly" ? "aylık" : "haftalık"}`
+    + (d.category ? ` · ${d.category}${d.category_mode === "panel" ? " (panelde süzüldü)" : ""}` : "")
+    + (d.total != null ? ` · SellerSprite'ta ${fmtNum(d.total)} eşleşme` : "")
+    + (d.scan?.hidden_banned ? ` · ${fmtNum(d.scan.hidden_banned)} yasaklı gizlendi` : "")
+    + ` · ${d._at.toLocaleTimeString("tr-TR")}`;
 
   let rows = d.results.map((r, i) => ({ ...r, _rank: i + 1 }));
   if (trdState.sort !== "backend") {
     const k = trdState.sort;
-    rows.sort((a, b) => (b[k] ?? -Infinity) - (a[k] ?? -Infinity));
+    // Düşük olanın iyi olduğu metrikler artan, diğerleri azalan; değeri olmayan her zaman sonda
+    const asc = k === "click_share" || k === "bid";
+    rows.sort((a, b) => {
+      const x = a[k], y = b[k];
+      if (x == null || y == null) return (x == null) - (y == null);
+      return asc ? x - y : y - x;
+    });
   }
+  const manage = !!trdState.cats?.can_manage;
   const list = $("#trd-list");
-  list.innerHTML = rows.length ? "" : `<div class="card card-pad text-sm text-secondary lg:col-span-2">Bu filtrelerle sonuç bulunamadı. Min. arama hacmini düşürmeyi ya da başka bir pazar tipini deneyin.</div>`;
+  list.innerHTML = rows.length ? "" : `<div class="card card-pad text-sm text-secondary lg:col-span-2">Bu filtrelerle sonuç bulunamadı${d.scan?.pages ? ` (${fmtNum(d.scan.scanned)} keyword tarandı)` : ""}. Filtreleri gevşetmeyi, başka bir kategori ya da pazar tipini deneyin.</div>`;
   rows.forEach(r => {
     const card = document.createElement("div");
     card.className = "card p-5 flex flex-col gap-4 min-w-0";
-    const depts = (r.departments || []).slice(0, 3).map(x => `<span class="chip na">${esc(x)}</span>`).join("");
+    const depts = (r.departments || []).slice(0, 3).map(x => manage
+      ? `<span class="chip na inline-flex items-center gap-1">${esc(x)}<button type="button" class="trd-ban-chip inline-flex text-error" data-cat="${esc(x)}" title="Bu kategoriyi yasakla" aria-label="${esc(x)} kategorisini yasakla"><span class="material-symbols-outlined" style="font-size:14px">block</span></button></span>`
+      : `<span class="chip na">${esc(x)}</span>`).join("");
     const brands = (r.top3_brands || []).map(b => `<span class="chip">${esc(b)}</span>`).join("") || `<span class="text-xs text-secondary">—</span>`;
     const asins = (r.top3_asins || []).map(a => {
       const img = safeHttpsUrl(a.image_url);
@@ -2407,10 +2593,15 @@ function renderTrends() {
         <div><div class="text-secondary">Arama sırası</div><div class="font-semibold text-sm tabular mt-0.5">${r.search_rank != null ? "#" + fmtNum(r.search_rank) : "n/a"}</div></div>
         <div><div class="text-secondary">Satış</div><div class="font-semibold text-sm tabular mt-0.5" title="${fmtNum(r.purchases)}">${fmtCompact(r.purchases)} <span class="font-normal text-secondary">(${fmtRate(r.purchase_rate)})</span></div></div>
         <div><div class="text-secondary">Bid</div><div class="font-semibold text-sm tabular mt-0.5">${r.bid != null ? fmtUsd(r.bid) : "n/a"}${bidRange}</div></div>
+        <div title="İlk 3 ASIN'in tıklama payı toplamı (clickShareRate). Yüksekse tıklamalar birkaç üründe toplanıyor."><div class="text-secondary">İlk 3 tıklama payı</div><div class="font-semibold text-sm tabular mt-0.5">${fmtRate(r.click_share)}</div></div>
+        <div title="İlk 3 ASIN'in dönüşüm payı toplamı (cvsShareRate)."><div class="text-secondary">İlk 3 dönüşüm payı</div><div class="font-semibold text-sm tabular mt-0.5">${fmtRate(r.conversion_share)}</div></div>
+        <div><div class="text-secondary">Tıklama</div><div class="font-semibold text-sm tabular mt-0.5" title="${fmtNum(r.clicks)}">${fmtCompact(r.clicks)}</div></div>
+        <div><div class="text-secondary">Kelime sayısı</div><div class="font-semibold text-sm tabular mt-0.5">${(r.keyword || "").trim().split(/\s+/).filter(Boolean).length || "n/a"}</div></div>
       </div>
       <div><div class="eyebrow mb-1.5">Tıklama payı en yüksek 3 marka</div><div class="flex flex-wrap gap-1.5">${brands}</div></div>
       ${asins ? `<div><div class="eyebrow mb-2">İlk 3 ASIN</div><div class="grid grid-cols-1 sm:grid-cols-3 gap-2">${asins}</div></div>` : ""}
       <div class="flex justify-end mt-auto"><button type="button" class="trd-analyze btn btn-outline btn-sm"><span class="material-symbols-outlined">monitoring</span>Analiz Et</button></div>`;
+    card.querySelectorAll(".trd-ban-chip").forEach(b => b.addEventListener("click", () => banTrendCategory(b.dataset.cat)));
     card.querySelector(".trd-analyze").addEventListener("click", () => {
       showView("search");
       runAnalysis(r.keyword, p.marketplace);
@@ -2422,10 +2613,18 @@ function renderTrends() {
 (function bindTrendsView() {
   $("#trd-form").addEventListener("submit", (e) => { e.preventDefault(); scanTrends(); });
   // Filtre değişikliği yalnızca "güncel değil" uyarısını açar — MCP çağrısı yapmaz
-  ["#trd-model", "#trd-gran", "#trd-market", "#trd-minsearch", "#trd-size"].forEach(sel => {
+  ["#trd-model", "#trd-gran", "#trd-market", "#trd-category", "#trd-size",
+   ...TRD_TEXT_FILTERS.map(f => f[0]), ...TRD_NUM_FILTERS.map(f => f[0])].forEach(sel => {
     $(sel).addEventListener("input", updateTrendsStale);
     $(sel).addEventListener("change", updateTrendsStale);
   });
+  // Pazar yeri değişince kategori listesi o pazara göre yenilenir (MCP çağrısı yok)
+  $("#trd-market").addEventListener("change", loadTrendCategories);
+  $("#trd-clear").addEventListener("click", () => {
+    [...TRD_TEXT_FILTERS, ...TRD_NUM_FILTERS].forEach(([sel]) => { $(sel).value = ""; });
+    updateTrendsStale();
+  });
+  $("#trd-ban-form").addEventListener("submit", (e) => { e.preventDefault(); banTrendCategory($("#trd-ban-input").value); });
   $("#trd-sort").addEventListener("change", (e) => { trdState.sort = e.target.value; renderTrends(); });
 })();
 

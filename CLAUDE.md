@@ -268,6 +268,21 @@ Frontend'de büyüklüğe bakan tahmin mantığı YOK — daima ×100 ile yüzde
 çevrilir (`app.js::fmtRate`). Küçük değerler (%0.71 gibi) doğrudur, "yanlış
 birim" sanıp düzeltmeye çalışma.
 
+**Kategori yasağı & filtreler (gerçek MCP çağrılarıyla doğrulandı — `api/trends.py`):**
+- `departments` İSTEK parametresi görünen adı DEĞİL Amazon arama takma adını ister ("Toys & Games" → 0 sonuç,
+  "toys-and-games" → çalışır); yanıttaki `departments` ise görünen ad. Takma adlar pazara göre değişir (UK'de
+  "toys") → yalnızca US listesi (`trends.US_DEPARTMENTS`, 22 kategori) doğrulandı; UK/CA'da kategori filtresi
+  taranan sayfalarda panelde (görünen adla) uygulanır (`category_mode="panel"`).
+- `includeKeywords`/`excludeKeywords` çalışır. `minSearches`/`maxSearches`, `maxWordCount`, `minConversionRate`,
+  `maxMonopolyClickRate` SESSİZCE YOK SAYILIR → tüm sayısal filtreler sunucuda (`trends.passes_filters`). Eski
+  "Min. arama hacmi" filtresi bu yüzden hiç çalışmıyordu. Sayfa başına en fazla 40 kayıt; yasak/filtre sonrası
+  sonuç azalırsa sonraki sayfa çekilir (en fazla `MAX_SCAN_PAGES`=5 MCP çağrısı). `order` parametresi de etkisiz.
+- `clickShareRate`/`cvsShareRate` = ilk 3 ASIN'in clickRate/conversionRate TOPLAMI (0-1).
+- **Yasak:** `banned_categories` (name_key = küçük harfli görünen ad). `POST/DELETE /api/trends/banned-categories`
+  yalnızca owner (admin/member 403); `GET /api/trends/categories` herkese liste + `can_manage`. Keyword'ün
+  kategorilerinden HERHANGİ BİRİ yasaklıysa SUNUCUDA atılır (kategorisiz keyword etkilenmez); yasaklı kategori
+  filtre olarak istenirse 403. Panel owner'a kart etiketlerinde yasakla düğmesi gösterir.
+
 **Kullanılmayan (bilerek):** `google_trend` tool'u da var (Amazon dışı,
 Google arama trendini veriyor) ama henüz backend'e bağlanmadı —
 "Mevsimsellik Riski" kartı için kullanılabilir, ihtiyaç olursa test edilip
