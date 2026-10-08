@@ -36,7 +36,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from mcp_client import call_tool
-from scoring import calc_keyword_ad_metrics, calc_profit, pre_assessment, DEFAULT_THRESHOLDS, verdict_rule, weighted_top_acos
+from scoring import calc_keyword_ad_metrics, calc_profit, pre_assessment, DEFAULT_THRESHOLDS, verdict_rule, weighted_top_acos, \
+    initial_profit_inputs, net_margin_from_inputs
 import signal_engine as se
 
 # Bayesian (scipy) ve Portfolio (ortools) opsiyonel — Vercel deploy boyutunu
@@ -334,7 +335,20 @@ async def resolve_category_node(seed_keyword: str, marketplace: str, preferred_d
 # ---------------------------------------------------------------------------
 # Ana analiz endpoint'i
 # ---------------------------------------------------------------------------
+class PreCost(BaseModel):
+    """Analiz öncesi girilen maliyet (opsiyonel; panel localStorage'dan gönderir). Boş alan = varsayılan."""
+    cogs: float | None = Field(None, ge=0, le=100000)
+    fba: float | None = Field(None, ge=0, le=100000)
+    gen: float | None = Field(None, ge=0, le=100)
+
+
+def _return_rate(demand_trend: dict) -> float | None:
+    d = demand_trend.get("data") if isinstance(demand_trend, dict) else None
+    return d["returnRatio"] / 100 if isinstance(d, dict) and d.get("returnRatio") is not None else None
+
+
 class AnalyzeRequest(BaseModel):
+    pre_cost: PreCost | None = None
     keyword: str
     marketplace: str = "US"
     top_relevancy: int = 50
@@ -533,6 +547,11 @@ async def analyze(req: AnalyzeRequest, user: dict = Depends(require_auth)):
 
         # Kriter 03: relevancy'si en yüksek 5 keyword'ün ağırlıklı ACOS'u (her keyword kendi avgPrice'ıyla)
         acos_detail = weighted_top_acos(keyword_rows, "relevancy", lambda r: r.get("avgPrice"))
+        # Kriter 06 (Net Kâr Marjı): panelin kâr hesaplayıcısıyla AYNI başlangıç değerleri (scoring.initial_profit_inputs)
+        # → kaydedilen ön öneri (Geçmiş / Ana Sayfa) panelde ilk görünenle aynı olur.
+        profit_inputs = initial_profit_inputs(stats_data.get("avgPrice"), acos_detail["value"],
+                                              _return_rate(demand_trend),
+                                              req.pre_cost.model_dump() if req.pre_cost else None)
         assessment = pre_assessment(
             avg_price=stats_data.get("avgPrice"),
             gross_margin=gross_margin,
@@ -540,7 +559,7 @@ async def analyze(req: AnalyzeRequest, user: dict = Depends(require_auth)):
             acos_detail=acos_detail,
             top_brand_share=top_brand_share,
             strong_new_brands=strong_new_brands_count,  # top 10 rakip availableDate proxy'si (bkz. yukarıdaki not)
-            net_margin=None,
+            net_margin=net_margin_from_inputs(profit_inputs),
             thresholds=user_thresholds,
         )
 
@@ -569,6 +588,7 @@ async def analyze(req: AnalyzeRequest, user: dict = Depends(require_auth)):
             ),
             "top_competitors": top_competitors,  # otomatik çekildi (competitor_lookup, matchType=3)
             "pre_assessment": assessment,
+            "profit_inputs": profit_inputs,  # kâr hesaplayıcısının başlangıç değerleri (Kriter 06 bunlarla)
         }
 
         await db.save_analysis(req.keyword, req.marketplace, payload, req.requested_by)
@@ -1473,6 +1493,7 @@ async def clear_history_ep(user: dict = Depends(require_auth)):
 # ASIN ANALİZİ (Reverse ASIN) — keyword yerine ASIN ile aynı raporu üretir
 # ---------------------------------------------------------------------------
 class AnalyzeAsinRequest(BaseModel):
+    pre_cost: PreCost | None = None
     asin: str
     marketplace: str = "US"
     keyword_list_size: int = 20
@@ -1592,10 +1613,14 @@ async def analyze_asin(req: AnalyzeAsinRequest, user: dict = Depends(require_aut
         gross_margin = (raw_gm / 100 if raw_gm and raw_gm > 1 else raw_gm) if raw_gm is not None else None
 
         user_thresholds = await db.get_user_thresholds(uid)
+        profit_inputs = initial_profit_inputs(stats_data.get("avgPrice"), acos_detail["value"],
+                                              _return_rate(demand_trend),
+                                              req.pre_cost.model_dump() if req.pre_cost else None)
         assessment = pre_assessment(
             avg_price=stats_data.get("avgPrice"), gross_margin=gross_margin,
             acos=acos_detail["value"], acos_detail=acos_detail,
-            top_brand_share=top_brand_share, strong_new_brands=strong_new_brands_count, net_margin=None,
+            top_brand_share=top_brand_share, strong_new_brands=strong_new_brands_count,
+            net_margin=net_margin_from_inputs(profit_inputs),
             thresholds=user_thresholds)
 
         payload = {
@@ -1627,6 +1652,7 @@ async def analyze_asin(req: AnalyzeAsinRequest, user: dict = Depends(require_aut
                 else None),
             "top_competitors": top_competitors,
             "pre_assessment": assessment,
+            "profit_inputs": profit_inputs,
         }
 
         await db.save_analysis(cache_key, req.marketplace, payload, user.get("email"))

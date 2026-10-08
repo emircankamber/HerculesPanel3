@@ -327,12 +327,12 @@ async function runAnalysis(keyword, marketplace, categoryOverride = "") {
     const res = isAsin
       ? await apiFetch(`${API_BASE}/api/analyze-asin`, {
           method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ asin: keyword, marketplace }),
+          body: JSON.stringify({ asin: keyword, marketplace, ...preCostBody() }),
         })
       : await apiFetch(`${API_BASE}/api/analyze`, {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            keyword, marketplace,
+            keyword, marketplace, ...preCostBody(),
             ...(categoryOverride ? { category_override_node_id: categoryOverride } : {}),
           }),
         });
@@ -565,6 +565,16 @@ function renderPanel(data) {
     const negCount = criteria.filter(x => x.flag === "OLUMSUZ").length;
     const newVerdict = verdictFor(negCount) ?? pa.verdict;
     setVerdict(newVerdict, negCount);
+    // Geçmiş / Ana Sayfa sunucunun kaydettiği öneriyi gösterir (kâr hesaplayıcısının başlangıç değerleriyle);
+    // kullanıcı maliyetleri burada değiştirip öneriyi değiştirirse bunu açıkça söyle.
+    const savedNote = root.querySelector(".verdict-saved-note");
+    if (savedNote) {
+      const differs = data.profit_inputs && pa.verdict && newVerdict !== pa.verdict;
+      savedNote.textContent = differs
+        ? `Kâr hesaplayıcısında değiştirdiğiniz değerlerle yeniden hesaplandı. Geçmiş ve Ana Sayfa'da kayıtlı ön öneri: ${pa.verdict} (başlangıç maliyetleriyle).`
+        : "";
+      savedNote.style.display = differs ? "" : "none";
+    }
     if (summaryEl) summaryEl.innerHTML = buildPlainSummary(criteria, newVerdict);
   }
 
@@ -701,18 +711,30 @@ function renderPanel(data) {
 
   // Gerçek pazar verisiyle önceden doldur (kullanıcı hâlâ istediği gibi değiştirebilir)
   const marketAvgPrice = data.market_stats?.avgPrice;
-  if (marketAvgPrice) root.querySelector(".p-sale").value = marketAvgPrice.toFixed(2);
-  // ACOS ön değeri = Kriter 03 (ilk 5 keyword ağırlıklı, sunucu hesabı); düzenlenebilir
   const acosCrit = (pa.criteria || []).find(c => c.label === "ACOS");
   const weightedAcos = typeof acosCrit?.value === "number" ? acosCrit.value : null;
-  if (weightedAcos != null) root.querySelector(".p-acos").value = (weightedAcos * 100).toFixed(1);
-  if (data.market_return_rate != null) root.querySelector(".p-ret").value = (data.market_return_rate * 100).toFixed(2);
-  // Analiz öncesi girilen maliyetler (opsiyonel): yalnızca DOLU alanlar Kâr bölümüne yazılır
-  const preCost = readPreCost();
+  const pi = data.profit_inputs;
+  let preCost;
+  if (pi) {
+    // TEK KAYNAK: sunucunun Kriter 06'yı (ve kaydedilen ön öneriyi) hesapladığı değerler (scoring.initial_profit_inputs).
+    // Yeniden yuvarlanmadan yazılır → panelin ilk marjı ve ön önerisi Geçmiş/Ana Sayfa'dakiyle birebir aynı.
+    const FIELD = { cogs: ".p-cogs", sale: ".p-sale", fba: ".p-fba", ref_rate: ".p-ref", acos: ".p-acos", ret: ".p-ret", gen: ".p-gen" };
+    Object.entries(FIELD).forEach(([k, sel]) => { if (typeof pi[k] === "number") root.querySelector(sel).value = String(pi[k]); });
+    const src = pi.sources || {};
+    preCost = Object.fromEntries(["cogs", "fba", "gen"].map(k => [k, src[k] === "pre_cost" ? pi[k] : null]));
+  } else {
+    // Eski yanıt (profit_inputs yok): önceki davranış
+    if (marketAvgPrice) root.querySelector(".p-sale").value = marketAvgPrice.toFixed(2);
+    if (weightedAcos != null) root.querySelector(".p-acos").value = (weightedAcos * 100).toFixed(1);
+    if (data.market_return_rate != null) root.querySelector(".p-ret").value = (data.market_return_rate * 100).toFixed(2);
+    preCost = readPreCost();
+    ["cogs", "fba", "gen"].forEach(k => { if (preCost[k] != null) root.querySelector(`.p-${k}`).value = preCost[k]; });
+  }
+  // Analiz öncesi girilen maliyetler (opsiyonel): yalnızca DOLU alanlar Kâr bölümüne yazıldı
   const preUsed = [];
-  if (preCost.cogs != null) { root.querySelector(".p-cogs").value = preCost.cogs; preUsed.push(`COGS $${preCost.cogs.toFixed(2)}`); }
-  if (preCost.fba != null) { root.querySelector(".p-fba").value = preCost.fba; preUsed.push(`FBA $${preCost.fba.toFixed(2)}`); }
-  if (preCost.gen != null) { root.querySelector(".p-gen").value = preCost.gen; preUsed.push(`Genel gider %${preCost.gen}`); }
+  if (preCost.cogs != null) preUsed.push(`COGS $${preCost.cogs.toFixed(2)}`);
+  if (preCost.fba != null) preUsed.push(`FBA $${preCost.fba.toFixed(2)}`);
+  if (preCost.gen != null) preUsed.push(`Genel gider %${preCost.gen}`);
   const preNote = root.querySelector(".profit-precost-note");
   if (preNote && preUsed.length) {
     preNote.textContent = `✓ Analiz öncesi girilen maliyetler kullanıldı — ${preUsed.join(" · ")}.`;
@@ -4022,6 +4044,13 @@ function readPreCost() {
     out[k] = Number.isFinite(n) && n >= 0 ? n : null;
   }
   return out;
+}
+
+/** Analiz isteğine eklenir: sunucu Kriter 06'yı (ve kaydedilen ön öneriyi) bu maliyetlerle hesaplar. */
+function preCostBody() {
+  const pc = readPreCost();
+  const filled = Object.fromEntries(Object.entries(pc).filter(([, v]) => v != null));
+  return Object.keys(filled).length ? { pre_cost: filled } : {};
 }
 
 function syncPreCostState() {

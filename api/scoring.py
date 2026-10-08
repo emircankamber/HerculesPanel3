@@ -153,6 +153,48 @@ def calc_profit(cogs: float, sale_price: float, fba_fee: float, referral_fee: fl
     }
 
 
+# ---------------------------------------------------------------------------
+# KÂR HESAPLAYICISININ BAŞLANGIÇ DEĞERLERİ — TEK KAYNAK (sunucu).
+# Panel analiz sonucunu açar açmaz kâr hesaplayıcısını bu değerlerle doldurup Kriter 06'yı (Net Kâr Marjı)
+# hesaplar. Sunucu ön öneriyi AYNI değerlerle hesaplamazsa (eskiden net_margin=None idi) panelde "Sınırda"
+# görünen analiz Geçmiş/Ana Sayfa'ya "Uygun" yazılıyordu. Panel bu sayıları yanıttaki `profit_inputs`'tan
+# alır (yeniden yuvarlamaz) → iki taraf birebir aynı marjı bulur.
+# Birimler panel alanlarıyla aynı: dolar, oranlar YÜZDE sayısı (ref_rate 15 = %15).
+# ---------------------------------------------------------------------------
+PROFIT_DEFAULTS = {"cogs": 6.0, "sale": 37.75, "fba": 5.5, "ref_rate": 15.0, "acos": 40.0, "ret": 3.0, "gen": 1.0}
+
+
+def initial_profit_inputs(avg_price, weighted_acos, return_rate, pre_cost: dict | None = None) -> dict:
+    """avg_price $, weighted_acos / return_rate 0-1 oran (None → varsayılan), pre_cost {cogs, fba, gen}
+    (analiz öncesi girilen maliyet; yalnızca dolu alanlar). `sources` hangi değerin nereden geldiğini söyler."""
+    inp = dict(PROFIT_DEFAULTS)
+    src = {k: "default" for k in inp}
+    price = _num(avg_price)
+    if price and price > 0:
+        inp["sale"], src["sale"] = round(price, 2), "market"
+    a = _num(weighted_acos)
+    if a is not None:
+        inp["acos"], src["acos"] = round(a * 100, 1), "market"
+    r = _num(return_rate)
+    if r is not None:
+        inp["ret"], src["ret"] = round(r * 100, 2), "market"
+    for k in ("cogs", "fba", "gen"):
+        v = _num((pre_cost or {}).get(k))
+        if v is not None and v >= 0:
+            inp[k], src[k] = v, "pre_cost"
+    return {**inp, "sources": src}
+
+
+def net_margin_from_inputs(inp: dict) -> float | None:
+    """Panelin recalcProfit'iyle aynı: referral $ = oran × fiyat; fiyat yoksa/0 ise marj hesaplanmaz."""
+    sale = inp.get("sale") or 0
+    if sale <= 0:
+        return None
+    return calc_profit(cogs=inp["cogs"], sale_price=sale, fba_fee=inp["fba"],
+                       referral_fee=inp["ref_rate"] / 100 * sale, acos=inp["acos"] / 100,
+                       return_rate=inp["ret"] / 100, overhead_rate=inp["gen"] / 100)["margin"]
+
+
 @dataclass
 class PreAssessmentCriterion:
     label: str

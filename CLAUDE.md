@@ -486,8 +486,15 @@ yüzden backend'e hiç bağlanmamalı, sahte veri olur.
 - **Analiz öncesi maliyet** (arama kutusu altındaki "Maliyet gir (opsiyonel)": COGS, FBA, Genel
   gider %): yalnızca DOLU alanlar Kâr bölümüne yazılır, Kriter 06 ve ön öneri ilk açılışta buna
   göre gelir, "Analiz öncesi girilen maliyetler kullanıldı" notu çıkar. Boşsa eski varsayılanlar
-  (6.00 / 5.50 / %1). Değerler tarayıcıda (`localStorage: pl_pre_cost`) kalır, "Temizle" siler;
-  sunucuya gitmez. Not: kayıtlı ön öneri (`user_query_log.verdict`) sunucunun maliyetsiz önerisidir.
+  (6.00 / 5.50 / %1). Değerler tarayıcıda (`localStorage: pl_pre_cost`) kalır, "Temizle" siler; analiz
+  isteğinde `pre_cost {cogs, fba, gen}` olarak (yalnızca dolu alanlar) sunucuya gider.
+- **Kâr hesaplayıcısının başlangıç değerleri TEK KAYNAK: SUNUCU** (`scoring.initial_profit_inputs` +
+  `net_margin_from_inputs`, `PROFIT_DEFAULTS`). Sunucu Kriter 06'yı (Net Kâr Marjı) bu değerlerle hesaplar ve
+  yanıtta `profit_inputs` (+ `sources`: market|pre_cost|default) döner; panel alanları bu sayılarla
+  (yeniden yuvarlamadan) doldurur. **Hata geçmişi:** eskiden sunucu `net_margin=None` (n/a, sayılmaz) ile
+  önerip KAYDEDİYOR, panel ise açılışta varsayılan maliyetlerle Kriter 06'yı ekliyordu → panelde "Sınırda",
+  Geçmiş/Ana Sayfa'da "Uygun" (gerçek örnek: "samsung water filter"). Kâr hesaplayıcısında maliyet sonradan
+  değiştirilirse paneldeki öneri değişir, kayıt DEĞİŞMEZ — panel bunu `.verdict-saved-note` ile söyler.
 
 ## Logo (`assets/hercullogo.svg`)
 
