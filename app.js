@@ -437,7 +437,7 @@ function renderPanel(data) {
     const REASON = {
       "Ort. Satış Fiyatı": "ortalama fiyat düşük (kar marjı sıkışır)",
       "Gross Margin": "pazarın brüt kar marjı hedefin altında",
-      "ACOS": "en ilgili 5 keyword'de reklam maliyeti yüksek",
+      "ACOS": "en ilgili 20 keyword'de reklam maliyeti yüksek",
       "En Büyük Marka Payı": "tek bir marka pazara hakim",
       "Güçlü Yeni Marka (1 yıl)": "son 1 yılda pazara girip tutunabilen marka çok az",
       "Net Kar Marjı (kar analizi)": "girdiğiniz maliyetlerle net kar marjı yetersiz",
@@ -1000,7 +1000,7 @@ function fmtCompact(v) {
 const CRIT_HELP = {
   "Ort. Satış Fiyatı": "Pazardaki ürünlerin ortalama satış fiyatı. Düşük fiyatlı pazarlarda kar marjı sıkışır.",
   "Gross Margin": "Pazardaki ürünlerin ortalama brüt kar marjı. Yüksek olması, fiyatlandırma alanı olduğunu gösterir.",
-  "ACOS": "En ilgili 5 keyword'e (ASIN modunda trafik payı en yüksek 5) birlikte reklam verilse oluşacak toplam harcamanın toplam satışa oranı: Σ(bid × tık) ÷ Σ(satış × fiyat). Yüksekse reklamla satmak pahalı demek.",
+  "ACOS": "İlgililiği en yüksek 20 keyword'e (SellerSprite ilgililik ≥ 50 havuzundan; ASIN modunda trafik payı en yüksek 20) birlikte reklam verilse oluşacak toplam harcamanın toplam satışa oranı: Σ(bid × tık) ÷ Σ(satış × fiyat). Yüksekse reklamla satmak pahalı demek.",
   "En Büyük Marka Payı": "Pazarın en büyük markasının ciro payı. Tek marka baskınsa girmek zordur.",
   "Güçlü Yeni Marka (1 yıl)": "Son 1 yılda pazara girip üst sıralara çıkabilmiş marka sayısı. Az ise pazar yeni girenlere kapalı demek.",
   "Net Kar Marjı (kar analizi)": "Aşağıdaki kar analizi hesaplayıcısına girdiğiniz maliyetlere göre hesaplanan net kar marjınız.",
@@ -1066,9 +1066,9 @@ function buildCriterionContext(data) {
       sub: "Kategori ortalaması (avgProfit)",
       viz: (c) => typeof c.value === "number" ? ringSvg(c.value, flagColor(c)) : "",
     },
-    // Kriter 03 — sunucu hesaplar (scoring.weighted_top_acos): Σ(bid×clicks) ÷ Σ(purchases×fiyat), ilk 5 keyword
+    // Kriter 03 — sunucu hesaplar (scoring.weighted_top_acos): Σ(bid×clicks) ÷ Σ(purchases×fiyat), ilgili ilk 20 keyword
     "ACOS": {
-      title: "ACOS (ilk 5 keyword, ağırlıklı, hesaplanan)",
+      title: `ACOS (ilgili ilk ${data.pre_assessment?.acos_detail?.n ?? 20} keyword, ağırlıklı, hesaplanan)`,
       sub: (() => {
         const d = data.pre_assessment?.acos_detail;
         if (!d || !d.count) return "";
@@ -1089,7 +1089,9 @@ function buildCriterionContext(data) {
           <table class="data-table text-[11.5px] mt-1"><thead><tr><th class="l">Keyword</th><th>ACOS</th><th>Bid</th><th>Tık</th><th>Satış</th><th>Fiyat</th><th>${rankLbl}</th></tr></thead>
           <tbody>${rows}<tr class="font-semibold"><td class="l">Toplam</td><td>${d.value == null ? "—" : fmtPct(d.value)}</td>
           <td></td><td></td><td></td><td></td><td></td></tr></tbody></table>
-          <div class="text-[11px] text-secondary mt-1">Harcama ${fmtUsd(d.total_spend)} ÷ satış ${fmtUsd(d.total_sales)}. Eksik verili keyword'ler atlanır.</div></div>`;
+          <div class="text-[11px] text-secondary mt-1">Harcama ${fmtUsd(d.total_spend)} ÷ satış ${fmtUsd(d.total_sales)}. Eksik verili keyword'ler atlanır.</div>
+          ${(d.bands || []).length ? `<div class="text-[11px] mt-2"><span class="font-semibold">Kırılım (bilgi amaçlı, ön öneriye girmez):</span> ${d.bands.map(b =>
+            `${esc(b.label)}: <b>${b.value == null ? (b.count ? "satış yok" : "—") : fmtPct(b.value)}</b> <span class="text-secondary">(${b.count} kw)</span>`).join(" · ")}</div>` : ""}</div>`;
       },
     },
     "En Büyük Marka Payı": {

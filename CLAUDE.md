@@ -460,22 +460,32 @@ yüzden backend'e hiç bağlanmamalı, sahte veri olur.
 - Geçmiş kayıtlardaki (`user_query_log.verdict`, `keyword_analysis.verdict`) ön öneriler
   kaydedildikleri andaki kurala göredir; yeniden hesaplanmaz.
 
-## Kriter 03 — ACOS (ilk 5 keyword, ağırlıklı, hesaplanan)
+## Kriter 03 — ACOS (ilgili ilk 20 keyword, ağırlıklı, hesaplanan)
 
 - **Yalnızca SUNUCUDA:** `scoring.weighted_top_acos()` → `ACOS = Σ(bid × clicks) ÷ Σ(purchases × fiyat)`
-  (5 keyword'e birlikte reklam verilse toplam harcama ÷ toplam satış). Hem `/api/analyze` hem
-  `/api/analyze-asin`; sonuç `pre_assessment.acos_detail` (value, count, keywords[{keyword, rank, bid,
-  clicks, purchases, price, spend, sales, acos}], total_spend, total_sales, no_sales, skipped).
-- **Hangi 5:** keyword modunda `relevancy` en yüksek 5 (exact ana satır geniş satırın yerine geçerken
-  relevancy korunur), ASIN modunda `trafficPercentage` en yüksek 5. **Fiyat:** keyword modunda her
-  keyword'ün kendi `avgPrice`'ı, ASIN modunda ürünün kendi fiyatı.
+  (20 keyword'e birlikte reklam verilse toplam harcama ÷ toplam satış; tık/satışı çok olan doğal olarak ağır basar).
+  Hem `/api/analyze` hem `/api/analyze-asin`; sonuç `pre_assessment.acos_detail` (value, count, n, keywords[{keyword,
+  rank, bid, clicks, purchases, price, spend, sales, acos}], total_spend, total_sales, no_sales, skipped, keyword
+  modunda `bands` = yakın (ilgililik ≥75) / orta (50–75) alt ACOS'ları — BİLGİ AMAÇLI, ön öneriye girmez).
+- **HAVUZ — tabloyla aynı değil:** `keyword_miner(keyword, minRelevancy=50)` SellerSprite'tan `order=searches desc`
+  ile gelir; tablo hacme göre ilk `keyword_list_size`(20) satırı gösterir (panel bunları kendi içinde relevancy'ye
+  göre dizer — bu yalnızca GÖRÜNÜM sırası). Eskiden ACOS da bu hacme göre kesilmiş 20'den seçiliyordu → ilgili ama
+  hacmi düşük keyword'ler hiç girmiyordu. Artık aynı çağrı `size=ACOS_POOL_SIZE`(100) çekilir (EK MCP ÇAĞRISI YOK),
+  ACOS havuzun tamamından relevancy'si en yüksek 20 ile hesaplanır. ("samsung water filter" gerçek verisi: eski ilk 5
+  %43,9; hacim-20 havuzundan ilk 20 %32,6; ilgili havuzdan ilk 20 %44,3.) `minRelevancy` gerçek çağrıyla doğrulandı
+  (306 → 62). ASIN modunda `traffic_keyword(size=100)` → `trafficPercentage` en yüksek 20; trafik payı 0 olan
+  keyword (ürüne trafik getirmiyor) sayılmaz (genel kural: sıralama değeri ≤0/None olan satır "ilgili" değil).
+- Skill'deki (amazon-kw-segmenter) anlamsal gruplama bilinçli olarak YOK: gruplar LLM/web yorumuyla kuruluyor,
+  sunucuda güvenilir kuralla ayrılamaz; grup ağırlıkları (ör. 70/20/10) keyfi olurdu. İlgililik puanı veri tabanlı.
+- **Fiyat:** keyword modunda her keyword'ün kendi `avgPrice`'ı, ASIN modunda ürünün kendi fiyatı.
 - **Eksik veri:** bid/clicks/purchases/fiyat'tan biri yoksa keyword atlanır, sıradaki alınır. Satışı 0
-  olan keyword harcamaya eklenir. <5 geçerli → olanlarla hesaplanır, kartta "N keyword". Hiç yoksa
+  olan keyword harcamaya eklenir. <20 geçerli → olanlarla hesaplanır, kartta "N keyword". Hiç yoksa
   "Veri Yok" (n/a). Harcama var ama toplam satış 0 → değer yok, kriter OLUMSUZ.
 - Kriter etiketi (`label`) iç anahtar olarak "ACOS" kaldı (eşikler, özet, eski kayıtlar); kartta ve Excel'de
-  gösterilen ad "ACOS (ilk 5 keyword, ağırlıklı, hesaplanan)". Kâr hesaplayıcının ACOS ön değeri bu sayı.
+  gösterilen ad "ACOS (ilgili ilk 20 keyword, ağırlıklı, hesaplanan)". Kâr hesaplayıcının ACOS ön değeri bu sayı.
 - Keyword tablolarındaki satır bazlı ACOS (madde 8'deki `calc_keyword_ad_metrics`) ve **Lansman
   Raporu** (skill gereği ana keyword + kendi fiyatımız) bundan ETKİLENMEZ.
+- `returnFields` `traffic_keyword`'te de BOZUK (null döndü) — kullanma (bkz. madde 2).
 
 ## Kâr analizi (Ürün Analizi → Kâr sekmesi)
 

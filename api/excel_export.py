@@ -118,10 +118,11 @@ def build_report_xlsx(data: dict) -> bytes:
     row = _section(ws, row, 10, "ÖN DEĞERLENDİRME")
     crit_start = row
     acos_n = (pa.get("acos_detail") or {}).get("count")
+    acos_top = (pa.get("acos_detail") or {}).get("n") or 20
     for crit in pa.get("criteria", []):
         label = crit["label"]
-        if label == "ACOS":   # Kriter 03 = ilk 5 keyword'ün ağırlıklı ACOS'u (panelle aynı ad)
-            label = "ACOS (ilk 5 keyword, ağırlıklı, hesaplanan)" + (f" — {acos_n} keyword" if acos_n else "")
+        if label == "ACOS":   # Kriter 03 = ilgili ilk 20 keyword'ün ağırlıklı ACOS'u (panelle aynı ad)
+            label = f"ACOS (ilgili ilk {acos_top} keyword, ağırlıklı, hesaplanan)" + (f" — {acos_n} keyword" if acos_n else "")
         ws.cell(row, 1, label).font = LBL
         ws.cell(row, 1).border = BORDER
         val = crit.get("value")

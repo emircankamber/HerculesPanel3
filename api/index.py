@@ -37,7 +37,7 @@ from pydantic import BaseModel, Field
 
 from mcp_client import call_tool
 from scoring import calc_keyword_ad_metrics, calc_profit, pre_assessment, DEFAULT_THRESHOLDS, verdict_rule, weighted_top_acos, \
-    initial_profit_inputs, net_margin_from_inputs
+    initial_profit_inputs, net_margin_from_inputs, ACOS_POOL_SIZE, RELEVANCY_BANDS
 import signal_engine as se
 
 # Bayesian (scipy) ve Portfolio (ortools) opsiyonel — Vercel deploy boyutunu
@@ -385,7 +385,9 @@ async def analyze(req: AnalyzeRequest, user: dict = Depends(require_auth)):
             "keyword": req.keyword,
             "marketplace": req.marketplace,
             "minRelevancy": req.top_relevancy,
-            "size": req.keyword_list_size,
+            # Tablo hacme göre ilk keyword_list_size satırı gösterir; Kriter 03 (ACOS) ise bu İLGİLİ havuzun
+            # tamamından ilgililiği en yüksek 20'yi kullanır — ek MCP çağrısı yok, aynı çağrı daha büyük sayfa.
+            "size": max(req.keyword_list_size, ACOS_POOL_SIZE),
             "order": {"field": "searches", "desc": True},
         })
 
@@ -509,19 +511,22 @@ async def analyze(req: AnalyzeRequest, user: dict = Depends(require_auth)):
                 bid=main_row.get("bid"), avg_price=main_row.get("avgPrice"),
                 impressions=main_row.get("impressions"), searches=main_row.get("searches"),
             )}
-        # Tabloda ana keyword'ün satırını da EXACT veriyle değiştir (broad değil) —
+        # Ana keyword'ün satırını EXACT veriyle değiştir (broad değil) —
         # kullanıcı tabloda ve ön değerlendirmede tutarlı, tam eşleşmiş veri görsün.
+        # keyword_rows burada TÜM ilgili havuz (ACOS_POOL_SIZE); tablo aşağıda ilk keyword_list_size'a kesilir.
+        main_idx = None
         if main_row:
-            replaced = False
             for i, r in enumerate(keyword_rows):
                 if r.get("keyword", "").lower() == req.keyword.lower():
                     # Exact satır geniş satırın yerine geçer; exact yanıtta olmayan alanlar
                     # (ör. relevancy — Kriter 03'ün sıralaması buna dayanır) geniş satırdan korunur.
                     keyword_rows[i] = {**r, **main_row}
-                    replaced = True
+                    main_idx = i
                     break
-            if not replaced:
-                keyword_rows.insert(0, main_row)
+        acos_pool = keyword_rows
+        keyword_rows = acos_pool[:req.keyword_list_size]   # tablo: hacme göre ilk N (eskisi gibi)
+        if main_row and (main_idx is None or main_idx >= req.keyword_list_size):
+            keyword_rows.insert(0, acos_pool[main_idx] if main_idx is not None else main_row)
 
         # 6) Top brand share (brand_conc'tan) — GERÇEK ALAN ADI: totalRevenueRatio
         #    (brand_conc "data" doğrudan liste, "share"/"percentage" değil)
@@ -545,8 +550,8 @@ async def analyze(req: AnalyzeRequest, user: dict = Depends(require_auth)):
         # pre_assessment zaten DEFAULT_THRESHOLDS'a düşer (bkz. scoring.py).
         user_thresholds = await db.get_user_thresholds(uid)
 
-        # Kriter 03: relevancy'si en yüksek 5 keyword'ün ağırlıklı ACOS'u (her keyword kendi avgPrice'ıyla)
-        acos_detail = weighted_top_acos(keyword_rows, "relevancy", lambda r: r.get("avgPrice"))
+        # Kriter 03: ilgili havuzdan relevancy'si en yüksek 20 keyword'ün ağırlıklı ACOS'u (her keyword kendi avgPrice'ıyla)
+        acos_detail = weighted_top_acos(acos_pool, "relevancy", lambda r: r.get("avgPrice"), bands=RELEVANCY_BANDS)
         # Kriter 06 (Net Kâr Marjı): panelin kâr hesaplayıcısıyla AYNI başlangıç değerleri (scoring.initial_profit_inputs)
         # → kaydedilen ön öneri (Geçmiş / Ana Sayfa) panelde ilk görünenle aynı olur.
         profit_inputs = initial_profit_inputs(stats_data.get("avgPrice"), acos_detail["value"],
@@ -569,7 +574,6 @@ async def analyze(req: AnalyzeRequest, user: dict = Depends(require_auth)):
             "category_used": category_used_label,
             "fetched_at_iso": datetime.now(timezone.utc).isoformat(),  # her arama gerçekten canlı mı doğrulamak için
             "category_candidates": category_candidates,
-            "keyword_data_raw": kw_data,
             "keyword_rows": keyword_rows,
             "market_stats": stats_data,
             "brand_concentration": brand_items,
@@ -1531,7 +1535,9 @@ async def analyze_asin(req: AnalyzeAsinRequest, user: dict = Depends(require_aut
 
         # 2) Reverse ASIN — trafik keyword'leri
         rev_raw = await call_tool("traffic_keyword", {
-            "asin": asin, "marketplace": req.marketplace, "size": req.keyword_list_size,
+            "asin": asin, "marketplace": req.marketplace,
+            # Tablo hacme göre ilk keyword_list_size; Kriter 03 havuzun tamamından trafik payı en yüksek 20
+            "size": max(req.keyword_list_size, ACOS_POOL_SIZE),
             "order": {"field": "searches", "desc": True},
         })
         rev_items = rev_raw.get("data", {}).get("items", []) if isinstance(rev_raw.get("data"), dict) else []
@@ -1560,8 +1566,13 @@ async def analyze_asin(req: AnalyzeAsinRequest, user: dict = Depends(require_aut
 
         # Ana satır = en yüksek trafik payına sahip keyword
         main_row = max(keyword_rows, key=lambda r: r.get("trafficPercentage") or 0, default=None)
-        # Kriter 03: trafik payı en yüksek 5 keyword'ün ağırlıklı ACOS'u (fiyat = ürünün kendi fiyatı)
+        # Kriter 03: trafik payı en yüksek 20 keyword'ün ağırlıklı ACOS'u (fiyat = ürünün kendi fiyatı).
+        # Trafik payı 0 olan keyword (ürüne trafik getirmiyor) sayılmaz. Tablo hacme göre ilk N.
         acos_detail = weighted_top_acos(keyword_rows, "trafficPercentage", lambda r: asin_price)
+        table = keyword_rows[:req.keyword_list_size]
+        if main_row is not None and not any(r is main_row for r in table):
+            table.insert(0, main_row)   # ana (en çok trafik getiren) keyword tabloda hep görünsün
+        keyword_rows = table
 
         # 3) Pazar analizi (ürünün kendi kategorisiyle)
         market_stats = brand_conc = price_dist = launch_dist = demand_trend = {}
