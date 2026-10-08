@@ -570,7 +570,7 @@
         </div>
 
         <form id="trd-form" class="card card-pad mt-6" novalidate>
-          <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-[minmax(0,1.4fr)_repeat(4,minmax(0,1fr))_auto] gap-3 items-end">
+          <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-[minmax(0,1.3fr)_repeat(2,minmax(0,0.8fr))_minmax(0,1.5fr)_minmax(0,0.7fr)_auto] gap-3 items-end">
             <label class="flex flex-col gap-1.5 min-w-0"><span class="eyebrow">Pazar tipi</span>
               <select id="trd-model" class="field !h-11">
                 <option value="1">Popüler Pazar</option>
@@ -587,20 +587,70 @@
             <label class="flex flex-col gap-1.5 min-w-0"><span class="eyebrow">Pazar yeri</span>
               <select id="trd-market" class="field !h-11"><option value="US">US</option><option value="UK">UK</option><option value="CA">CA</option></select>
             </label>
-            <label class="flex flex-col gap-1.5 min-w-0"><span class="eyebrow">Min. arama hacmi</span>
-              <input type="number" id="trd-minsearch" class="field !h-11" min="0" step="100" placeholder="opsiyonel">
+            <label class="flex flex-col gap-1.5 min-w-0"><span class="eyebrow">Kategori</span>
+              <select id="trd-category" class="field !h-11"><option value="">Tüm kategoriler</option></select>
             </label>
             <label class="flex flex-col gap-1.5 min-w-0"><span class="eyebrow">Sonuç sayısı</span>
               <select id="trd-size" class="field !h-11"><option value="10">10</option><option value="20" selected>20</option><option value="50">50</option></select>
             </label>
             <button type="submit" id="trd-scan" class="btn btn-primary !h-11"><span class="material-symbols-outlined">radar</span>Tara</button>
           </div>
+          <div id="trd-cat-note" class="text-xs text-secondary mt-2" style="display:none;"></div>
+
+          <details id="trd-filters" class="pre-cost mt-4 rounded-lg border border-hairline">
+            <summary class="flex flex-wrap items-center gap-2 px-3 py-2 cursor-pointer select-none text-sm font-medium">
+              <span class="material-symbols-outlined text-primary" style="font-size:18px" aria-hidden="true">tune</span>Detaylı filtreler
+              <span id="trd-filter-count" class="chip na !text-[10px]">kapalı</span>
+            </summary>
+            <div class="px-3 pb-3">
+              <p class="text-xs text-secondary mt-2">Kelime filtreleri SellerSprite'a gider. Sayısal filtreleri SellerSprite yok saydığı için sunucu uygular: sonuç azalırsa sonraki sayfalar da taranır (en fazla 5 MCP çağrısı / 200 keyword).</p>
+              <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 mt-3">
+                <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">İçermeli (kelime)</span>
+                  <input type="text" id="trd-include" class="field w-full mt-1" maxlength="100" placeholder="örn. lamp"></label>
+                <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Hariç tut (kelime)</span>
+                  <input type="text" id="trd-exclude" class="field w-full mt-1" maxlength="100" placeholder="örn. halloween"></label>
+                <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Min. arama hacmi</span>
+                  <input type="number" id="trd-minsearch" class="field w-full mt-1" min="0" step="100" placeholder="opsiyonel"></label>
+                <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Maks. arama hacmi</span>
+                  <input type="number" id="trd-maxsearch" class="field w-full mt-1" min="0" step="100" placeholder="opsiyonel"></label>
+                <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Min. satış (adet)</span>
+                  <input type="number" id="trd-minpurch" class="field w-full mt-1" min="0" step="10" placeholder="opsiyonel"></label>
+                <label class="block min-w-0" title="purchases ÷ searches"><span class="text-xs font-medium text-on-surface-variant">Min. satış oranı (%)</span>
+                  <input type="number" id="trd-minprate" class="field w-full mt-1" min="0" max="100" step="0.1" placeholder="örn. 1"></label>
+                <label class="block min-w-0" title="Arama sıralamasının yükselme oranı (hacim büyümesi DEĞİL)"><span class="text-xs font-medium text-on-surface-variant">Min. sıralama ivmesi (%)</span>
+                  <input type="number" id="trd-mingrowth" class="field w-full mt-1" min="-100" max="100" step="1" placeholder="örn. 50"></label>
+                <label class="block min-w-0" title="İlk 3 ASIN'in tıklama payı toplamı — düşükse pazar daha az tekelleşmiş"><span class="text-xs font-medium text-on-surface-variant">Maks. ilk 3 tıklama payı (%)</span>
+                  <input type="number" id="trd-maxclick" class="field w-full mt-1" min="0" max="100" step="1" placeholder="örn. 50"></label>
+                <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Maks. önerilen bid ($)</span>
+                  <input type="number" id="trd-maxbid" class="field w-full mt-1" min="0" step="0.05" placeholder="örn. 1.50"></label>
+                <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Maks. kelime sayısı</span>
+                  <input type="number" id="trd-maxwords" class="field w-full mt-1" min="1" max="20" step="1" placeholder="örn. 4"></label>
+                <div class="flex items-end"><button type="button" id="trd-clear" class="btn btn-outline w-full"><span class="material-symbols-outlined">backspace</span>Filtreleri temizle</button></div>
+              </div>
+            </div>
+          </details>
+
           <div class="flex flex-wrap items-center justify-between gap-2 mt-3">
             <div id="trd-status" class="status-line"></div>
             <div id="trd-stale" class="text-xs text-tertiary font-medium" style="display:none;">Filtreler değişti — sonuçları güncellemek için Tara'ya basın.</div>
           </div>
-          <div class="text-xs text-secondary mt-1">Her tarama 1 SellerSprite MCP çağrısıdır; filtre değişince otomatik çekilmez.</div>
+          <div class="text-xs text-secondary mt-1">Her tarama 1–5 SellerSprite MCP çağrısıdır; filtre değişince otomatik çekilmez.</div>
         </form>
+
+        <!-- Yasaklı kategoriler: liste herkese görünür, yönetim yalnızca owner (yetki sunucuda) -->
+        <div id="trd-ban-card" class="card card-pad mt-6" style="display:none;">
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <div class="flex items-center gap-2"><span class="material-symbols-outlined text-error" style="font-size:20px">block</span><h3 class="section-title">Yasaklı Kategoriler</h3><span id="trd-ban-count" class="chip na"></span></div>
+            <span id="trd-ban-hint" class="text-xs text-secondary"></span>
+          </div>
+          <div id="trd-ban-list" class="flex flex-wrap gap-1.5 mt-3"></div>
+          <form id="trd-ban-form" class="flex flex-col sm:flex-row gap-2 mt-3" style="display:none;" novalidate>
+            <input type="text" id="trd-ban-input" class="field !h-10 sm:w-80" maxlength="80" list="trd-ban-options" placeholder="Kategori adı, ör. Kindle Store" autocomplete="off">
+            <datalist id="trd-ban-options"></datalist>
+            <button type="submit" class="btn btn-outline !h-10"><span class="material-symbols-outlined">block</span>Yasakla</button>
+            <span id="trd-ban-status" class="status-line self-center"></span>
+          </form>
+        </div>
 
         <div id="trd-empty" class="card card-pad mt-6 text-center py-12">
           <span class="material-symbols-outlined text-outline" style="font-size:36px">radar</span>
@@ -621,6 +671,9 @@
                 <option value="growth_rate">Sıralama İvmesi</option>
                 <option value="searches">Arama Hacmi</option>
                 <option value="purchases">Satış</option>
+                <option value="purchase_rate">Satış oranı</option>
+                <option value="click_share">İlk 3 tıklama payı (düşükten)</option>
+                <option value="bid">Bid (düşükten)</option>
               </select>
             </label>
           </div>

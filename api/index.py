@@ -58,6 +58,7 @@ except ImportError:
 import database as db
 import checklist as ckl
 import launch_report as lr
+import trends
 import competency as comp
 import forum
 import excel_export
@@ -1649,12 +1650,54 @@ SEARCH_MODEL_LABELS = {
 
 
 class TrendingRequest(BaseModel):
-    marketplace: str = "US"
+    marketplace: str = Field("US", pattern=r"^[A-Z]{2}$")
     search_model: int = 4  # varsayılan: hızlı yükselen (Breakout Nişler)
-    granularity: str = "weekly"  # "weekly" | "monthly"
-    departments: list[str] = []
-    min_searches: int | None = None
-    size: int = 20
+    granularity: str = Field("weekly", pattern=r"^(weekly|monthly)$")
+    # Kategori: SellerSprite'ın döndürdüğü GÖRÜNEN ad (ör. "Toys & Games"). US'te doğrulanmış takma adla
+    # SellerSprite'a gider; diğer pazarlarda taranan sayfalarda panel süzer (bkz. trends.py).
+    category: str | None = Field(None, max_length=80)
+    departments: list[str] = []  # eski istemci: ilk eleman category gibi yorumlanır
+    include_keywords: str | None = Field(None, max_length=100)  # SellerSprite'ta çalışıyor (doğrulandı)
+    exclude_keywords: str | None = Field(None, max_length=100)
+    # Sayısal filtreler — SellerSprite bunları YOK SAYIYOR (doğrulandı), sunucuda uygulanır. Oranlar 0-1.
+    min_searches: int | None = Field(None, ge=0)
+    max_searches: int | None = Field(None, ge=0)
+    min_purchases: int | None = Field(None, ge=0)
+    min_purchase_rate: float | None = Field(None, ge=0, le=1)
+    min_growth: float | None = Field(None, ge=-1, le=1)
+    max_click_share: float | None = Field(None, ge=0, le=1)
+    max_bid: float | None = Field(None, ge=0)
+    max_words: int | None = Field(None, ge=1, le=20)
+    size: int = Field(20, ge=1, le=50)
+
+
+TREND_FILTER_KEYS = ("min_searches", "max_searches", "min_purchases", "min_purchase_rate",
+                     "min_growth", "max_click_share", "max_bid", "max_words")
+
+
+def _trend_row(it: dict) -> dict:
+    return {
+        "keyword": it.get("keyword"),
+        "departments": [d for d in (it.get("departments") or []) if d],
+        "searches": it.get("searches"),
+        "search_rank": it.get("searchRank"),
+        "growth_rate": it.get("searchRankGrowthRate"),  # 0-1 oran: arama SIRALAMASI yükselme oranı (0.909 = 11. sıradan 1. sıraya), hacim büyümesi DEĞİL
+        "growth_4w": it.get("w4RankGrowthRate"),
+        "growth_12w": it.get("w12RankGrowthRate"),
+        "purchases": it.get("purchases"),
+        "purchase_rate": it.get("purchaseRate"),
+        "clicks": it.get("clicks"),
+        "impressions": it.get("impressions"),
+        # İlk 3 ASIN'in tıklama / dönüşüm payı toplamı (0-1; top3AsinDtoList toplamıyla doğrulandı)
+        "click_share": it.get("clickShareRate"),
+        "conversion_share": it.get("cvsShareRate"),
+        "bid": it.get("bid"), "bid_min": it.get("bidMin"), "bid_max": it.get("bidMax"),
+        "top3_brands": [b for b in (it.get("top3Brands") or []) if b],
+        "top3_asins": [{
+            "asin": a.get("asin"), "image_url": a.get("imageUrl"),
+            "click_rate": a.get("clickRate"), "conversion_rate": a.get("conversionRate"),
+        } for a in (it.get("top3AsinDtoList") or [])],
+    }
 
 
 @app.post("/api/discovery/trending")
@@ -1667,48 +1710,135 @@ async def discovery_trending(req: TrendingRequest, user: dict = Depends(require_
     katsayısını burada KULLANMIYORUZ — bu ikincisi için gerçek bir MCP
     kaynağı bulunamadı (Stitch tasarımındaki "Viral Dönüşüm Katsayısı"
     kartının backend karşılığı yok, eklenmemeli).
+
+    Owner'ın yasakladığı kategorilerdeki keyword'ler SUNUCUDA atılır (herhangi bir kategorisi yasaklıysa).
+    Yasak ve sayısal filtreler sonrası sonuç azalırsa sonraki sayfa çekilir (en fazla trends.MAX_SCAN_PAGES).
     """
     if req.search_model not in SEARCH_MODEL_LABELS:
         raise HTTPException(400, f"search_model 1-6 arası olmalı: {SEARCH_MODEL_LABELS}")
     tool = "aba_research_weekly" if req.granularity == "weekly" else "aba_research_monthly"
 
-    args = {
-        "marketplace": req.marketplace, "searchModel": req.search_model,
-        "size": req.size, "order": {"field": "searches_growth", "desc": True},
-    }
-    if req.departments:
-        args["departments"] = req.departments
-    if req.min_searches:
-        args["minSearches"] = req.min_searches
+    category = req.category or (req.departments[0] if req.departments else None)
+    if category is not None and not category.strip():
+        category = None
+    if category:
+        try:
+            category = trends.clean_category_name(category)
+        except ValueError as e:
+            raise HTTPException(422, str(e))
+    banned = await db.banned_category_keys()
+    if category and category.lower() in banned:
+        raise HTTPException(403, f"\"{category}\" kategorisi owner tarafından yasaklandı")
+    alias = trends.department_alias(req.marketplace, category) if category else None
 
-    raw = await call_tool(tool, args)
-    items = raw.get("data", {}).get("items", []) if isinstance(raw.get("data"), dict) else []
+    if req.min_searches is not None and req.max_searches is not None and req.min_searches > req.max_searches:
+        raise HTTPException(422, "Min. arama hacmi, maks. arama hacminden büyük olamaz")
+    filters = {k: getattr(req, k) for k in TREND_FILTER_KEYS if getattr(req, k) is not None}
 
-    results = [{
-        "keyword": it.get("keyword"),
-        "departments": it.get("departments", []),
-        "searches": it.get("searches"),
-        "search_rank": it.get("searchRank"),
-        "growth_rate": it.get("searchRankGrowthRate"),  # 0-1 oran: arama SIRALAMASI yükselme oranı (0.909 = 11. sıradan 1. sıraya), hacim büyümesi DEĞİL
-        "growth_4w": it.get("w4RankGrowthRate"),
-        "growth_12w": it.get("w12RankGrowthRate"),
-        "purchases": it.get("purchases"),
-        "purchase_rate": it.get("purchaseRate"),
-        "bid": it.get("bid"), "bid_min": it.get("bidMin"), "bid_max": it.get("bidMax"),
-        "top3_brands": [b for b in (it.get("top3Brands") or []) if b],
-        "top3_asins": [{
-            "asin": a.get("asin"), "image_url": a.get("imageUrl"),
-            "click_rate": a.get("clickRate"), "conversion_rate": a.get("conversionRate"),
-        } for a in (it.get("top3AsinDtoList") or [])],
-    } for it in items]
+    base = {"marketplace": req.marketplace, "searchModel": req.search_model, "size": trends.PAGE_SIZE,
+            "order": {"field": "searches_growth", "desc": True}}
+    if alias:
+        base["departments"] = [alias]
+    for src, dst in (("include_keywords", "includeKeywords"), ("exclude_keywords", "excludeKeywords")):
+        v = (getattr(req, src) or "").strip()
+        if v:
+            base[dst] = v
+
+    results, seen = [], set()
+    scanned = hidden_banned = filtered_out = pages = 0
+    total = None
+    dept_counts: dict[str, int] = {}
+    for page in range(1, trends.MAX_SCAN_PAGES + 1):
+        raw = await call_tool(tool, {**base, "page": page})
+        data = raw.get("data") if isinstance(raw.get("data"), dict) else {}
+        items = data.get("items") or []
+        pages += 1
+        if total is None:
+            total = data.get("total")
+        for it in items:
+            row = _trend_row(it)
+            key = (row["keyword"] or "").lower()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            scanned += 1
+            for d in row["departments"]:
+                dept_counts[d] = dept_counts.get(d, 0) + 1
+            if trends.is_banned(row["departments"], banned):
+                hidden_banned += 1
+                continue
+            if category and not alias and not trends.in_category(row["departments"], category):
+                filtered_out += 1
+                continue
+            if not trends.passes_filters(row, filters):
+                filtered_out += 1
+                continue
+            if len(results) < req.size:
+                results.append(row)
+        if len(results) >= req.size or not items or not data.get("hasNextPage", True):
+            break
 
     return {
         "search_model": req.search_model,
         "search_model_label": SEARCH_MODEL_LABELS[req.search_model],
         "granularity": req.granularity,
-        "total": raw.get("data", {}).get("total") if isinstance(raw.get("data"), dict) else None,
+        "total": total,  # SellerSprite'ın eşleşme sayısı (yasak/panel filtreleri ÖNCESİ)
+        "category": category,
+        "category_mode": None if not category else ("sellersprite" if alias else "panel"),
+        "scan": {"pages": pages, "scanned": scanned, "hidden_banned": hidden_banned,
+                 "filtered_out": filtered_out, "max_pages": trends.MAX_SCAN_PAGES},
+        "departments_seen": sorted(dept_counts, key=lambda d: (-dept_counts[d], d)),
         "results": results,
     }
+
+
+class BannedCategoryIn(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+
+
+async def _trend_categories_payload(marketplace: str, can_manage: bool) -> dict:
+    banned = await db.list_banned_categories()
+    keys = {b["key"] for b in banned}
+    known = [{"name": n, "server_filter": True}
+             for n in trends.KNOWN_DEPARTMENTS.get(marketplace, []) if n.lower() not in keys]
+    return {"marketplace": marketplace, "known": known, "can_manage": can_manage,
+            "banned": [{k: b[k] for k in ("name", "banned_at", "banned_by_name")} for b in banned]}
+
+
+@app.get("/api/trends/categories")
+async def trend_categories(marketplace: str = Query("US", pattern=r"^[A-Z]{2}$"),
+                           user: dict = Depends(require_auth)):
+    """Kategori filtresi seçenekleri (yasaklılar hariç) + yasak listesi (herkes görür, yalnızca owner yönetir)."""
+    can_manage = False
+    if not user.get("auth_disabled") and user.get("user_id"):
+        st = _auth_state(user["user_id"])
+        role = st["role"] if st else await db.get_user_role(user["user_id"])
+        can_manage = role == "owner"
+    return await _trend_categories_payload(marketplace, can_manage)
+
+
+@app.post("/api/trends/banned-categories")
+async def ban_trend_category(req: BannedCategoryIn, marketplace: str = Query("US", pattern=r"^[A-Z]{2}$"),
+                             user: dict = Depends(require_owner)):
+    try:
+        name = trends.canonical_name(trends.clean_category_name(req.name))
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    added = await db.ban_category(name, user["user_id"])
+    return {"added": added, **await _trend_categories_payload(marketplace, True)}
+
+
+@app.delete("/api/trends/banned-categories")
+async def unban_trend_category(name: str = Query(..., min_length=1, max_length=200),
+                               marketplace: str = Query("US", pattern=r"^[A-Z]{2}$"),
+                               user: dict = Depends(require_owner)):
+    try:
+        name = trends.clean_category_name(name)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    if not await db.unban_category(name):
+        raise HTTPException(404, "Bu kategori yasaklı listesinde değil")
+    return await _trend_categories_payload(marketplace, True)
 
 
 

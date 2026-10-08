@@ -97,6 +97,10 @@ _SCHEMAS = [
     """CREATE TABLE IF NOT EXISTS competency_forms (
         user_id INTEGER PRIMARY KEY, answers_json TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'draft',
         created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, submitted_at INTEGER)""",
+    # TRENDLER: owner'ın yasakladığı kategoriler (SellerSprite'ın döndürdüğü görünen ad, ör. "Kindle Store").
+    # name_key = küçük harfli ad (harf duyarsız tekillik). banned_by = kullanıcı id (hesap silinince NULL).
+    """CREATE TABLE IF NOT EXISTS banned_categories (
+        name_key TEXT PRIMARY KEY, name TEXT NOT NULL, banned_by INTEGER, banned_at INTEGER NOT NULL)""",
     """CREATE TABLE IF NOT EXISTS schema_flags (
         key TEXT PRIMARY KEY, value TEXT, set_at INTEGER NOT NULL)""",
     """CREATE TABLE IF NOT EXISTS product_signals (
@@ -248,7 +252,7 @@ async def _ensure_staff_in_team():
 # ŞEMAYA/MİGRASYONA HER DEĞİŞİKLİKTE (yeni tablo, sütun, indeks, veri düzeltmesi, tohum) BU SAYIYI ARTIR —
 # artırmazsan canlı veritabanında migrasyon hiç çalışmaz.
 # ---------------------------------------------------------------------------
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2  # v2: banned_categories
 
 
 def _migration_env_hash() -> str:
@@ -1294,7 +1298,8 @@ EMAIL_REF_COLUMNS = [
 USER_ID_TABLES = ["sessions", "user_thresholds", "user_query_log", "market_decision",
                   "training_completions", "training_assignments", "team_members", "competency_forms"]
 # Başkalarına ait kayıtlarda kişiyi id ile anan alanlar: NULL yapılır.
-ID_REF_COLUMNS = [("training_lessons", "created_by"), ("team_invites", "created_by")]
+ID_REF_COLUMNS = [("training_lessons", "created_by"), ("team_invites", "created_by"),
+                  ("banned_categories", "banned_by")]
 
 
 def _scrub_json(value, email: str):
@@ -1695,3 +1700,32 @@ async def delete_checklist(cid: int) -> bool:
     await execute("DELETE FROM checklist_events WHERE checklist_id = ? "
                   "AND NOT EXISTS (SELECT 1 FROM checklists WHERE id = ?)", (cid, cid))
     return True
+
+
+# ---------------------------------------------------------------------------
+# TRENDLER — YASAKLI KATEGORİLER (yalnızca owner yönetir; index.py)
+# ---------------------------------------------------------------------------
+async def list_banned_categories() -> list[dict]:
+    rows = await fetch_all(
+        "SELECT b.name_key, b.name, b.banned_by, b.banned_at, u.first_name, u.last_name "
+        "FROM banned_categories b LEFT JOIN users u ON u.id = b.banned_by ORDER BY b.name")
+    return [{"name": r["name"], "key": r["name_key"], "banned_at": r["banned_at"],
+             "banned_by_name": display_name(r) or "—"} for r in rows]
+
+
+async def banned_category_keys() -> set[str]:
+    return {r["name_key"] for r in await fetch_all("SELECT name_key FROM banned_categories")}
+
+
+async def ban_category(name: str, user_id: int | None) -> bool:
+    """True = yeni eklendi, False = zaten yasaklıydı (harf duyarsız)."""
+    row = await execute_fetch(
+        "INSERT INTO banned_categories (name_key, name, banned_by, banned_at) VALUES (?, ?, ?, ?) "
+        "ON CONFLICT (name_key) DO NOTHING RETURNING name_key",
+        (name.lower(), name, user_id, int(time.time())))
+    return bool(row)
+
+
+async def unban_category(name: str) -> bool:
+    row = await execute_fetch("DELETE FROM banned_categories WHERE name_key = ? RETURNING name_key", (name.lower(),))
+    return bool(row)
