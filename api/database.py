@@ -448,10 +448,6 @@ async def delete_analysis(user_id: int, keyword: str, marketplace: str):
         (user_id, keyword, marketplace))
 
 
-async def clear_all_analyses(user_id: int):
-    await execute("DELETE FROM user_query_log WHERE user_id = ?", (user_id,))
-
-
 # ---------------------------------------------------------------------------
 # PAZAR KARARLARI — tamamen kullanıcıya özel
 # ---------------------------------------------------------------------------
@@ -498,10 +494,6 @@ async def delete_decisions_for(user_id: int, key: str, marketplace: str) -> int:
         f"DELETE FROM market_decision WHERE user_id = ? AND marketplace = ? AND ({' OR '.join(conds)}) RETURNING id",
         (user_id, marketplace, *params))
     return len(rows)
-
-
-async def clear_all_decisions(user_id: int):
-    await execute("DELETE FROM market_decision WHERE user_id = ?", (user_id,))
 
 
 # ---------------------------------------------------------------------------

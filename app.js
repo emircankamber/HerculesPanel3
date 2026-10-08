@@ -216,19 +216,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (el) el.addEventListener("keydown", e => { if (e.key === "Enter") doAuth("login"); });
   });
 
-  // Toplu temizleme butonları
-  const clearDec = document.getElementById("clear-decisions-btn");
-  if (clearDec) clearDec.addEventListener("click", async () => {
-    if (!confirm("TÜM pazar kararları kalıcı olarak silinecek. Emin misiniz?")) return;
-    await apiFetch(`${API_BASE}/api/decisions/clear`, { method: "POST" });
-    loadDecisions();
-  });
-  const clearHist = document.getElementById("clear-history-btn");
-  if (clearHist) clearHist.addEventListener("click", async () => {
-    if (!confirm("TÜM sorgu geçmişi ve bu ürünler için verdiğin TÜM pazar kararları kalıcı olarak silinecek (Raporlar ve Ana Sayfa'dan da kalkar). Emin misiniz?")) return;
-    await apiFetch(`${API_BASE}/api/history/clear`, { method: "POST" });
-    loadHistory();
-  });
+  // Toplu temizleme ("Tümünü Temizle") bilinçli olarak YOK — kayıtlar yalnızca tek tek silinir.
 
   // Ana Sayfa varsayılan görünüm: yalnızca DB okuyan uçlar (MCP çağrısı YOK).
   // Giriş zorunlu ve oturum yoksa 401 yerine önce girişi bekle.

@@ -611,7 +611,8 @@ satır kapsayıcının `overflow:hidden`'ı ile gizleniyor. Favicon: `assets/her
   `runAnalysis` "ASIN:" önekini ayıklar (eskiden Raporlar'daki "Yeniden Analiz Et" ASIN'i keyword sanıyordu).
   `/api/decision` karar değerini doğrular (Uygun|Sınırda|Elenmiş, 422).
 - **Geçmişten silme kararı da siler:** `POST /api/history/delete` → `db.delete_decisions_for` (kişinin KENDİ
-  kararları; ASIN'de eski "B0.. — başlık" biçimi dahil); `/api/history/clear` tüm kararları da siler. Böylece ürün
+  kararları; ASIN'de eski "B0.. — başlık" biçimi dahil); toplu silme ("Tümünü Temizle") YOK — kullanıcı isteğiyle kaldırıldı, geçmiş ve kararlar
+  yalnızca TEK TEK silinir (uçları da yok, geri ekleme). Böylece ürün
   Raporlar'dan ve Ana Sayfa'nın Uygun/Sınırda/Elenmiş sayılarından da kalkar. (Kararlar sayfasından karar silmek
   geçmişe dokunmaz.)
 

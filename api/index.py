@@ -1561,18 +1561,8 @@ async def delete_history_ep(req: DeleteKeywordRequest, user: dict = Depends(requ
     return {"ok": True, "deleted_by": user["email"], "decisions_deleted": removed}
 
 
-@app.post("/api/decisions/clear")
-async def clear_decisions_ep(user: dict = Depends(require_auth)):
-    await db.clear_all_decisions(user.get("user_id", 0))
-    return {"ok": True}
-
-
-@app.post("/api/history/clear")
-async def clear_history_ep(user: dict = Depends(require_auth)):
-    """Tüm geçmiş silinince kararlar da silinir (tek tek silmeyle aynı kural)."""
-    await db.clear_all_analyses(user.get("user_id", 0))
-    await db.clear_all_decisions(user.get("user_id", 0))
-    return {"ok": True}
+# Toplu silme uçları (/api/decisions/clear, /api/history/clear) bilinçli olarak YOK: kararlar ve geçmiş
+# yalnızca tek tek silinir (yanlışlıkla tüm kararların gitmesini önlemek için — kullanıcı isteği).
 
 
 
