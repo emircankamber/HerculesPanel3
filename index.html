@@ -30,8 +30,48 @@
     <div class="login-error" id="login-error"></div>
     <button id="login-btn" class="btn btn-primary">Giriş Yap</button>
     <button id="register-btn" class="btn btn-outline">Yeni Hesap Oluştur</button>
+    <button type="button" id="forgot-link" class="text-xs text-primary hover:underline self-center" style="display:none;">Şifremi unuttum</button>
     <div class="login-note">Geçmişin ve kararların ekip arkadaşlarına görünmez; bir ekibe eklenirsen panel yöneticileri (owner) aramalarını ve kararlarını görebilir. Aynı kelimeyi başkası da arayabilir. İlk kullanıcı kaydolduğunda panel kilitlenir.</div>
     <button id="dismiss-login-btn" class="btn btn-outline" style="display:none;">Vazgeç, girişsiz devam et</button>
+  </div>
+</div>
+
+<!-- Şifremi unuttum: e-posta → sıfırlama bağlantısı (yanıt hesap olsun olmasın aynı) -->
+<div id="forgot-overlay" class="login-overlay" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="forgot-title">
+  <form id="forgot-form" class="login-card" novalidate>
+    <div class="font-display text-lg font-semibold" id="forgot-title">Şifremi unuttum</div>
+    <div class="text-sm text-secondary">Kayıtlı e-posta adresini yaz; şifreni sıfırlaman için bir bağlantı gönderelim (60 dakika geçerli).</div>
+    <input type="email" id="forgot-email" class="field" maxlength="320" placeholder="e-posta" autocomplete="email" aria-label="E-posta">
+    <div class="login-error" id="forgot-msg"></div>
+    <button type="submit" class="btn btn-primary">Bağlantı gönder</button>
+    <button type="button" id="forgot-back" class="btn btn-outline">Girişe dön</button>
+  </form>
+</div>
+
+<!-- E-postadaki ?reset=KOD bağlantısı -->
+<div id="reset-overlay" class="login-overlay" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="reset-title">
+  <form id="reset-form" class="login-card" novalidate>
+    <div class="font-display text-lg font-semibold" id="reset-title">Yeni şifre belirle</div>
+    <div class="text-sm text-secondary">Şifren değişince tüm cihazlardaki oturumların kapanır; yeni şifrenle giriş yaparsın.</div>
+    <input type="password" id="reset-pass" class="field" placeholder="Yeni şifre (en az 6 karakter)" autocomplete="new-password" aria-label="Yeni şifre">
+    <input type="password" id="reset-pass2" class="field" placeholder="Yeni şifre (tekrar)" autocomplete="new-password" aria-label="Yeni şifre tekrar">
+    <div class="login-error" id="reset-msg"></div>
+    <button type="submit" class="btn btn-primary">Şifreyi kaydet</button>
+    <button type="button" id="reset-cancel" class="btn btn-outline">Vazgeç</button>
+  </form>
+</div>
+
+<!-- E-posta doğrulama kapısı (sunucu doğrulanmamış hesaba 403 + X-Email-Verify verir) -->
+<div id="verify-overlay" class="login-overlay" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="verify-title">
+  <div class="login-card">
+    <span class="material-symbols-outlined text-primary" style="font-size:36px" aria-hidden="true">mark_email_unread</span>
+    <div class="font-display text-lg font-semibold" id="verify-title">E-posta adresini doğrula</div>
+    <div class="text-sm text-secondary"><b id="verify-email" class="text-on-surface break-all"></b> adresine bir doğrulama bağlantısı gönderdik. Bağlantıya tıkladıktan sonra paneli kullanabilirsin. Gelen kutunda yoksa spam klasörüne bak.</div>
+    <div class="login-error" id="verify-msg"></div>
+    <button type="button" id="verify-check" class="btn btn-primary">Doğruladım, devam et</button>
+    <button type="button" id="verify-resend" class="btn btn-outline">Bağlantıyı tekrar gönder</button>
+    <button type="button" id="verify-logout" class="btn btn-outline">Çıkış yap</button>
+    <div class="login-note">Adresi yanlış yazdıysan panel yöneticisinden hesabı silmesini isteyip doğru adresle yeniden kaydolabilirsin.</div>
   </div>
 </div>
 
@@ -69,8 +109,19 @@
         <label class="pf-opt"><input type="radio" name="fm-kind" value="bulletin"><span>Bülten (güncel bilgi)</span></label>
       </div></fieldset>
     <label class="flex flex-col gap-1.5"><span class="eyebrow">Kategori</span><select id="fm-ed-cat" class="field"></select></label>
+    <div id="fm-ed-analysis" class="rounded-xl border border-primary/30 bg-surface-container-low p-3 flex flex-wrap items-center gap-2" style="display:none;"></div>
     <label class="flex flex-col gap-1.5"><span class="eyebrow">Başlık *</span><input type="text" id="fm-ed-name" class="field" maxlength="160" placeholder="Sorunu ya da konuyu tek cümlede yaz"></label>
-    <label class="flex flex-col gap-1.5"><span class="eyebrow">Metin *</span><textarea id="fm-ed-body" class="field !h-40 py-2" maxlength="10000" placeholder="Düz metin. Satır sonları korunur, linkler otomatik bağlantı olur."></textarea></label>
+    <fieldset id="fm-ed-qt" class="rounded-xl border border-hairline p-3 flex flex-col gap-2.5"><legend class="eyebrow px-1">Soru şablonu (önerilir — iyi cevap almanı kolaylaştırır)</legend>
+      <div class="grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_140px] gap-2.5">
+        <label class="flex flex-col gap-1"><span class="text-[11px] text-secondary">ASIN / keyword</span><input type="text" id="fm-qt-subject" class="field !h-9" maxlength="120" placeholder="B0… ya da magnetic tiles"></label>
+        <label class="flex flex-col gap-1"><span class="text-[11px] text-secondary">Pazar</span><select id="fm-qt-market" class="field !h-9"><option value="">—</option><option>US</option><option>UK</option><option>CA</option><option>DE</option><option>Diğer</option></select></label>
+      </div>
+      <label class="flex flex-col gap-1"><span class="text-[11px] text-secondary">Ne denedin?</span><textarea id="fm-qt-tried" class="field !h-16 py-1.5" maxlength="1000"></textarea></label>
+      <label class="flex flex-col gap-1"><span class="text-[11px] text-secondary">Ne bekliyordun / ne oldu?</span><textarea id="fm-qt-expect" class="field !h-16 py-1.5" maxlength="1000"></textarea></label>
+    </fieldset>
+    <label class="flex flex-col gap-1.5"><span class="eyebrow">Metin *</span><textarea id="fm-ed-body" class="field !h-40 py-2" maxlength="10000" placeholder="Sorunu ya da konuyu anlat…"></textarea>
+      <span class="fm-format-hint text-[11px] text-secondary">**kalın** · `kod` · ``` kod bloğu ``` · satır başında - liste · @kullanıcıadı ile bahset · görsel yapıştırabilirsin</span></label>
+    <div><div class="eyebrow mb-1.5">Görseller (en fazla 4)</div><div id="fm-ed-images"></div></div>
     <label class="flex flex-col gap-1.5"><span class="eyebrow">Etiketler (en fazla 5)</span><input type="text" id="fm-ed-tags" class="field" maxlength="200" placeholder="#PPC #ACOS #SellerSprite"><span class="text-[11px] text-secondary">Boşluk ya da virgülle ayır; harf, rakam, - _ . + kullanılabilir.</span></label>
     <fieldset><legend class="eyebrow mb-2">Görünürlük</legend>
       <div class="flex flex-wrap gap-2">
@@ -131,6 +182,14 @@
         <input type="text" id="global-search-input" class="field w-full !h-9 !pl-8 !bg-surface-container-low !border-transparent" placeholder="ASIN veya keyword analiz et…" aria-label="ASIN veya keyword analiz et">
       </form>
       <span id="data-state-chip" class="chip chip-dot na hidden sm:inline-flex">Veri bekleniyor</span>
+      <div class="relative" id="nt-wrap" style="display:none;">
+        <button type="button" id="nt-btn" class="icon-btn !w-9 !h-9 relative" aria-label="Bildirimler" aria-haspopup="dialog" aria-expanded="false"><span class="material-symbols-outlined">notifications</span><span id="nt-badge" class="nt-badge" style="display:none;"></span></button>
+        <div id="nt-panel" class="nt-panel" style="display:none;" role="dialog" aria-label="Bildirimler">
+          <div class="flex items-center justify-between gap-2 px-4 py-3 border-b border-hairline"><span class="font-display font-semibold">Bildirimler</span>
+            <button type="button" id="nt-all" class="text-xs text-primary hover:underline">Tümünü okundu say</button></div>
+          <div id="nt-list" class="nt-list"></div>
+        </div>
+      </div>
       <span class="text-xs text-secondary truncate max-w-[40vw]" id="user-chip"></span>
       <button id="open-login-btn" class="btn btn-outline btn-sm"><span class="material-symbols-outlined">login</span>Giriş / Kayıt</button>
       <button id="logout-btn" class="btn btn-outline btn-sm" style="display:none;"><span class="material-symbols-outlined">logout</span>Çıkış</button>
@@ -1022,10 +1081,15 @@
                   <button type="button" class="tab-btn" data-tab="solved" role="tab">Çözülenler</button>
                   <button type="button" class="tab-btn" data-tab="hot" role="tab">Sıcak</button>
                   <button type="button" class="tab-btn" data-tab="bulletins" role="tab">Bültenler</button>
+                  <button type="button" class="tab-btn" data-tab="unanswered" role="tab">Cevapsız <span id="fm-unans-count" class="fm-tab-count"></span></button>
+                  <button type="button" class="tab-btn" data-tab="unread" role="tab">Okunmamış <span id="fm-unread-count" class="fm-tab-count"></span></button>
                 </div>
               </div>
               <div id="fm-cats" class="flex gap-2 overflow-x-auto pb-1 max-w-full"></div>
-              <div id="fm-filters" class="flex flex-wrap gap-2 empty:hidden"></div>
+              <div class="flex flex-wrap items-center gap-2">
+                <div id="fm-filters" class="flex flex-wrap gap-2 empty:hidden"></div>
+                <button type="button" id="fm-read-all" class="ml-auto text-xs text-primary hover:underline">Tümünü okundu say</button>
+              </div>
             </div>
 
             <div class="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_300px] gap-6 mt-4">
@@ -1050,6 +1114,13 @@
                 <div class="card card-pad">
                   <h3 class="font-display font-semibold">Popüler Etiketler</h3>
                   <div id="fm-tags" class="flex flex-wrap gap-1.5 mt-3"></div>
+                </div>
+                <div class="card card-pad" id="fm-mod-card" style="display:none;">
+                  <h3 class="font-display font-semibold">Moderasyon <span class="text-xs text-secondary font-normal">· owner/admin</span></h3>
+                  <button type="button" id="fm-stale" class="w-full text-left rounded-lg bg-surface-container-low p-3 mt-3 hover:bg-surface-container">
+                    <div class="eyebrow">24 saattir cevapsız soru</div><div id="fm-stale-count" class="font-display text-[22px] font-medium tabular mt-1">—</div></button>
+                  <div class="flex items-center justify-between gap-2 mt-4"><span class="eyebrow">Bildirilen içerikler</span><span id="fm-rep-count" class="chip na !text-[10px]">0</span></div>
+                  <div id="fm-reports" class="flex flex-col gap-2 mt-2"></div>
                 </div>
                 <div class="card card-pad" id="fm-cat-admin" style="display:none;">
                   <h3 class="font-display font-semibold">Kategoriler <span class="text-xs text-secondary font-normal">· yalnızca owner</span></h3>
@@ -1102,6 +1173,7 @@
             <button type="button" class="tab-btn active" data-tab="form" role="tab">Yetenek &amp; Çalışma Profili</button>
             <button type="button" class="tab-btn" data-tab="personal" role="tab">Kişisel Bilgiler &amp; İletişim</button>
             <button type="button" class="tab-btn" data-tab="security" role="tab">Hesap &amp; Güvenlik</button>
+            <button type="button" class="tab-btn" data-tab="notif" role="tab">Bildirim Ayarları</button>
           </div>
           <div id="pf-status" class="status-line mt-4"></div>
 
@@ -1150,6 +1222,17 @@
           </div>
 
           <!-- Hesap & güvenlik -->
+          <div id="pf-pane-notif" class="pf-pane" style="display:none;">
+            <form id="np-form" class="card card-pad mt-4 flex flex-col gap-4" novalidate>
+              <div><div class="eyebrow">E-posta bildirimleri</div>
+                <p id="np-intro" class="text-sm text-secondary mt-1"></p></div>
+              <label class="pf-check"><input type="checkbox" id="np-off"><span><b>Tüm e-posta bildirimlerini kapat</b> <span class="text-secondary">(panel içi bildirimler sürer)</span></span></label>
+              <fieldset id="np-groups" class="flex flex-col gap-2"><legend class="text-[13px] font-semibold mb-1">Anlık e-posta gönderilsin:</legend></fieldset>
+              <label class="pf-check"><input type="checkbox" id="np-weekly"><span><b>Haftalık özet</b> <span class="text-secondary">— pazartesi sabahı: okunmamış bildirimlerin, haftanın bültenleri ve cevap bekleyen sorular</span></span></label>
+              <div class="flex flex-wrap items-center gap-3"><button type="submit" class="btn btn-primary"><span class="material-symbols-outlined">save</span>Kaydet</button><span id="np-msg" class="text-xs"></span></div>
+              <p class="text-[11px] text-secondary">Aynı başlık için 30 dakika içinde birden fazla anlık e-posta gönderilmez; kaçırdıkların haftalık özete girer.</p>
+            </form>
+          </div>
           <div id="pf-pane-security" class="pf-pane" style="display:none;">
             <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
               <div class="card card-pad">
@@ -1426,6 +1509,7 @@
           <button class="export-report-btn btn btn-outline" title="Tam raporu Excel olarak indir"><span class="material-symbols-outlined">description</span>Rapor İndir</button>
           <button class="export-keywords-btn btn btn-outline" title="Sadece keyword tablosunu Excel olarak indir"><span class="material-symbols-outlined">table_view</span>Keyword Tablosu İndir</button>
           <button class="lr-start-btn btn btn-outline" title="Bu analizin ana keyword verisi ve iade oranıyla lansman raporu formunu aç (MCP çağrısı yapmaz)"><span class="material-symbols-outlined">rocket_launch</span>Lansman Raporu</button>
+          <button class="fm-discuss-btn btn btn-outline" style="display:none;" title="Bu analizi forumda tartışmaya aç (analiz özeti başlığa eklenir)"><span class="material-symbols-outlined">forum</span>Forumda Tartış</button>
           <button class="ck-start-btn btn btn-primary" title="Bu analizin anlık kopyasıyla araştırma kontrol listesi oluştur (MCP çağrısı yapmaz)"><span class="material-symbols-outlined">checklist</span>Kontrol Listesi Başlat</button>
         </div>
       </div>

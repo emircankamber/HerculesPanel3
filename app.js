@@ -21,10 +21,12 @@ async function apiFetch(url, options = {}) {
     showLogin("Oturumunuz sona erdi — lütfen tekrar giriş yapın.");
   }
   if (res.status === 428) showNameGate();   // ad soyad girilmemiş eski hesap (kapı sunucuda)
+  if (res.status === 403 && res.headers.get("X-Email-Verify")) showVerifyGate();   // e-posta doğrulanmamış (kapı sunucuda)
   return res;
 }
 
 let authRequiredGlobal = false;
+let emailEnabledGlobal = false;   // e-posta servisi açık mı ("Şifremi unuttum" bağlantısı)
 // Oturumdaki kullanıcı (yalnızca GÖRÜNÜM için; tüm yetki kontrolleri sunucuda yapılır)
 let currentUser = { role: null, user_id: null, email: null, name: null };
 
@@ -58,6 +60,46 @@ function clearInvite() { try { sessionStorage.removeItem(INVITE_KEY); } catch { 
 })();
 function inviteCode() { return pendingInvite() || window.__plInvite || ""; }
 
+// --- E-postadaki bağlantılar: ?verify=KOD (doğrulama) ve ?reset=KOD (şifre sıfırlama) — adres çubuğundan hemen silinir.
+const MAIL_LINK = (() => {
+  try {
+    const u = new URL(location.href);
+    const out = { verify: (u.searchParams.get("verify") || "").trim(), reset: (u.searchParams.get("reset") || "").trim() };
+    if (out.verify || out.reset) {
+      u.searchParams.delete("verify"); u.searchParams.delete("reset");
+      history.replaceState(null, "", u.pathname + (u.search || "") + u.hash);
+    }
+    return out;
+  } catch { return { verify: "", reset: "" }; }
+})();
+
+function showVerifyGate(email = currentUser.email) {
+  const o = document.getElementById("verify-overlay");
+  if (!o || o.style.display === "flex") return;
+  document.getElementById("verify-email").textContent = email || "e-posta";
+  document.getElementById("verify-msg").textContent = "";
+  o.style.display = "flex";
+}
+async function postJson(url, body, auth = false) {
+  const res = await (auth ? apiFetch : fetch)(`${API_BASE}${url}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+  const b = await res.json().catch(() => ({}));
+  if (!res.ok) { const e = new Error(apiErrorText(b, res.status)); e.status = res.status; throw e; }
+  return b;
+}
+/** Doğrulama bağlantısı oturum durumu OKUNMADAN önce işlenir (yoksa doğrulama ekranı açık kalır). */
+async function handleVerifyLink() {
+  if (!MAIL_LINK.verify) return;
+  try { await postJson("/api/auth/verify", { token: MAIL_LINK.verify }); showNotice("E-posta adresin doğrulandı — teşekkürler!"); }
+  catch (err) { showNotice(err.message, "warn"); }
+  MAIL_LINK.verify = "";
+}
+function handleResetLink() {
+  if (MAIL_LINK.reset) {
+    document.getElementById("reset-overlay").style.display = "flex";
+    setTimeout(() => document.getElementById("reset-pass")?.focus(), 0);
+  }
+}
+
 function showNotice(text, kind = "") {
   const el = document.getElementById("app-notice");
   if (!el) return;
@@ -65,6 +107,92 @@ function showNotice(text, kind = "") {
   el.className = `app-notice ${kind}`.trim();
   el.style.display = "flex";
 }
+// ---------------------------------------------------------------------------
+// Bildirim zili — GET /api/notifications[/count], POST /api/notifications/read. Yalnızca kendi bildirimlerin.
+// Sekme açıkken ~60 sn'de bir yoklanır; ileride e-posta / web push / Slack aynı kayıtlardan beslenecek.
+// ---------------------------------------------------------------------------
+const NT_ICON = { reply: "forum", follow_reply: "bookmark", mention: "alternate_email", solution: "verified",
+                  vote: "thumb_up", bulletin: "campaign", lesson: "school", report: "flag" };
+const ntState = { timer: null, open: false };
+function ntSetBadge(n) {
+  const b = document.getElementById("nt-badge");
+  if (b) { b.textContent = n > 99 ? "99+" : String(n || ""); b.style.display = n ? "" : "none"; }
+  const btn = document.getElementById("nt-btn");
+  if (btn) btn.setAttribute("aria-label", n ? `Bildirimler (${n} okunmamış)` : "Bildirimler");
+}
+async function ntPoll() {
+  if (!currentUser.role || document.hidden) return;
+  try {
+    const r = await apiFetch(`${API_BASE}/api/notifications/count`);
+    if (r.ok) ntSetBadge((await r.json()).unread);
+  } catch { /* ağ hatası: bir sonraki yoklamada */ }
+}
+function ntStart() {
+  const wrap = document.getElementById("nt-wrap");
+  if (wrap) wrap.style.display = currentUser.role ? "" : "none";
+  clearInterval(ntState.timer);
+  if (!currentUser.role) { ntSetBadge(0); return; }
+  ntPoll();
+  ntState.timer = setInterval(ntPoll, 60000);
+}
+async function ntLoad() {
+  const list = $("#nt-list");
+  list.innerHTML = `<div class="px-4 py-6 text-sm text-secondary">yükleniyor…</div>`;
+  try {
+    const d = await pfApi("/api/notifications");
+    ntSetBadge(d.unread);
+    list.innerHTML = d.items.length ? d.items.map(n => `<button type="button" class="nt-item ${n.read ? "" : "unread"}" data-id="${esc(n.id)}">
+        <span class="material-symbols-outlined text-primary !text-[20px] shrink-0" aria-hidden="true">${NT_ICON[n.kind] || "notifications"}</span>
+        <span class="min-w-0 flex-1"><span class="block text-[13px] leading-snug break-words">${esc(n.text)}</span>
+          ${n.excerpt ? `<span class="block text-[12px] text-secondary mt-0.5 line-clamp-2 break-words">${esc(fmPlain(n.excerpt))}</span>` : ""}
+          <span class="block text-[11px] text-secondary mt-0.5">${esc(fmAgo(n.created_at))}</span></span>
+        ${n.read ? "" : `<span class="nt-dot" aria-label="okunmamış"></span>`}</button>`).join("")
+      : `<div class="px-4 py-8 text-sm text-secondary text-center">Henüz bildirim yok.</div>`;
+    $$(".nt-item", list).forEach(b => b.addEventListener("click", () => ntGo(d.items.find(x => x.id === Number(b.dataset.id)))));
+  } catch (err) { list.innerHTML = `<div class="px-4 py-6 text-sm text-error">${esc(err.message)}</div>`; }
+}
+function ntToggle(open = !ntState.open) {
+  ntState.open = open;
+  $("#nt-panel").style.display = open ? "" : "none";
+  $("#nt-btn").setAttribute("aria-expanded", String(open));
+  if (open) ntLoad();
+}
+async function ntGo(n) {
+  ntToggle(false);
+  if (!n.read) { pfApi("/api/notifications/read", { method: "POST", body: JSON.stringify({ ids: [n.id] }) }).then(ntPoll).catch(() => {}); }
+  if (n.thread_id) {
+    fmState.pendingOpen = { id: n.thread_id, reply: n.reply_id };   // loadForum açar (liste yüklemesiyle yarışmasın)
+    showView("forum");
+  } else if (n.lesson_id) {
+    showView("training");
+  }
+}
+(function initNotifications() {
+  // Bu blok dosyanın başında çalışır ($ yardımcısı henüz tanımlı değil) → getElementById
+  if (!document.getElementById("nt-btn")) return;
+  document.getElementById("nt-btn").addEventListener("click", (e) => { e.stopPropagation(); ntToggle(); });
+  document.getElementById("nt-all").addEventListener("click", async () => {
+    try { await pfApi("/api/notifications/read", { method: "POST", body: JSON.stringify({ all: true }) }); ntLoad(); } catch { /* yok say */ }
+  });
+  document.addEventListener("click", (e) => { if (ntState.open && !e.target.closest("#nt-wrap")) ntToggle(false); });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && ntState.open) ntToggle(false); });
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) ntPoll(); });
+})();
+
+/** Ürün Analizi → "Forumda Tartış": analiz özeti sunucuda kayıttan alınır (istemci değer göndermez). */
+async function discussAnalysisInForum(data) {
+  const key = ckAnalysisKey(data), market = data.marketplace;
+  const label = (data.analysis_mode === "asin" && data.asin_info?.title) || data.keyword;
+  showView("forum");
+  await fmLoadMeta();
+  const v = data.pre_assessment?.verdict;
+  fmOpenEditor(null, {
+    analysis: { key, marketplace: market, label }, kind: "discussion", categoryName: "Ürün Araştırma & ASIN Doğrulama",
+    title: `${data.analysis_mode === "asin" ? data.asin : data.keyword} (${market}) — bu ürüne girilir mi?`.slice(0, 160),
+    body: `${v ? `Panelin ön önerisi: ${v}.\n` : ""}Görüşlerinizi bekliyorum: `,
+  });
+}
+
 function setTeamBadge(n) {
   const b = document.getElementById("nav-team-badge");
   if (b) { b.textContent = n > 99 ? "99+" : String(n || ""); b.style.display = n ? "" : "none"; }
@@ -96,12 +224,16 @@ async function checkAuthStatus() {
     const res = await apiFetch(`${API_BASE}/api/auth/status`);
     const s = await res.json();
     authRequiredGlobal = !!s.auth_required;
+    emailEnabledGlobal = !!s.email_enabled;
+    const fl = document.getElementById("forgot-link"); if (fl) fl.style.display = emailEnabledGlobal ? "" : "none";
     currentUser = { role: s.role || null, user_id: s.user_id || null, email: s.email || null, name: s.name || null };
     const profNav = document.querySelector('.nav-btn[data-view="profile"]');
     if (profNav) profNav.style.display = s.logged_in && s.role ? "" : "none";
     const forumNav = document.querySelector('.nav-btn[data-view="forum"]');
     if (forumNav) forumNav.style.display = s.logged_in && s.role ? "" : "none";
     if (s.logged_in && s.needs_name) showNameGate();
+    if (s.logged_in && s.needs_verify) showVerifyGate(s.email);
+    ntStart();
     // Ekip Aktivitesi menüsü yalnızca owner'a görünür (yetki yine sunucuda: diğerleri 403)
     const teamNav = document.querySelector('.nav-btn[data-view="team"]');
     if (teamNav) teamNav.style.display = currentUser.role === "owner" ? "" : "none";
@@ -170,6 +302,8 @@ async function doAuth(endpoint) {
     }
     setToken(body.token);
     hideLogin();
+    err.style.color = "";
+    if (endpoint === "register" && body.needs_verify && !body.verify_sent) showNotice("Doğrulama e-postası şu an gönderilemedi — açılan ekrandan tekrar gönderebilirsin.", "warn");
     await checkAuthStatus();
     if ($("#view-home")?.classList.contains("active")) loadHome();
     if ($("#view-training")?.classList.contains("active")) loadTraining();
@@ -204,6 +338,56 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("ng-logout")?.addEventListener("click", async () => {
     await apiFetch(`${API_BASE}/api/auth/logout`, { method: "POST" }); setToken(""); location.reload();
   });
+  // --- E-posta doğrulama kapısı ---
+  document.getElementById("verify-logout")?.addEventListener("click", async () => {
+    await fetch(`${API_BASE}/api/auth/logout`, { method: "POST", headers: { Authorization: `Bearer ${getToken()}` } }); setToken(""); location.reload();
+  });
+  document.getElementById("verify-check")?.addEventListener("click", async () => {
+    const r = await fetch(`${API_BASE}/api/auth/status`, { headers: { Authorization: `Bearer ${getToken()}` } });
+    const s = await r.json().catch(() => ({}));
+    if (s.needs_verify) { document.getElementById("verify-msg").textContent = "Henüz doğrulanmamış görünüyor — e-postadaki bağlantıya tıkladın mı?"; return; }
+    location.reload();
+  });
+  document.getElementById("verify-resend")?.addEventListener("click", async (e) => {
+    const btn = e.currentTarget, msg = document.getElementById("verify-msg"); btn.disabled = true;
+    try {
+      const r = await fetch(`${API_BASE}/api/auth/resend-verification`, { method: "POST", headers: { Authorization: `Bearer ${getToken()}` } });
+      const b = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(apiErrorText(b, r.status));
+      msg.style.color = "var(--primary)"; msg.textContent = b.already ? "Adresin zaten doğrulanmış — devam edebilirsin." : "Gönderildi — gelen kutunu kontrol et.";
+    } catch (err) { msg.style.color = ""; msg.textContent = err.message; }
+    finally { setTimeout(() => { btn.disabled = false; }, 30000); }
+  });
+  // --- Şifremi unuttum / sıfırlama ---
+  document.getElementById("forgot-link")?.addEventListener("click", () => {
+    document.getElementById("forgot-email").value = document.getElementById("login-email").value.trim();
+    document.getElementById("forgot-msg").textContent = "";
+    document.getElementById("forgot-overlay").style.display = "flex";
+  });
+  document.getElementById("forgot-back")?.addEventListener("click", () => { document.getElementById("forgot-overlay").style.display = "none"; });
+  document.getElementById("forgot-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const msg = document.getElementById("forgot-msg"), email = document.getElementById("forgot-email").value.trim();
+    if (!email) { msg.textContent = "E-posta adresini yaz."; return; }
+    const btn = e.submitter; if (btn) btn.disabled = true;
+    try { const b = await postJson("/api/auth/forgot", { email }); msg.style.color = "var(--primary)"; msg.textContent = b.message; }
+    catch (err) { msg.style.color = ""; msg.textContent = err.message; }
+    finally { if (btn) btn.disabled = false; }
+  });
+  document.getElementById("reset-cancel")?.addEventListener("click", () => { document.getElementById("reset-overlay").style.display = "none"; MAIL_LINK.reset = ""; });
+  document.getElementById("reset-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const msg = document.getElementById("reset-msg"), p1 = document.getElementById("reset-pass").value, p2 = document.getElementById("reset-pass2").value;
+    if (p1.length < 6) { msg.textContent = "Şifre en az 6 karakter olmalı."; return; }
+    if (p1 !== p2) { msg.textContent = "Şifreler aynı değil."; return; }
+    try {
+      await postJson("/api/auth/reset", { token: MAIL_LINK.reset, password: p1 });
+      MAIL_LINK.reset = ""; setToken("");
+      document.getElementById("reset-overlay").style.display = "none";
+      showLogin("Şifren değiştirildi — yeni şifrenle giriş yap.");
+      document.getElementById("login-error").style.color = "var(--primary)";
+    } catch (err) { msg.textContent = err.message; }
+  });
   const noticeClose = document.getElementById("app-notice-close");
   if (noticeClose) noticeClose.addEventListener("click", () => { document.getElementById("app-notice").style.display = "none"; });
   if (logoutBtn) logoutBtn.addEventListener("click", async () => {
@@ -220,8 +404,11 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // Ana Sayfa varsayılan görünüm: yalnızca DB okuyan uçlar (MCP çağrısı YOK).
   // Giriş zorunlu ve oturum yoksa 401 yerine önce girişi bekle.
-  checkAuthStatus().then(s => {
+  handleVerifyLink().then(checkAuthStatus).then(s => {
+    handleResetLink();
     if (s && s.auth_required && !s.logged_in) return;
+    if (s && s.logged_in && s.role && location.hash === "#training") { showView("training"); return; }
+    if (s && s.logged_in && s.role && location.hash === "#bildirim-ayarlari") { pfState.tab = "notif"; showView("profile"); return; }
     if (s && s.logged_in && s.role && /^#forum\/\d+$/.test(location.hash)) { showView("forum"); return; }   // doğrudan başlık linki
     if ($("#view-home")?.classList.contains("active")) loadHome();
   });
@@ -976,6 +1163,9 @@ function renderPanel(data) {
 
   // --- Kontrol listesi başlat (sunucu, kayıtlı analizin ANLIK KOPYASINI alır; MCP çağrısı yok) ---
   root.querySelector(".ck-start-btn").addEventListener("click", (e) => startChecklist(data, e.currentTarget));
+  const discussBtn = root.querySelector(".fm-discuss-btn");
+  discussBtn.style.display = currentUser.role ? "" : "none";
+  discussBtn.addEventListener("click", () => discussAnalysisInForum(data));
   root.querySelector(".lr-start-btn").addEventListener("click", () => openLaunchReport(data));
 
   const container = $("#result-container");
@@ -3043,17 +3233,21 @@ function renderTraining() {
           placeholder="Bu ders / videodan edindiğin kazanımları ve öğrendiklerini yaz…">${esc(l.my_note || "")}</textarea>
         <div class="flex flex-wrap items-center justify-between gap-2">
           <span class="trn-note-status text-[11px] text-secondary">${l.my_note_at ? `Kaydedildi · ${esc(fmtStamp(l.my_note_at))}` : "Owner/admin bu notu görebilir."}</span>
-          <button type="button" class="trn-note-save btn btn-outline btn-sm" disabled><span class="material-symbols-outlined">save</span>Notu kaydet</button>
+          <span class="flex flex-wrap gap-1.5">
+            <button type="button" class="trn-note-share btn btn-outline btn-sm" ${l.my_note ? "" : "disabled"} title="Notunu dersin soru-cevap başlığına cevap olarak paylaş (isteğe bağlı)"><span class="material-symbols-outlined">share</span>Başlıkta paylaş</button>
+            <button type="button" class="trn-note-save btn btn-outline btn-sm" disabled><span class="material-symbols-outlined">save</span>Notu kaydet</button></span>
         </div>
       </div>
       <div class="flex flex-wrap items-center justify-between gap-2 mt-auto pt-2 border-t border-hairline">
         <span class="text-xs text-secondary">${l.completed ? `Tamamlanma: ${esc(fmtStamp(l.completed_at))}` : "Henüz tamamlanmadı"}</span>
+        <button type="button" class="trn-qa btn btn-outline btn-sm ml-auto" title="Bu dersin forumdaki soru-cevap başlığı"><span class="material-symbols-outlined">forum</span>Soru-Cevap${l.discussion ? ` · ${fmtNum(l.discussion.replies)}` : ""}</button>
         <button type="button" class="trn-toggle btn ${l.completed ? "btn-outline" : "btn-primary"} btn-sm">
           <span class="material-symbols-outlined">${l.completed ? "undo" : "task_alt"}</span>${l.completed ? "Geri al" : "Tamamladım"}</button>
       </div>`;
     const play = card.querySelector(".trn-play");
     if (play) play.addEventListener("click", () => embedYouTube(play.parentElement, play.dataset.yt));
     bindLessonNote(card, l);
+    card.querySelector(".trn-qa").addEventListener("click", (e) => openLessonDiscussion(l, e.currentTarget));
     card.querySelector(".trn-toggle").addEventListener("click", async (e) => {
       const btn = e.currentTarget; btn.disabled = true;
       try {
@@ -3190,12 +3384,34 @@ async function saveLesson(e) {
   finally { $("#trn-f-save").disabled = false; }
 }
 
+/** Dersin soru-cevap başlığı: POST …/discussion (yoksa oluşturur) → foruma git. shareText verilirse cevap olarak ekler. */
+async function openLessonDiscussion(l, btn, shareText = "") {
+  const old = btn.innerHTML; btn.disabled = true;
+  try {
+    const r = await pfApi(`/api/training/lessons/${encodeURIComponent(l.id)}/discussion`, { method: "POST" });
+    let reply = null;
+    if (shareText) {
+      const x = await pfApi(`/api/forum/threads/${r.thread_id}/replies`, { method: "POST", body: JSON.stringify({ body: `**Kazanımlarım:**\n${shareText}` }) });
+      reply = x.id;
+    }
+    fmState.pendingOpen = { id: r.thread_id, reply };
+    showView("forum");
+  } catch (err) {
+    $("#trn-status").textContent = `Hata: ${err.message}`; $("#trn-status").className = "status-line error mt-4";
+  } finally { btn.disabled = false; btn.innerHTML = old; }
+}
+
 // --- Kazanım notu (kişinin KENDİ notu; PUT /api/training/lessons/{id}/note) ---
 const TRN_NOTE_MAX = 4000;
 function bindLessonNote(card, l) {
   const ta = card.querySelector(".trn-note-input"), btn = card.querySelector(".trn-note-save");
   const st = card.querySelector(".trn-note-status");
+  const share = card.querySelector(".trn-note-share");
   let saved = l.my_note || "";
+  share.addEventListener("click", () => {
+    if (!saved) return;
+    if (confirm("Kazanım notun dersin soru-cevap başlığına cevap olarak eklensin mi? Başlığı ekibindekiler görebilir.")) openLessonDiscussion(l, share, saved);
+  });
   ta.addEventListener("input", () => {
     const dirty = ta.value.trim() !== saved;
     btn.disabled = !dirty;
@@ -3211,6 +3427,7 @@ function bindLessonNote(card, l) {
       const b = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(apiErrorText(b, r.status));
       saved = b.note || ""; l.my_note = saved; l.my_note_at = b.updated_at;
+      share.disabled = !saved;
       ta.value = saved;
       st.textContent = saved ? `Kaydedildi · ${fmtStamp(b.updated_at)}` : "Not silindi.";
       st.className = "trn-note-status text-[11px] text-primary";
@@ -4504,6 +4721,7 @@ async function loadProfile() {
     if (!pfState.dirty) { pfState.form = f; cfRender($("#pf-form"), sch, f.answers, { prefix: "pf", progress: f.progress }); }
     pfRenderFormMeta(); pfRenderNav();
     pfSelectTab(pfState.tab);
+    npLoad();
     st.textContent = ""; st.className = "status-line mt-4";
   } catch (err) { st.textContent = `Hata: ${err.message}`; st.className = "status-line mt-4 error"; }
 }
@@ -4581,8 +4799,39 @@ async function pfSave() {
   if (pfState.dirty) pfScheduleSave();
 }
 
+// --- Bildirim Ayarları (GET/PUT /api/notification-prefs — yalnızca kendi ayarın) ---
+async function npLoad() {
+  const intro = $("#np-intro"), box = $("#np-groups");
+  try {
+    const d = await pfApi("/api/notification-prefs");
+    const p = d.prefs;
+    intro.textContent = !d.email_enabled ? "E-posta servisi henüz yapılandırılmadı — ayarların kaydedilir, servis açılınca geçerli olur."
+      : !d.email_verified ? `E-postan (${d.email}) doğrulanmadığı için şu an e-posta gönderilmiyor.`
+      : `E-postalar ${d.email} adresine gider.`;
+    box.innerHTML = `<legend class="text-[13px] font-semibold mb-1">Anlık e-posta gönderilsin:</legend>` + Object.entries(d.groups)
+      .filter(([g]) => g !== "report" || d.is_staff)
+      .map(([g, label]) => `<label class="pf-check"><input type="checkbox" data-g="${esc(g)}" ${p.instant[g] ? "checked" : ""}><span>${esc(label)}</span></label>`).join("");
+    $("#np-off").checked = p.email_off; $("#np-weekly").checked = p.weekly;
+    npSyncDisabled();
+  } catch (err) { intro.textContent = `Yüklenemedi: ${err.message}`; }
+}
+function npSyncDisabled() {
+  const off = $("#np-off").checked;
+  $$("#np-groups input, #np-weekly").forEach(i => { i.disabled = off; });
+}
+
 (function initProfile() {
   if (!$("#view-profile")) return;
+  $("#np-off").addEventListener("change", npSyncDisabled);
+  $("#np-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const msg = $("#np-msg"), instant = {};
+    $$("#np-groups input[data-g]").forEach(i => { instant[i.dataset.g] = i.checked; });
+    try {
+      await pfApi("/api/notification-prefs", { method: "PUT", body: JSON.stringify({ instant, weekly: $("#np-weekly").checked, email_off: $("#np-off").checked }) });
+      msg.className = "text-xs text-primary"; msg.textContent = "Kaydedildi.";
+    } catch (err) { msg.className = "text-xs text-error"; msg.textContent = err.message; }
+  });
   $$("#pf-tabs .tab-btn").forEach(b => b.addEventListener("click", () => pfSelectTab(b.dataset.tab)));
   const form = $("#pf-form");
   form.addEventListener("input", (e) => { if (e.target.matches("input[type=text], textarea")) pfScheduleSave(); });
@@ -4721,21 +4970,184 @@ function skRender(d) {
 // ("Sadece ekip üyeleri" başlıkları ekip dışına hiçbir uçta dönmez). Metin düz metin:
 // her parça esc() ile kaçırılır, yalnızca http/https linkleri <a rel="noopener noreferrer nofollow"> olur.
 // ===========================================================================
-const fmState = { tab: "all", saved: false, cat: null, tag: null, q: "", page: 1, meta: null, current: null, editing: null, timer: null };
+const fmState = { tab: "all", saved: false, cat: null, tag: null, q: "", page: 1, meta: null, current: null, editing: null, timer: null,
+                  focusReply: null, edAnalysis: null, edPicker: null };
 const FM_KIND_CLASS = { question: "na", discussion: "warn", bulletin: "ok" };
 const FM_URL_RE = /(https?:\/\/[^\s<>"'`]+)/g;
 
 /** Düz metni güvenli HTML'e çevirir: kaçırma + otomatik bağlantı (yalnızca http/https). */
-function forumText(text) {
-  return String(text ?? "").split(FM_URL_RE).map((part, i) => {
-    if (i % 2 === 0) return esc(part);
-    const m = part.match(/^(.*?)([.,;:!?)\]]*)$/);   // cümle sonu noktalaması linke dahil olmasın
-    const url = m[1], tail = m[2];
-    let ok = false;
-    try { const u = new URL(url); ok = u.protocol === "http:" || u.protocol === "https:"; } catch { ok = false; }
-    return ok ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer nofollow" class="text-primary underline break-all">${esc(url)}</a>${esc(tail)}` : esc(part);
+// --- Forum metni: sunucu DÜZ METİN saklar; burada her parça esc() ile kaçırılıp küçük bir biçim alt kümesi
+// uygulanır: http/https bağlantı, @kullanıcıadı, **kalın**, `kod`, ``` kod bloğu ```, "- " / "1. " listeler.
+// HTML ya da javascript: bağlantısı asla üretilmez.
+const FM_MENTION_RE = /(?<![\w@./])@([a-z0-9][a-z0-9._-]{1,28}[a-z0-9])/gi;
+function fmLink(part) {
+  const m = part.match(/^(.*?)([.,;:!?)\]]*)$/);   // cümle sonu noktalaması linke dahil olmasın
+  const url = m[1], tail = m[2];
+  let ok = false;
+  try { const u = new URL(url); ok = u.protocol === "http:" || u.protocol === "https:"; } catch { ok = false; }
+  return ok ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer nofollow" class="text-primary underline break-all">${esc(url)}</a>${esc(tail)}` : esc(part);
+}
+function forumText(text) {   // satır içi: `kod` parçaları dokunulmadan, diğerlerinde bağlantı / kalın / bahsetme
+  return String(text ?? "").split(/(`[^`\n]+`)/g).map((seg, i) => {
+    if (i % 2 === 1) return `<code class="fm-code">${esc(seg.slice(1, -1))}</code>`;
+    return seg.split(FM_URL_RE).map((part, j) => {
+      if (j % 2 === 1) return fmLink(part);
+      return esc(part).replace(/\*\*(?=\S)([^\n]*?\S)\*\*/g, "<strong>$1</strong>")
+        .replace(FM_MENTION_RE, '<span class="fm-mention">@$1</span>');
+    }).join("");
   }).join("");
 }
+function forumRich(text) {
+  const out = [], lines = String(text ?? "").split("\n");
+  let para = [], list = null, code = null;
+  const flushPara = () => { if (para.length) { out.push(`<div class="fm-p">${para.map(forumText).join("\n")}</div>`); para = []; } };
+  const flushList = () => { if (list) { out.push(`<${list.tag} class="fm-${list.tag}">${list.items.map(x => `<li>${forumText(x)}</li>`).join("")}</${list.tag}>`); list = null; } };
+  for (const line of lines) {
+    if (code) {
+      if (/^\s*```\s*$/.test(line)) { out.push(`<pre class="fm-pre"><code>${esc(code.join("\n"))}</code></pre>`); code = null; }
+      else code.push(line);
+      continue;
+    }
+    if (/^\s*```/.test(line)) { flushPara(); flushList(); code = []; continue; }
+    const ul = line.match(/^\s*[-*•]\s+(.*)$/), ol = line.match(/^\s*\d{1,3}[.)]\s+(.*)$/);
+    if (ul || ol) {
+      const tag = ul ? "ul" : "ol";
+      flushPara();
+      if (list && list.tag !== tag) flushList();
+      if (!list) list = { tag, items: [] };
+      list.items.push((ul || ol)[1]);
+      continue;
+    }
+    flushList();
+    para.push(line);
+  }
+  if (code) out.push(`<pre class="fm-pre"><code>${esc(code.join("\n"))}</code></pre>`);   // kapanmamış blok
+  flushPara(); flushList();
+  return out.join("");
+}
+/** Kart/özet metni: biçim işaretlerini at (önizlemede ** ve ``` görünmesin) */
+const fmPlain = (s) => String(s ?? "").replace(/```/g, "").replace(/\*\*/g, "").replace(/`/g, "");
+
+// --- Görseller: GET /api/forum/images/{id} yetkili istek ister → blob URL (önbellekli) ---
+const fmImgCache = new Map();
+async function fmImgUrl(id) {
+  if (!fmImgCache.has(id)) {
+    fmImgCache.set(id, (async () => {
+      const r = await apiFetch(`${API_BASE}/api/forum/images/${encodeURIComponent(id)}`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return URL.createObjectURL(await r.blob());
+    })().catch(err => { fmImgCache.delete(id); throw err; }));
+  }
+  return fmImgCache.get(id);
+}
+const fmImagesHtml = (ids) => ids?.length ? `<div class="fm-imgs">${ids.map(id => `<button type="button" class="fm-img-open" data-img="${esc(id)}" aria-label="Görseli büyüt"><img class="fm-img" data-fm-img="${esc(id)}" alt=""></button>`).join("")}</div>` : "";
+function fmHydrateImages(root) {
+  $$("img[data-fm-img]", root).forEach(img => {
+    fmImgUrl(Number(img.dataset.fmImg)).then(u => { img.src = u; }).catch(() => { img.alt = "görsel yüklenemedi"; });
+  });
+  $$(".fm-img-open", root).forEach(b => b.addEventListener("click", async () => {
+    try {
+      const u = await fmImgUrl(Number(b.dataset.img));
+      const lb = document.createElement("div");
+      lb.className = "fm-lightbox"; lb.setAttribute("role", "dialog"); lb.innerHTML = `<img src="${esc(u)}" alt="">`;
+      const close = () => { lb.remove(); document.removeEventListener("keydown", onKey); };
+      const onKey = (e) => { if (e.key === "Escape") close(); };
+      lb.addEventListener("click", close); document.addEventListener("keydown", onKey);
+      document.body.appendChild(lb);
+    } catch { /* görsel yüklenemedi */ }
+  }));
+}
+
+/** Görsel seçici: istemcide küçültür (en fazla 1600 px, WebP/JPEG), POST /api/forum/images, kimlikleri tutar. */
+const FM_IMG_MAX_SIDE = 1600;
+async function fmCompress(file, maxBytes) {
+  if (file.type === "image/gif" && file.size <= maxBytes) return file;   // hareketli GIF'i bozma
+  const bmp = await createImageBitmap(file);
+  const scale = Math.min(1, FM_IMG_MAX_SIDE / Math.max(bmp.width, bmp.height));
+  const cv = document.createElement("canvas");
+  cv.width = Math.round(bmp.width * scale); cv.height = Math.round(bmp.height * scale);
+  cv.getContext("2d").drawImage(bmp, 0, 0, cv.width, cv.height);
+  for (const q of [0.85, 0.72, 0.6, 0.45]) {
+    let blob = await new Promise(res => cv.toBlob(res, "image/webp", q));
+    if (!blob || blob.type !== "image/webp") blob = await new Promise(res => cv.toBlob(res, "image/jpeg", q));
+    if (blob && blob.size <= maxBytes) return blob;
+  }
+  throw new Error("Görsel çok büyük — daha küçük bir görsel deneyin.");
+}
+const fmToDataUrl = (blob) => new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = rej; fr.readAsDataURL(blob); });
+function fmImagePicker(box, initialIds = []) {
+  const lim = fmState.meta?.limits || { images_per_post: 4, image_max_bytes: 1500000 };
+  let ids = [...initialIds], busy = 0;
+  const render = () => {
+    box.innerHTML = `<div class="flex flex-wrap items-center gap-2">
+      ${ids.map(id => `<div class="fm-thumb"><img class="fm-img !w-24 !h-[72px]" data-fm-img="${esc(id)}" alt=""><button type="button" class="fm-img-rm" data-id="${esc(id)}" aria-label="Görseli kaldır"><span class="material-symbols-outlined !text-[14px]">close</span></button></div>`).join("")}
+      ${ids.length < lim.images_per_post ? `<label class="btn btn-outline btn-sm cursor-pointer"><span class="material-symbols-outlined">add_photo_alternate</span>${busy ? "yükleniyor…" : "Görsel ekle"}
+        <input type="file" class="hidden" accept="image/png,image/jpeg,image/gif,image/webp" multiple></label>` : ""}
+      <span class="fm-img-msg text-[11px] text-error"></span></div>`;
+    $$("img[data-fm-img]", box).forEach(img => fmImgUrl(Number(img.dataset.fmImg)).then(u => { img.src = u; }).catch(() => {}));
+    $$(".fm-img-rm", box).forEach(b => b.addEventListener("click", () => { ids = ids.filter(x => x !== Number(b.dataset.id)); render(); }));
+    box.querySelector("input[type=file]")?.addEventListener("change", (e) => { add([...e.target.files]); });
+  };
+  const add = async (files) => {
+    const msg = () => box.querySelector(".fm-img-msg");
+    for (const f of files.filter(f => /^image\/(png|jpeg|gif|webp)$/.test(f.type))) {
+      if (ids.length + busy >= lim.images_per_post) { if (msg()) msg().textContent = `En fazla ${lim.images_per_post} görsel.`; break; }
+      busy++; render();
+      try {
+        const blob = await fmCompress(f, lim.image_max_bytes);
+        const r = await fmApi("/api/forum/images", { method: "POST", body: JSON.stringify({ data: await fmToDataUrl(blob) }) });
+        ids.push(r.id);
+      } catch (err) { busy--; render(); if (msg()) msg().textContent = err.message; continue; }
+      busy--; render();
+    }
+  };
+  render();
+  return { ids: () => [...ids], add, busy: () => busy > 0 };
+}
+
+/** @bahsetme önerisi (GET /api/forum/people). Yazı imlecinden önceki "@parça" ile tetiklenir; ok/Enter/Tab/Esc. */
+function fmMentionAttach(ta, picker = null) {
+  const host = ta.parentElement;
+  if (getComputedStyle(host).position === "static") host.style.position = "relative";
+  let pop = null, items = [], active = 0, seq = 0, timer = null;
+  const close = () => { pop?.remove(); pop = null; items = []; };
+  const query = () => { const m = ta.value.slice(0, ta.selectionStart).match(/(?:^|[\s(])@([a-z0-9._-]{0,30})$/i); return m ? m[1] : null; };
+  const pick = (u) => {
+    const pos = ta.selectionStart, before = ta.value.slice(0, pos).replace(/@[a-z0-9._-]{0,30}$/i, `@${u} `);
+    ta.value = before + ta.value.slice(pos); ta.selectionStart = ta.selectionEnd = before.length;
+    close(); ta.focus(); ta.dispatchEvent(new Event("input"));
+  };
+  const draw = () => {
+    if (!items.length) { close(); return; }
+    if (!pop) { pop = document.createElement("div"); pop.className = "fm-mention-pop"; host.appendChild(pop); }
+    pop.style.top = `${ta.offsetTop + ta.offsetHeight + 4}px`; pop.style.left = `${ta.offsetLeft}px`;
+    pop.innerHTML = items.map((p, i) => `<button type="button" class="${i === active ? "active" : ""}" data-u="${esc(p.username)}"><b>@${esc(p.username)}</b> <span class="text-secondary">· ${esc(p.name)}</span></button>`).join("");
+    $$("button", pop).forEach(b => b.addEventListener("mousedown", (e) => { e.preventDefault(); pick(b.dataset.u); }));
+  };
+  ta.addEventListener("input", () => {
+    const q = query();
+    if (q === null) { close(); return; }
+    clearTimeout(timer);
+    timer = setTimeout(async () => {
+      const my = ++seq;
+      try { const d = await fmApi(`/api/forum/people?q=${encodeURIComponent(q)}`); if (my !== seq) return; items = d.people; active = 0; draw(); }
+      catch { close(); }
+    }, 180);
+  });
+  ta.addEventListener("keydown", (e) => {
+    if (!pop) return;
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); active = (active + (e.key === "ArrowDown" ? 1 : items.length - 1)) % items.length; draw(); }
+    else if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); pick(items[active].username); }
+    else if (e.key === "Escape") { e.stopPropagation(); close(); }
+  });
+  ta.addEventListener("blur", () => setTimeout(close, 150));
+  if (picker) ta.addEventListener("paste", (e) => {   // panodan görsel yapıştırma
+    const files = [...(e.clipboardData?.files || [])].filter(f => f.type.startsWith("image/"));
+    if (files.length) { e.preventDefault(); picker.add(files); }
+  });
+}
+const fmUsernameHint = () => fmState.meta && !fmState.meta.has_username
+  ? `<span class="text-[11px] text-secondary">Senden bahsedilebilmesi için <button type="button" class="text-primary hover:underline fm-go-profile">Profilim</button>'den kullanıcı adı belirle.</span>` : "";
 function fmAgo(ts) {
   if (!ts) return "";
   const d = Math.max(0, Date.now() / 1000 - ts);
@@ -4772,7 +5184,9 @@ async function loadForum() {
   $("#fm-body").style.display = logged ? "block" : "none";
   if (!logged) return;
   const m = location.hash.match(/^#forum\/(\d+)$/);
+  const pending = fmState.pendingOpen; fmState.pendingOpen = null;
   await fmLoadMeta();
+  if (pending) return fmOpen(pending.id, true, pending.reply);
   if (m) return fmOpen(Number(m[1]), false);
   fmShowList();
   await fmLoadList();
@@ -4805,6 +5219,33 @@ function fmRenderMeta() {
     : `<div class="text-xs text-secondary">Henüz etiket yok.</div>`;
   $("#fm-cat-admin").style.display = m.is_owner ? "" : "none";
   if (m.is_owner) fmRenderCatAdmin();
+  $("#fm-unans-count").textContent = m.unanswered ? fmtNum(m.unanswered) : "";
+  $("#fm-unread-count").textContent = m.unread ? fmtNum(m.unread) : "";
+  $("#fm-mod-card").style.display = m.is_staff ? "" : "none";
+  if (m.is_staff) {
+    $("#fm-stale-count").textContent = fmtNum(m.stale_unanswered || 0);
+    $("#fm-rep-count").textContent = fmtNum(m.open_reports || 0);
+    $("#fm-rep-count").className = `chip ${m.open_reports ? "bad" : "na"} !text-[10px]`;
+    fmLoadReports();
+  }
+}
+
+async function fmLoadReports() {
+  const box = $("#fm-reports");
+  try {
+    const d = await fmApi("/api/forum/reports");
+    box.innerHTML = d.items.length ? d.items.map(r => `<div class="rounded-lg border border-hairline p-2.5 text-[12px] min-w-0">
+        <button type="button" class="fm-open text-left font-semibold text-primary hover:underline break-words" data-id="${esc(r.thread_id)}" data-reply="${r.target_type === "reply" ? esc(r.target_id) : ""}">${esc(r.thread_title)}</button>
+        <div class="text-secondary mt-0.5">${r.target_type === "reply" ? "Cevap" : "Başlık"} · ${esc(r.reporter)} · ${esc(fmAgo(r.created_at))}</div>
+        <div class="mt-1 break-words"><b>Gerekçe:</b> ${esc(r.reason)}</div>
+        ${r.excerpt ? `<div class="mt-1 text-secondary line-clamp-2 break-words">${esc(fmPlain(r.excerpt))}</div>` : ""}
+        <button type="button" class="btn btn-outline btn-sm mt-2 fm-rep-done" data-id="${esc(r.id)}">İncelendi</button></div>`).join("")
+      : `<div class="text-xs text-secondary">Açık bildirim yok.</div>`;
+    $$(".fm-rep-done", box).forEach(b => b.addEventListener("click", async () => {
+      b.disabled = true;
+      try { await fmApi(`/api/forum/reports/${b.dataset.id}/resolve`, { method: "POST" }); await fmLoadMeta(); } catch (err) { b.disabled = false; alert(err.message); }
+    }));
+  } catch (err) { box.innerHTML = `<div class="text-xs text-error">${esc(err.message)}</div>`; }
 }
 
 function fmRenderFilters() {
@@ -4829,7 +5270,7 @@ async function fmLoadList() {
     const d = await fmApi(`/api/forum/threads?${p}`);
     fmState.page = d.page;
     $("#fm-list").innerHTML = d.items.length ? d.items.map(fmCardHtml).join("")
-      : `<div class="card card-pad text-sm text-secondary text-center py-10">${fmState.saved ? "Takip ettiğin başlık yok." : "Bu filtrede başlık yok."}</div>`;
+      : `<div class="card card-pad text-sm text-secondary text-center py-10">${fmState.saved ? "Takip ettiğin başlık yok." : fmState.tab === "unanswered" ? "Cevapsız soru yok — harika!" : fmState.tab === "unread" ? "Okunmamış başlık yok." : "Bu filtrede başlık yok."}</div>`;
     const from = d.total ? (d.page - 1) * d.page_size + 1 : 0, to = Math.min(d.total, d.page * d.page_size);
     $("#fm-pager").innerHTML = d.pages > 1 || d.total ? `<span class="text-xs text-secondary">${fmtNum(d.total)} başlıktan ${fmtNum(from)}–${fmtNum(to)} arası</span>
       <div class="flex gap-1.5">${d.page > 1 ? `<button type="button" class="btn btn-outline btn-sm fm-page" data-page="${d.page - 1}">Önceki</button>` : ""}
@@ -4838,14 +5279,19 @@ async function fmLoadList() {
   } catch (err) { fmSetStatus(st, `Hata: ${err.message}`, "error"); }
 }
 
+function fmUnreadChips(t) {
+  return (t.is_new ? `<span class="chip warn !text-[10px]">Yeni</span>` : "")
+    + (t.new_replies ? `<span class="chip warn !text-[10px]">${fmtNum(t.new_replies)} yeni cevap</span>` : "");
+}
 function fmCardHtml(t) {
-  return `<article class="card card-pad flex flex-col gap-3 min-w-0">
-    <div class="flex flex-wrap items-start justify-between gap-2">${fmAuthorHtml(t.author, t.created_at, ` • ${esc(t.category.name)}`)}<div class="flex flex-wrap gap-1 justify-end">${fmBadges(t)}</div></div>
+  return `<article class="card card-pad flex flex-col gap-3 min-w-0 ${t.is_new || t.new_replies ? "fm-new-reply" : ""}">
+    <div class="flex flex-wrap items-start justify-between gap-2">${fmAuthorHtml(t.author, t.created_at, ` • ${esc(t.category.name)}`)}<div class="flex flex-wrap gap-1 justify-end">${fmUnreadChips(t)}${fmBadges(t)}</div></div>
     <button type="button" class="text-left fm-open" data-id="${esc(t.id)}"><h3 class="font-display text-[18px] font-semibold leading-snug break-words hover:text-primary">${esc(t.title)}</h3></button>
-    <p class="text-[13.5px] text-on-surface-variant leading-relaxed break-words">${esc(t.excerpt)}</p>
+    ${t.analysis || t.lesson_id ? `<div class="flex flex-wrap gap-1.5">${t.analysis ? `<span class="chip ok !text-[10px]"><span class="material-symbols-outlined !text-[12px]" aria-hidden="true">monitoring</span>Analiz: ${esc(t.analysis.brief?.label || t.analysis.key)} · ${esc(t.analysis.marketplace || "")}</span>` : ""}${t.lesson_id ? `<span class="chip na !text-[10px]"><span class="material-symbols-outlined !text-[12px]" aria-hidden="true">school</span>Ders soru-cevap</span>` : ""}</div>` : ""}
+    <p class="text-[13.5px] text-on-surface-variant leading-relaxed break-words">${esc(fmPlain(t.excerpt))}</p>
     ${fmTagsHtml(t.tags)}
     ${t.solution ? `<div class="rounded-xl border border-primary/30 fm-sol p-3"><div class="flex flex-wrap items-center gap-1.5 text-[12px]"><span class="material-symbols-outlined text-primary !text-[16px]" aria-hidden="true">verified</span><b class="text-primary">Çözüm</b><span class="text-secondary">• ${esc(t.solution.author.name)}${t.solution.author.title ? ` (${esc(t.solution.author.title)})` : ""}</span></div>
-      <p class="text-[13px] mt-1 break-words">${esc(t.solution.excerpt)}</p></div>` : ""}
+      <p class="text-[13px] mt-1 break-words">${esc(fmPlain(t.solution.excerpt))}</p></div>` : ""}
     <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-secondary pt-2 border-t border-hairline">
       <span>${fmtNum(t.reply_count)} cevap</span><span>${fmtNum(t.views)} görüntülenme</span><span>${fmtNum(t.useful)} faydalı</span>
       <span class="ml-auto flex gap-1">${t.saved ? '<span class="chip ok !text-[10px]">Takipte</span>' : ""}<button type="button" class="btn btn-outline btn-sm fm-open" data-id="${esc(t.id)}">Aç</button></span></div>
@@ -4857,7 +5303,8 @@ function fmShowList() {
   $("#fm-list-mode").style.display = ""; $("#fm-detail-mode").style.display = "none";
   if (/^#forum\//.test(location.hash)) history.replaceState(null, "", location.pathname + location.search);
 }
-async function fmOpen(id, push = true) {
+async function fmOpen(id, push = true, focusReply = null) {
+  fmState.focusReply = focusReply;
   $("#fm-list-mode").style.display = "none"; $("#fm-detail-mode").style.display = "";
   if (push) history.pushState(null, "", `#forum/${id}`);
   const st = $("#fm-detail-status"); fmSetStatus(st, "yükleniyor…", "loading");
@@ -4865,30 +5312,62 @@ async function fmOpen(id, push = true) {
   try {
     fmState.current = await fmApi(`/api/forum/threads/${encodeURIComponent(id)}`);
     fmRenderDetail(); fmSetStatus(st, "");
+    ntPoll();   // başlığı açınca o başlığın bildirimleri okundu sayılır
+    if (fmState.focusReply) {
+      const el = document.getElementById(`fm-r-${fmState.focusReply}`);
+      if (el) { setTimeout(() => { el.scrollIntoView({ behavior: "smooth", block: "center" }); el.classList.add("fm-hl"); }, 50); fmState.focusReply = null; return; }
+    }
   } catch (err) {
     fmSetStatus(st, err.status === 404 ? "Başlık bulunamadı ya da görme yetkin yok." : `Hata: ${err.message}`, "error");
   }
-  window.scrollTo({ top: 0 });
+  if (!fmState.focusReply) window.scrollTo({ top: 0 });
+  fmState.focusReply = null;
+}
+
+function fmAnalysisHtml(a) {
+  if (!a) return "";
+  const b = a.brief || {}, v = b.values || {};
+  const cell = (label, val) => `<div><div class="text-secondary">${label}</div><div class="font-semibold text-sm tabular mt-0.5">${val}</div></div>`;
+  const vcls = { "Uygun": "ok", "Sınırda": "warn", "Elenmiş": "bad" }[b.verdict] || "na";
+  return `<div class="rounded-xl border border-primary/30 bg-surface-container-low p-4 flex flex-col gap-3">
+    <div class="flex flex-wrap items-center justify-between gap-2">
+      <div class="min-w-0"><div class="eyebrow text-primary">Bağlı analiz · ${esc(a.marketplace || "")}${b.mode === "asin" ? " · ASIN" : ""}</div>
+        <div class="font-semibold break-words mt-0.5">${esc(b.label || a.key)}</div>
+        ${b.category ? `<div class="text-[11px] text-secondary break-words">${esc(String(b.category).replace(/\s*\([^()]*\)\s*$/, ""))}</div>` : ""}</div>
+      <div class="flex items-center gap-2">${b.verdict ? `<span class="chip ${vcls}">Ön öneri: ${esc(b.verdict)}</span>` : ""}
+        <button type="button" class="btn btn-outline btn-sm fm-run-analysis"><span class="material-symbols-outlined">monitoring</span>Analizi aç</button></div>
+    </div>
+    <div class="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs">
+      ${cell("Aylık arama", v.searches != null ? fmtNum(v.searches) : "n/a")}${cell("Ort. fiyat", v.price != null ? fmtUsd(v.price) : "n/a")}
+      ${cell("İlk 10 rakip cirosu", v.top10_revenue != null ? fmtUsd(v.top10_revenue) : "n/a")}${cell("Ort. yorum", v.reviews != null ? fmtNum(v.reviews) : "n/a")}
+      ${cell("İlk 3 marka payı", v.top3_share != null ? "%" + (v.top3_share * 100).toFixed(1) : "n/a")}${cell("Güçlü yeni marka", v.new_brands != null ? fmtNum(v.new_brands) : "n/a")}
+    </div>
+    <div class="text-[11px] text-secondary">Başlık açıldığı andaki analiz özeti${b.fetched_at ? ` (veri: ${esc(fmtStamp(b.fetched_at))})` : ""}. "Analizi aç" son 72 saatte çekildiyse kayıtlı veriyi gösterir (MCP kotası harcanmaz).</div>
+  </div>`;
 }
 
 function fmRenderDetail() {
   const t = fmState.current;
   const sol = t.replies.find(r => r.is_solution);
-  const replyHtml = (r) => `<article class="card card-pad flex flex-col gap-2 min-w-0 ${r.is_solution ? "!border-primary border-2" : ""}" id="fm-r-${esc(r.id)}" data-rid="${esc(r.id)}">
+  const replyHtml = (r) => `<article class="card card-pad flex flex-col gap-2 min-w-0 ${r.is_solution ? "!border-primary border-2" : ""} ${r.is_new ? "fm-new-reply" : ""}" id="fm-r-${esc(r.id)}" data-rid="${esc(r.id)}">
       <div class="flex flex-wrap items-start justify-between gap-2">${fmAuthorHtml(r.author, r.created_at, r.edited_at ? " • düzenlendi" : "")}
-        ${r.is_solution ? `<span class="chip ok !text-[10px]"><span class="material-symbols-outlined !text-[12px]" aria-hidden="true">verified</span>Çözüm</span>` : ""}</div>
-      <div class="fm-rbody text-[14px] leading-relaxed whitespace-pre-wrap break-words">${forumText(r.body)}</div>
+        <div class="flex flex-wrap gap-1">${r.is_new ? `<span class="chip warn !text-[10px]">Yeni</span>` : ""}${r.is_solution ? `<span class="chip ok !text-[10px]"><span class="material-symbols-outlined !text-[12px]" aria-hidden="true">verified</span>Çözüm</span>` : ""}</div></div>
+      <div class="fm-rbody text-[14px] leading-relaxed fm-rich">${forumRich(r.body)}${fmImagesHtml(r.image_ids)}</div>
       <div class="flex flex-wrap items-center gap-2 pt-2 border-t border-hairline">
         <button type="button" class="btn btn-outline btn-sm fm-rvote ${r.voted ? "!border-primary !text-primary" : ""}" ${r.is_mine ? 'disabled title="Kendi cevabına oy veremezsin"' : ""}><span class="material-symbols-outlined">thumb_up</span>Faydalı · ${fmtNum(r.useful)}</button>
         ${t.can_mark_solution ? `<button type="button" class="btn btn-outline btn-sm fm-rsol">${r.is_solution ? "Çözümü kaldır" : "Çözüm olarak işaretle"}</button>` : ""}
         ${r.can_edit ? `<button type="button" class="btn btn-outline btn-sm fm-redit">Düzenle</button>` : ""}
         ${r.can_delete ? `<button type="button" class="btn btn-danger fm-rdel">Sil</button>` : ""}
+        ${!r.is_mine ? `<button type="button" class="btn btn-outline btn-sm fm-rreport ml-auto" ${r.reported ? "disabled" : ""} title="Uygunsuz içeriği owner/admin'e bildir"><span class="material-symbols-outlined">flag</span>${r.reported ? "Bildirildi" : "Bildir"}</button>` : ""}
         <span class="fm-rmsg text-[11px] text-error"></span></div></article>`;
   $("#fm-detail").innerHTML = `
     <article class="card card-pad flex flex-col gap-3 min-w-0">
       <div class="flex flex-wrap items-start justify-between gap-2">${fmAuthorHtml(t.author, t.created_at, ` • ${esc(t.category.name)}${t.edited_at ? " • düzenlendi" : ""}`)}<div class="flex flex-wrap gap-1 justify-end">${fmBadges(t)}</div></div>
       <h1 class="font-display text-[22px] sm:text-[26px] font-semibold leading-tight break-words">${esc(t.title)}</h1>
-      <div class="text-[14.5px] leading-relaxed whitespace-pre-wrap break-words">${forumText(t.body)}</div>
+      ${t.lesson_id ? `<div class="flex flex-wrap items-center gap-2 text-xs"><span class="chip na"><span class="material-symbols-outlined !text-[12px]" aria-hidden="true">school</span>Ders soru-cevap başlığı</span><button type="button" id="fm-go-lesson" class="text-primary hover:underline">Eğitim sayfasına git</button></div>` : ""}
+      ${fmAnalysisHtml(t.analysis)}
+      <div class="text-[14.5px] leading-relaxed fm-rich">${forumRich(t.body)}</div>
+      ${fmImagesHtml(t.image_ids)}
       ${fmTagsHtml(t.tags)}
       <div class="flex flex-wrap items-center gap-2 pt-3 border-t border-hairline">
         <button type="button" id="fm-vote" class="btn btn-outline btn-sm ${t.voted ? "!border-primary !text-primary" : ""}" ${t.is_mine ? 'disabled title="Kendi başlığına oy veremezsin"' : ""}><span class="material-symbols-outlined">thumb_up</span>Faydalı · ${fmtNum(t.useful)}</button>
@@ -4898,19 +5377,23 @@ function fmRenderDetail() {
         ${t.can_moderate ? `<button type="button" id="fm-pin" class="btn btn-outline btn-sm">${t.pinned ? "Sabitlemeyi kaldır" : "Sabitle"}</button>
           <button type="button" id="fm-lock" class="btn btn-outline btn-sm">${t.locked ? "Kilidi aç" : "Kilitle"}</button>` : ""}
         ${t.can_delete ? `<button type="button" id="fm-del" class="btn btn-danger">Başlığı sil</button>` : ""}
+        ${!t.is_mine ? `<button type="button" id="fm-report" class="btn btn-outline btn-sm" ${t.reported ? "disabled" : ""} title="Uygunsuz içeriği owner/admin'e bildir"><span class="material-symbols-outlined">flag</span>${t.reported ? "Bildirildi" : "Bildir"}</button>` : ""}
         <span class="text-xs text-secondary ml-auto">${fmtNum(t.views)} görüntülenme</span>
       </div>
       <div id="fm-act-msg" class="text-xs text-error empty:hidden"></div>
     </article>
     ${sol ? `<a href="#fm-r-${esc(sol.id)}" class="card card-pad block border-l-4 !border-l-primary fm-goto-sol"><div class="flex items-center gap-1.5 text-[12px]"><span class="material-symbols-outlined text-primary !text-[16px]" aria-hidden="true">verified</span><b class="text-primary">Öne çıkan çözüm</b><span class="text-secondary">• ${esc(sol.author.name)}</span></div>
-      <p class="text-[13.5px] mt-1.5 whitespace-pre-wrap break-words">${forumText(sol.body)}</p></a>` : ""}
+      <div class="text-[13.5px] mt-1.5 fm-rich">${forumRich(sol.body)}</div></a>` : ""}
     <h3 class="section-title mt-2">${fmtNum(t.replies.length)} cevap</h3>
     ${t.replies.map(replyHtml).join("")}
     ${t.can_reply ? `<form id="fm-reply" class="card card-pad flex flex-col gap-2" novalidate><label class="eyebrow" for="fm-reply-body">Cevap yaz</label>
-        <textarea id="fm-reply-body" class="field !h-28 py-2" maxlength="${fmState.meta?.limits.reply_max || 5000}" placeholder="Düz metin; linkler otomatik bağlantı olur."></textarea>
+        <div><textarea id="fm-reply-body" class="field w-full !h-28 py-2" maxlength="${fmState.meta?.limits.reply_max || 5000}" placeholder="Cevabını yaz… @kullanıcıadı ile birinden bahsedebilirsin."></textarea></div>
+        <span class="text-[11px] text-secondary">**kalın** · \`kod\` · \`\`\` kod bloğu \`\`\` · satır başında - liste · görsel yapıştırabilirsin</span>${fmUsernameHint()}
+        <div id="fm-reply-images"></div>
         <div class="flex flex-wrap items-center gap-2"><button type="submit" class="btn btn-primary"><span class="material-symbols-outlined">send</span>Cevapla</button><span id="fm-reply-msg" class="text-xs text-error"></span></div></form>`
       : `<div class="card card-pad text-sm text-secondary flex items-center gap-2"><span class="material-symbols-outlined" aria-hidden="true">lock</span>Bu başlık kilitli — yeni cevap yazılamaz.</div>`}`;
   fmBindDetail();
+  fmHydrateImages($("#fm-detail"));
 }
 
 function fmBindDetail() {
@@ -4925,6 +5408,10 @@ function fmBindDetail() {
     catch { msg.className = "text-xs text-secondary"; msg.textContent = url; }
   });
   $("#fm-edit")?.addEventListener("click", () => fmOpenEditor(t));
+  $("#fm-go-lesson")?.addEventListener("click", () => showView("training"));
+  $("#fm-detail .fm-run-analysis")?.addEventListener("click", () => { showView("search"); runAnalysis(t.analysis.key, t.analysis.marketplace); });
+  $("#fm-detail .fm-go-profile")?.addEventListener("click", () => showView("profile"));
+  $("#fm-report")?.addEventListener("click", () => fmReport(`/api/forum/threads/${t.id}/report`, act));
   $("#fm-pin")?.addEventListener("click", () => act(() => fmApi(`/api/forum/threads/${t.id}/pin`, { method: "POST", body: JSON.stringify({ value: !t.pinned }) })));
   $("#fm-lock")?.addEventListener("click", () => act(() => fmApi(`/api/forum/threads/${t.id}/lock`, { method: "POST", body: JSON.stringify({ value: !t.locked }) })));
   $("#fm-del")?.addEventListener("click", async () => {
@@ -4938,30 +5425,64 @@ function fmBindDetail() {
     card.querySelector(".fm-rvote")?.addEventListener("click", () => ract(() => fmApi(`/api/forum/replies/${rid}/vote`, { method: r.voted ? "DELETE" : "POST" })));
     card.querySelector(".fm-rsol")?.addEventListener("click", () => ract(() => fmApi(`/api/forum/threads/${t.id}/solution`, { method: "POST", body: JSON.stringify({ reply_id: r.is_solution ? null : rid }) })));
     card.querySelector(".fm-rdel")?.addEventListener("click", () => { if (confirm("Cevap silinsin mi?")) ract(() => fmApi(`/api/forum/replies/${rid}`, { method: "DELETE" })); });
+    card.querySelector(".fm-rreport")?.addEventListener("click", () => fmReport(`/api/forum/replies/${rid}/report`, ract));
     card.querySelector(".fm-redit")?.addEventListener("click", () => {
       const body = card.querySelector(".fm-rbody");
-      body.outerHTML = `<form class="fm-redit-form flex flex-col gap-2"><textarea class="field !h-28 py-2" maxlength="${fmState.meta?.limits.reply_max || 5000}" aria-label="Cevabı düzenle"></textarea>
+      body.outerHTML = `<form class="fm-redit-form flex flex-col gap-2"><div><textarea class="field w-full !h-28 py-2" maxlength="${fmState.meta?.limits.reply_max || 5000}" aria-label="Cevabı düzenle"></textarea></div>
+        <div class="fm-redit-images"></div>
         <div class="flex gap-2"><button type="submit" class="btn btn-primary btn-sm">Kaydet</button><button type="button" class="btn btn-outline btn-sm fm-redit-cancel">Vazgeç</button></div></form>`;
-      const f = card.querySelector(".fm-redit-form"); f.querySelector("textarea").value = r.body; f.querySelector("textarea").focus();
+      const f = card.querySelector(".fm-redit-form"), ta = f.querySelector("textarea");
+      const picker = fmImagePicker(f.querySelector(".fm-redit-images"), r.image_ids);
+      fmMentionAttach(ta, picker);
+      ta.value = r.body; ta.focus();
       f.querySelector(".fm-redit-cancel").addEventListener("click", () => fmRenderDetail());
-      f.addEventListener("submit", (e) => { e.preventDefault(); ract(() => fmApi(`/api/forum/replies/${rid}`, { method: "PUT", body: JSON.stringify({ body: f.querySelector("textarea").value }) })); });
+      f.addEventListener("submit", (e) => {
+        e.preventDefault();
+        if (picker.busy()) { rmsg.textContent = "Görsel yükleniyor, bekleyin…"; return; }
+        ract(() => fmApi(`/api/forum/replies/${rid}`, { method: "PUT", body: JSON.stringify({ body: ta.value, image_ids: picker.ids() }) }));
+      });
     });
   });
+  const replyPicker = $("#fm-reply-images") ? fmImagePicker($("#fm-reply-images")) : null;
+  if ($("#fm-reply-body")) fmMentionAttach($("#fm-reply-body"), replyPicker);
   $("#fm-reply")?.addEventListener("submit", async (e) => {
     e.preventDefault();
     const body = $("#fm-reply-body").value, rm = $("#fm-reply-msg");
     if (!body.trim()) { rm.textContent = "Cevap boş olamaz."; return; }
+    if (replyPicker?.busy()) { rm.textContent = "Görsel yükleniyor, bekleyin…"; return; }
     const btn = e.submitter || $("#fm-reply button[type=submit]"); btn.disabled = true;
-    try { await fmApi(`/api/forum/threads/${t.id}/replies`, { method: "POST", body: JSON.stringify({ body }) }); await reload(); }
+    try {
+      const r = await fmApi(`/api/forum/threads/${t.id}/replies`, { method: "POST", body: JSON.stringify({ body, image_ids: replyPicker ? replyPicker.ids() : [] }) });
+      await fmOpen(t.id, false, r.id);
+    }
     catch (err) { rm.textContent = err.message; btn.disabled = false; }
   });
   $$("#fm-detail .fm-tag").forEach(b => b.addEventListener("click", () => { fmState.tag = b.dataset.tag; fmState.page = 1; fmShowList(); fmLoadList(); }));
 }
 
 // --- Başlık editörü (yeni / düzenle) ---
-function fmOpenEditor(t = null) {
+async function fmReport(url, run) {
+  const reason = prompt("Bu içeriği neden bildiriyorsun? (owner/admin görecek, en az 5 karakter)");
+  if (reason === null) return;
+  run(() => fmApi(url, { method: "POST", body: JSON.stringify({ reason }) }));
+}
+
+/** opts.analysis = {key, marketplace, label} → "Forumda tartış" (özet sunucuda kayıttan alınır) */
+function fmOpenEditor(t = null, opts = {}) {
   const m = fmState.meta; if (!m) return;
   fmState.editing = t ? t.id : null;
+  fmState.edAnalysis = !t && opts.analysis ? opts.analysis : null;
+  const an = $("#fm-ed-analysis");
+  an.style.display = fmState.edAnalysis ? "flex" : "none";
+  if (fmState.edAnalysis) {
+    an.innerHTML = `<span class="material-symbols-outlined text-primary" aria-hidden="true">monitoring</span>
+      <span class="text-sm min-w-0 flex-1 break-words">Bağlı analiz: <b>${esc(fmState.edAnalysis.label || fmState.edAnalysis.key)}</b> · ${esc(fmState.edAnalysis.marketplace)}<span class="block text-[11px] text-secondary">Ön öneri ve ana metrikler başlığa özet olarak eklenir.</span></span>
+      <button type="button" id="fm-ed-an-rm" class="btn btn-outline btn-sm">Kaldır</button>`;
+    $("#fm-ed-an-rm").addEventListener("click", () => { fmState.edAnalysis = null; an.style.display = "none"; });
+  }
+  $$("#fm-qt-subject, #fm-qt-tried, #fm-qt-expect").forEach(i => { i.value = ""; });
+  $("#fm-qt-market").value = "";
+  fmState.edPicker = fmImagePicker($("#fm-ed-images"), t ? t.image_ids || [] : []);
   $("#fm-ed-title").textContent = t ? "Başlığı düzenle" : "Yeni soru / başlık";
   $("#fm-ed-cat").innerHTML = m.categories.map(c => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join("");
   $("#fm-ed-cat").value = t ? t.category.id : (fmState.cat || m.categories.find(c => c.name === "Genel")?.id || m.categories[0]?.id);
@@ -4976,10 +5497,27 @@ function fmOpenEditor(t = null) {
     : "Bir ekibe üye olmadığın için yalnızca herkese açık başlık açabilirsin.";
   $("#fm-ed-error").textContent = "";
   $("#fm-ed-save").innerHTML = `<span class="material-symbols-outlined">send</span>${t ? "Kaydet" : "Yayınla"}`;
+  if (!t && opts.title) $("#fm-ed-name").value = opts.title;
+  if (!t && opts.body) $("#fm-ed-body").value = opts.body;
+  if (!t && opts.kind) $$('input[name="fm-kind"]').forEach(r => { r.checked = r.value === opts.kind; });
+  if (!t && opts.categoryName) { const c = m.categories.find(x => x.name === opts.categoryName); if (c) $("#fm-ed-cat").value = c.id; }
+  fmSyncQuestionTemplate();
   $("#fm-editor").style.display = "flex";
   setTimeout(() => $("#fm-ed-name").focus(), 0);
 }
 function fmCloseEditor() { $("#fm-editor").style.display = "none"; }
+/** Soru şablonu yalnızca YENİ "Soru" başlığında (düzenlemede metin zaten şablonu içerir) */
+function fmSyncQuestionTemplate() {
+  const kind = $('input[name="fm-kind"]:checked')?.value;
+  $("#fm-ed-qt").style.display = !fmState.editing && kind === "question" ? "" : "none";
+}
+function fmQuestionPrefix() {
+  if ($("#fm-ed-qt").style.display === "none") return "";
+  const rows = [["ASIN / Keyword", $("#fm-qt-subject").value], ["Pazar", $("#fm-qt-market").value],
+                ["Ne denedim", $("#fm-qt-tried").value], ["Ne bekliyordum / ne oldu", $("#fm-qt-expect").value]]
+    .map(([k, v]) => [k, v.trim()]).filter(([, v]) => v);
+  return rows.length ? rows.map(([k, v]) => `**${k}:** ${v}`).join("\n") + "\n\n" : "";
+}
 
 // --- Kategori yönetimi (owner) ---
 function fmRenderCatAdmin() {
@@ -5010,7 +5548,7 @@ function fmRenderCatAdmin() {
     fmState.page = 1; fmLoadList();
   });
   $("#view-forum").addEventListener("click", (e) => {
-    const open = e.target.closest(".fm-open"); if (open) { fmOpen(Number(open.dataset.id)); return; }
+    const open = e.target.closest(".fm-open"); if (open) { fmOpen(Number(open.dataset.id), true, open.dataset.reply ? Number(open.dataset.reply) : null); return; }
     const cat = e.target.closest(".fm-cat"); if (cat) { fmState.cat = cat.dataset.cat ? Number(cat.dataset.cat) : null; fmState.page = 1; fmLoadList(); return; }
     const tag = e.target.closest("#fm-list-mode .fm-tag"); if (tag) { fmState.tag = tag.dataset.tag; fmState.page = 1; fmLoadList(); return; }
     const pg = e.target.closest(".fm-page"); if (pg) { fmState.page = Number(pg.dataset.page); fmLoadList(); window.scrollTo({ top: 0 }); }
@@ -5021,6 +5559,12 @@ function fmRenderCatAdmin() {
     try { await fmApi("/api/forum/categories", { method: "POST", body: JSON.stringify({ name: $("#fm-cat-new").value }) }); $("#fm-cat-new").value = ""; await fmLoadMeta(); }
     catch (err) { msg.className = "text-[11px] mt-1 text-error"; msg.textContent = err.message; }
   });
+  $("#fm-read-all").addEventListener("click", async () => {
+    try { await fmApi("/api/forum/read-all", { method: "POST" }); await fmLoadMeta(); await fmLoadList(); } catch (err) { fmSetStatus($("#fm-status"), `Hata: ${err.message}`, "error"); }
+  });
+  $("#fm-stale").addEventListener("click", () => { fmState.tab = "unanswered"; fmState.saved = false; fmState.page = 1; fmLoadList(); });
+  $$('input[name="fm-kind"]').forEach(r => r.addEventListener("change", fmSyncQuestionTemplate));
+  fmMentionAttach($("#fm-ed-body"), { add: (f) => fmState.edPicker?.add(f) });
   $("#fm-ed-close").addEventListener("click", fmCloseEditor);
   $("#fm-ed-cancel").addEventListener("click", fmCloseEditor);
   $("#fm-editor").addEventListener("click", (e) => { if (e.target.id === "fm-editor") fmCloseEditor(); });
@@ -5029,13 +5573,16 @@ function fmRenderCatAdmin() {
     e.preventDefault();
     const err = $("#fm-ed-error");
     const body = {
-      title: $("#fm-ed-name").value, body: $("#fm-ed-body").value,
+      title: $("#fm-ed-name").value, body: fmQuestionPrefix() + $("#fm-ed-body").value,
       kind: $('input[name="fm-kind"]:checked').value, visibility: $('input[name="fm-vis"]:checked').value,
       category_id: Number($("#fm-ed-cat").value), tags: $("#fm-ed-tags").value.split(/[,\s]+/).map(x => x.trim()).filter(Boolean),
     };
     if (body.title.trim().length < (fmState.meta.limits.title_min)) { err.textContent = `Başlık en az ${fmState.meta.limits.title_min} karakter olmalı.`; return; }
     if (!body.body.trim()) { err.textContent = "Metin boş olamaz."; return; }
     if (body.tags.length > fmState.meta.limits.max_tags) { err.textContent = `En fazla ${fmState.meta.limits.max_tags} etiket.`; return; }
+    if (fmState.edPicker?.busy()) { err.textContent = "Görsel yükleniyor, bekleyin…"; return; }
+    body.image_ids = fmState.edPicker ? fmState.edPicker.ids() : [];
+    if (fmState.edAnalysis && !fmState.editing) body.analysis = { key: fmState.edAnalysis.key, marketplace: fmState.edAnalysis.marketplace };
     $("#fm-ed-save").disabled = true;
     try {
       const id = fmState.editing;
