@@ -159,12 +159,17 @@ gerçek bir keyword'le test et (henüz denenmedi).
 
 ## Veri politikası (kasıtlı kararlar)
 
-- **Önbellek OKUMASI kaldırıldı** (kullanıcı isteği) — her `/api/analyze` ve
-  `/api/analyze-asin` çağrısı HER ZAMAN canlı MCP verisi çeker, aynı keyword
-  art arda aransa bile. `keyword_analysis` tablosu hâlâ yazılıyor (log/kayıt
-  amaçlı) ama okunmuyor. `PAYLOAD_VERSION` mekanizması artık büyük ölçüde
-  vestigial (okuma olmadığı için sürüm kontrolü tetiklenmiyor) — silinebilir
-  ama zararsız, dursun.
+- **72 saatlik analiz önbelleği** (kullanıcı isteği; önceki "hep canlı" kararının yerine): `/api/analyze` ve
+  `/api/analyze-asin`, aynı anahtar (keyword / `ASIN:B0..`) + pazar + istek parametreleri (`_req`: keyword modunda
+  top_relevancy, keyword_list_size, category_override_node_id; ASIN'de keyword_list_size) son `db.CACHE_TTL_SECONDS`
+  (72 saat) içinde çekildiyse MCP'ye GİTMEZ, `keyword_analysis` kaydını döner (`source="cache"`, `cache_age_seconds`).
+  Süre İLK çekimden sayılır (önbellekten dönüş kaydı yenilemez). `force_refresh=true` (panelde "Canlı veriyle yenile")
+  her zaman canlı çeker ve kaydı yeniler. Önbellek PAYLAŞIMLI (başka kullanıcının çektiği veri de döner) ama
+  **kişiye özel kısım yeniden hesaplanır**: payload `_assess_inputs` (avg_price, gross_margin, acos_detail,
+  top_brand_share, strong_new_brands, return_rate) taşır, `index._initial_assessment` bu kişinin eşikleri + analiz öncesi
+  maliyetiyle `profit_inputs` ve `pre_assessment`'ı üretir (canlı yol da aynı fonksiyonu kullanır). Sorgu Geçmiş'e
+  yine yazılır. `_` ile başlayan alanlar yanıtta dönmez. `PAYLOAD_VERSION` artık ETKİN: payload biçimi değişirse artır
+  (v4'ten eski kayıtlar önbellek sayılmaz). Trend taraması (`/api/discovery/trending`) önbelleklenmez.
 - **Kararlar ve Geçmiş kullanıcıya özel** — `market_decision` ve
   `user_query_log` tabloları `user_id` ile izole. Ham SellerSprite verisi
   (`keyword_analysis`) paylaşımlı kalabilirdi ama artık önbellek okunmadığı
@@ -175,7 +180,7 @@ gerçek bir keyword'le test et (henüz denenmedi).
   since/until verilirse özet de listeler de yalnızca o aralık). SALT OKUNUR: bu
   bölüm için yazma ucu yok; karar/geçmiş silme uçları zaten yalnızca isteği yapanın KENDİ
   `user_id`'siyle çalışır. Kararın "ön öneri"si = aynı kişinin aynı keyword/pazar için karar anına
-  kadarki son sorgusunun verdict'i. Panelde kayda tıklamak `runAnalysis` ile CANLI analiz başlatır
+  kadarki son sorgusunun verdict'i. Panelde kayda tıklamak `runAnalysis` ile analiz başlatır (72 saat önbellek kuralıyla)
   (ASIN kayıtlarındaki `ASIN:` öneki ayıklanır). Giriş ekranı metni bunu kullanıcıya söylüyor.
 - **Giriş sistemi "ilk kullanıcı kaydolunca kilitlenir"** — hiç kullanıcı
   yokken `auth_required=false`, panel açık. İlk `/api/auth/register`'dan
@@ -288,6 +293,15 @@ birim" sanıp düzeltmeye çalışma.
   kategorilerinden HERHANGİ BİRİ yasaklıysa SUNUCUDA atılır (kategorisiz keyword etkilenmez); yasaklı kategori
   filtre olarak istenirse 403. Panel owner'a kart etiketlerinde yasakla düğmesi gösterir.
 
+**Periyot & kart grafiği (`aba_research_trend` — gerçek çağrıyla doğrulandı):** parametreler DÜZ (request sarmalı YOK,
+`wrap_in_request=False`; keyword, marketplace, `timeGranularity="M"`), `data` doğrudan liste
+`[{label:"yyyyMM", searches, rank, date}]`, 2022-01'den son aya (~57 ay). Her sonuç kartına `volume_history` (son 37 ay,
+`trends.parse_history`) eklenir — keyword başına +1 MCP çağrısı (`HISTORY_CONCURRENCY`=6 eşzamanlı; biri hata verirse
+yalnızca o kartın grafiği boş). Periyot `granularity`: weekly | monthly (SellerSprite'ın listesi) | 3m/6m/9m/12m/36m →
+aylık listeden aday havuzu (`max(size, min(2×size, 40))`), her adayın `period_change` = son ayın hacmi ÷ N ay önceki
+ayın hacmi − 1 (`trends.period_change`; uçlardan biri yoksa None, sonda) ile sıralanıp `size`'a kesilir. Bu GERÇEK arama
+HACMİ değişimidir (sıralama ivmesiyle karıştırma). Panel kartta son 12 ayı (12 ayda 13, 3 yılda 37) çizer.
+
 **Kullanılmayan (bilerek):** `google_trend` tool'u da var (Amazon dışı,
 Google arama trendini veriyor) ama henüz backend'e bağlanmadı —
 "Mevsimsellik Riski" kartı için kullanılabilir, ihtiyaç olursa test edilip
@@ -325,7 +339,11 @@ yüzden backend'e hiç bağlanmamalı, sahte veri olur.
   YouTube host'larında; gömme `youtube-nocookie.com/embed/{id}`. Diğer linkler yeni sekmede
   (`rel="noopener noreferrer"`).
 - Tablolar: `training_lessons`, `training_assignments`, `training_completions`
-  (`completed_at` zaman damgası). Ders silinince atama/tamamlamalar da silinir.
+  (`completed_at` zaman damgası), `training_notes`. Ders silinince atama/tamamlama/notlar da silinir.
+- **Kazanım notu** (`training_notes`, kişi × ders tek kayıt, düz metin ≤4000): kişi derste "neler öğrendim" yazar —
+  `PUT /api/training/lessons/{id}/note {note}`, user_id oturumdan, atanmamış derse 404, boş not = sil. Kişi kendi notunu
+  `my_lessons[].my_note` ile görür; owner/admin `GET /api/training/progress` → `notes` (ekip filtresiyle) — panelde
+  "Kazanım Notları" bölümü + matriste çerçeveli hücre. Kart üzerinde "Owner/admin bu notu görebilir" yazar.
 
 ## Çoklu ekip, Ekip Yönetimi & kalıcı hesap silme (yalnızca owner)
 

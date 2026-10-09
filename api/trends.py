@@ -112,3 +112,51 @@ def passes_filters(row: dict, f: dict) -> bool:
     if f.get("max_words") is not None and word_count(row.get("keyword")) > f["max_words"]:
         return False
     return True
+
+
+# ---------------------------------------------------------------------------
+# Periyot & keyword hacim geçmişi — aba_research_trend (GERÇEK MCP ÇAĞRISIYLA DOĞRULANDI, "magnetic tiles" US):
+# parametreler DÜZ (request sarmalı YOK: keyword, marketplace, timeGranularity="M"); `data` doğrudan liste,
+# her eleman {"label": "yyyyMM", "searches": int, "rank": int, "date": ms}. Geçmiş 2022-01'den son aya kadar
+# (~57 ay) → 3 yıllık karşılaştırma mümkün. Bu, ABA'nın AYLIK ARAMA HACMİ — sıralama ivmesi değil.
+# ---------------------------------------------------------------------------
+# Periyot → ay sayısı. weekly/monthly = SellerSprite'ın kendi haftalık/aylık listesi (dönem karşılaştırması yok).
+PERIOD_MONTHS = {"weekly": None, "monthly": None, "3m": 3, "6m": 6, "9m": 9, "12m": 12, "36m": 36}
+HISTORY_MONTHS = 37          # keyword başına en fazla ay (3 yıl karşılaştırması için 36+1; panel 1 yıl, 3 yıl periyodunda 3 yıl çizer)
+HISTORY_CONCURRENCY = 6      # eşzamanlı aba_research_trend çağrısı
+PERIOD_POOL_MAX = 40         # dönem modunda hacim değişimine göre sıralanacak aday havuzu (sonuç sayısı küçükse)
+
+
+def parse_history(raw) -> list[dict]:
+    """aba_research_trend yanıtı → [{"month": "yyyyMM", "searches": int}] (eskiden yeniye, geçersizler atılır)."""
+    data = raw.get("data") if isinstance(raw, dict) else None
+    out = {}
+    for it in data if isinstance(data, list) else []:
+        if not isinstance(it, dict):
+            continue
+        label = str(it.get("label") or "")
+        v = it.get("searches")
+        if not re.fullmatch(r"\d{6}", label) or not isinstance(v, (int, float)) or isinstance(v, bool):
+            continue
+        out[label] = int(v)
+    return [{"month": m, "searches": out[m]} for m in sorted(out)][-HISTORY_MONTHS:]
+
+
+def _shift_month(yyyymm: str, back: int) -> str:
+    y, m = int(yyyymm[:4]), int(yyyymm[4:])
+    idx = y * 12 + (m - 1) - back
+    return f"{idx // 12:04d}{idx % 12 + 1:02d}"
+
+
+def period_change(history: list[dict], months: int) -> dict | None:
+    """Son ayın arama hacmi ÷ N ay önceki ayın hacmi − 1 (ör. 202609 vs 202606). İki uçtan biri yoksa ya da
+    başlangıç 0 ise None."""
+    if not history or not months:
+        return None
+    by_month = {h["month"]: h["searches"] for h in history}
+    end = history[-1]["month"]
+    start = _shift_month(end, months)
+    a, b = by_month.get(start), by_month.get(end)
+    if not a or b is None:
+        return None
+    return {"from": start, "to": end, "from_searches": a, "to_searches": b, "change": round(b / a - 1, 4)}

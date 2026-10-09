@@ -232,7 +232,7 @@
           <div class="p-5 sm:p-8">
             <div class="flex flex-wrap items-center gap-2">
               <span class="chip chip-dot ok">SellerSprite MCP Entegrasyonu</span>
-              <span class="text-xs text-secondary">canlı veri · önbellek okunmaz</span>
+              <span class="text-xs text-secondary">son 72 saatte çekilen sorgu kayıtlı veriden gelir</span>
             </div>
             <div class="flex flex-wrap items-end justify-between gap-4 mt-4">
               <div class="max-w-2xl">
@@ -596,7 +596,10 @@
               </select>
             </label>
             <label class="flex flex-col gap-1.5 min-w-0"><span class="eyebrow">Periyot</span>
-              <select id="trd-gran" class="field !h-11"><option value="weekly" selected>Haftalık</option><option value="monthly">Aylık</option></select>
+              <select id="trd-gran" class="field !h-11" title="3–36 ay: aylık listedeki adaylar, her keyword'ün gerçek aylık arama hacmi geçmişine göre dönem başı → son ay hacim değişimiyle sıralanır.">
+                <option value="weekly" selected>Haftalık</option><option value="monthly">Aylık</option>
+                <optgroup label="Hacim değişimi (dönem)"><option value="3m">3 aylık</option><option value="6m">6 aylık</option><option value="9m">9 aylık</option><option value="12m">12 aylık</option><option value="36m">3 yıllık</option></optgroup>
+              </select>
             </label>
             <label class="flex flex-col gap-1.5 min-w-0"><span class="eyebrow">Pazar yeri</span>
               <select id="trd-market" class="field !h-11"><option value="US">US</option><option value="UK">UK</option><option value="CA">CA</option></select>
@@ -682,6 +685,7 @@
             <label class="flex items-center gap-2 text-xs text-secondary">Sıralama
               <select id="trd-sort" class="field !h-8 text-xs">
                 <option value="backend">Backend sırası</option>
+                <option value="period_change">Dönem hacim değişimi</option>
                 <option value="growth_rate">Sıralama İvmesi</option>
                 <option value="searches">Arama Hacmi</option>
                 <option value="purchases">Satış</option>
@@ -967,6 +971,16 @@
             <div class="table-wrap mt-4">
               <table class="data-table trn-matrix" id="trn-matrix"></table>
             </div>
+          </section>
+
+          <section class="card card-pad">
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              <div><div class="eyebrow">Geri bildirim</div><h3 class="font-display text-lg font-semibold mt-1">Kazanım Notları</h3>
+                <p class="text-xs text-secondary mt-1">Kişilerin her dersten edindiklerini yazdığı notlar (yukarıdaki ekip filtresine göre).</p></div>
+              <label class="flex items-center gap-2 text-xs text-secondary min-w-0 max-w-full">Ders
+                <select id="trn-notes-lesson" class="field !h-8 text-xs min-w-[140px] max-w-[220px]"><option value="">Tüm dersler</option></select></label>
+            </div>
+            <div id="trn-notes-list" class="flex flex-col gap-3 mt-4"></div>
           </section>
 
         </div>

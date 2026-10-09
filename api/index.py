@@ -393,16 +393,49 @@ class AnalyzeRequest(BaseModel):
     category_override_node_id: str | None = None  # belirsiz kategori seçimini manuel düzeltmek için
 
 
+def _initial_assessment(ai: dict, thresholds: dict | None, pre_cost: dict | None) -> tuple[dict, dict]:
+    """Kişiye özel kısım: kâr hesaplayıcısı başlangıç değerleri + ön değerlendirme. Ham pazar verisinden
+    (`ai` = payload["_assess_inputs"]) hesaplanır → canlı çekimde de önbellekten dönerken de AYNI yol
+    (eşikler ve analiz öncesi maliyet kişiye göre değişir; önbellekteki başkasının ön önerisi kullanılmaz)."""
+    profit_inputs = initial_profit_inputs(ai["avg_price"], ai["acos_detail"]["value"], ai["return_rate"], pre_cost)
+    assessment = pre_assessment(
+        avg_price=ai["avg_price"], gross_margin=ai["gross_margin"],
+        acos=ai["acos_detail"]["value"], acos_detail=ai["acos_detail"],
+        top_brand_share=ai["top_brand_share"], strong_new_brands=ai["strong_new_brands"],
+        net_margin=net_margin_from_inputs(profit_inputs), thresholds=thresholds)
+    return profit_inputs, assessment
+
+
+async def _cached_analysis(key: str, marketplace: str, req_params: dict, uid: int, pre_cost: dict | None):
+    """Son db.CACHE_TTL_SECONDS (72 saat) içinde aynı anahtar + pazar + istek parametreleriyle çekilmiş analiz
+    varsa MCP'ye GİTMEDEN döner (ön öneri bu kişinin eşik/maliyetiyle yeniden hesaplanır, sorgu Geçmiş'e yazılır).
+    Kayıt yenilenmez → 72 saat ilk çekimden sayılır."""
+    hit = await db.get_cached(key, marketplace)
+    if not hit:
+        return None
+    payload, fetched_at = hit
+    if payload.get("_req") != req_params or not isinstance(payload.get("_assess_inputs"), dict):
+        return None
+    profit_inputs, assessment = _initial_assessment(payload["_assess_inputs"], await db.get_user_thresholds(uid), pre_cost)
+    await db.log_user_query(uid, key, marketplace, assessment.get("verdict"))
+    out = {k: v for k, v in payload.items() if not k.startswith("_")}
+    return {**out, "profit_inputs": profit_inputs, "pre_assessment": assessment, "source": "cache",
+            "cache_age_seconds": max(0, int(time.time()) - int(fetched_at)),
+            "cache_ttl_seconds": db.CACHE_TTL_SECONDS}
+
+
 @app.post("/api/analyze")
 async def analyze(req: AnalyzeRequest, user: dict = Depends(require_auth)):
     uid = user.get("user_id", 0)
-    # ÖNBELLEK OKUMASI KALDIRILDI (kullanıcı isteği): her arama artık HER ZAMAN
-    # canlı MCP verisi çekiyor, son 24 saatte aynı keyword sorgulanmış olsa bile.
-    # Eskiden 24 saatlik paylaşımlı önbellek kota tasarrufu sağlıyordu ama bu,
-    # verinin bazen saatler önceki durumu yansıtması riskini taşıyordu — kullanıcı
-    # bunun yerine her zaman en güncel veriyi görmeyi tercih etti.
-    # (save_analysis çağrısı hâlâ duruyor — artık önbellek değil, sadece kayıt/log
-    # amaçlı; okunmuyor.)
+    # ÖNBELLEK (kullanıcı isteği, 72 saat): aynı keyword + pazar + parametrelerle son 72 saatte çekildiyse
+    # MCP kotası harcanmaz, kayıtlı veri döner. force_refresh=True ("Canlı veriyle yenile") her zaman çeker.
+    req_params = {"top_relevancy": req.top_relevancy, "keyword_list_size": req.keyword_list_size,
+                  "category_override_node_id": req.category_override_node_id or None}
+    pre_cost = req.pre_cost.model_dump() if req.pre_cost else None
+    if not req.force_refresh:
+        cached = await _cached_analysis(req.keyword, req.marketplace, req_params, uid, pre_cost)
+        if cached:
+            return cached
 
     try:
         # 2) Ana keyword verisi — İKİ AYRI ÇAĞRI:
@@ -589,19 +622,13 @@ async def analyze(req: AnalyzeRequest, user: dict = Depends(require_auth)):
         acos_detail = weighted_top_acos(acos_pool, "relevancy", lambda r: r.get("avgPrice"), bands=RELEVANCY_BANDS)
         # Kriter 06 (Net Kâr Marjı): panelin kâr hesaplayıcısıyla AYNI başlangıç değerleri (scoring.initial_profit_inputs)
         # → kaydedilen ön öneri (Geçmiş / Ana Sayfa) panelde ilk görünenle aynı olur.
-        profit_inputs = initial_profit_inputs(stats_data.get("avgPrice"), acos_detail["value"],
-                                              _return_rate(demand_trend),
-                                              req.pre_cost.model_dump() if req.pre_cost else None)
-        assessment = pre_assessment(
-            avg_price=stats_data.get("avgPrice"),
-            gross_margin=gross_margin,
-            acos=acos_detail["value"],
-            acos_detail=acos_detail,
-            top_brand_share=top_brand_share,
-            strong_new_brands=strong_new_brands_count,  # top 10 rakip availableDate proxy'si (bkz. yukarıdaki not)
-            net_margin=net_margin_from_inputs(profit_inputs),
-            thresholds=user_thresholds,
-        )
+        assess_inputs = {
+            "avg_price": stats_data.get("avgPrice"), "gross_margin": gross_margin, "acos_detail": acos_detail,
+            "top_brand_share": top_brand_share,
+            "strong_new_brands": strong_new_brands_count,  # top 10 rakip availableDate proxy'si (bkz. yukarıdaki not)
+            "return_rate": _return_rate(demand_trend),
+        }
+        profit_inputs, assessment = _initial_assessment(assess_inputs, user_thresholds, pre_cost)
 
         payload = {
             "keyword": req.keyword,
@@ -630,7 +657,8 @@ async def analyze(req: AnalyzeRequest, user: dict = Depends(require_auth)):
             "profit_inputs": profit_inputs,  # kâr hesaplayıcısının başlangıç değerleri (Kriter 06 bunlarla)
         }
 
-        await db.save_analysis(req.keyword, req.marketplace, payload, req.requested_by)
+        await db.save_analysis(req.keyword, req.marketplace,
+                               {**payload, "_assess_inputs": assess_inputs, "_req": req_params}, req.requested_by)
         await db.log_user_query(uid, req.keyword, req.marketplace, assessment.get("verdict"))
         return {**payload, "source": "live"}
 
@@ -1590,8 +1618,13 @@ async def analyze_asin(req: AnalyzeAsinRequest, user: dict = Depends(require_aut
     asin = req.asin.strip().upper()
     cache_key = f"ASIN:{asin}"
     uid = user.get("user_id", 0)
-    # ÖNBELLEK OKUMASI KALDIRILDI (bkz. /api/analyze'daki aynı not) — her ASIN
-    # sorgusu artık her zaman canlı MCP verisi çekiyor.
+    # ÖNBELLEK (72 saat) — bkz. /api/analyze'daki aynı not.
+    req_params = {"keyword_list_size": req.keyword_list_size}
+    pre_cost = req.pre_cost.model_dump() if req.pre_cost else None
+    if not req.force_refresh:
+        cached = await _cached_analysis(cache_key, req.marketplace, req_params, uid, pre_cost)
+        if cached:
+            return cached
 
     try:
         # 1) Ürün detayı + gerçek kategori
@@ -1697,15 +1730,12 @@ async def analyze_asin(req: AnalyzeAsinRequest, user: dict = Depends(require_aut
         gross_margin = (raw_gm / 100 if raw_gm and raw_gm > 1 else raw_gm) if raw_gm is not None else None
 
         user_thresholds = await db.get_user_thresholds(uid)
-        profit_inputs = initial_profit_inputs(stats_data.get("avgPrice"), acos_detail["value"],
-                                              _return_rate(demand_trend),
-                                              req.pre_cost.model_dump() if req.pre_cost else None)
-        assessment = pre_assessment(
-            avg_price=stats_data.get("avgPrice"), gross_margin=gross_margin,
-            acos=acos_detail["value"], acos_detail=acos_detail,
-            top_brand_share=top_brand_share, strong_new_brands=strong_new_brands_count,
-            net_margin=net_margin_from_inputs(profit_inputs),
-            thresholds=user_thresholds)
+        assess_inputs = {
+            "avg_price": stats_data.get("avgPrice"), "gross_margin": gross_margin, "acos_detail": acos_detail,
+            "top_brand_share": top_brand_share, "strong_new_brands": strong_new_brands_count,
+            "return_rate": _return_rate(demand_trend),
+        }
+        profit_inputs, assessment = _initial_assessment(assess_inputs, user_thresholds, pre_cost)
 
         payload = {
             "keyword": f"{asin} — {(product.get('title') or '')[:60]}",
@@ -1739,7 +1769,8 @@ async def analyze_asin(req: AnalyzeAsinRequest, user: dict = Depends(require_aut
             "profit_inputs": profit_inputs,
         }
 
-        await db.save_analysis(cache_key, req.marketplace, payload, user.get("email"))
+        await db.save_analysis(cache_key, req.marketplace,
+                               {**payload, "_assess_inputs": assess_inputs, "_req": req_params}, user.get("email"))
         await db.log_user_query(uid, cache_key, req.marketplace, assessment.get("verdict"))
         return {**payload, "source": "live"}
 
@@ -1762,7 +1793,9 @@ SEARCH_MODEL_LABELS = {
 class TrendingRequest(BaseModel):
     marketplace: str = Field("US", pattern=r"^[A-Z]{2}$")
     search_model: int = 4  # varsayılan: hızlı yükselen (Breakout Nişler)
-    granularity: str = Field("weekly", pattern=r"^(weekly|monthly)$")
+    # weekly/monthly = SellerSprite'ın haftalık/aylık listesi; 3m/6m/9m/12m/36m = aylık listeden aday havuzu,
+    # her keyword'ün GERÇEK aylık arama hacmi geçmişiyle (aba_research_trend) N aylık hacim değişimine göre sıralanır.
+    granularity: str = Field("weekly", pattern=r"^(weekly|monthly|3m|6m|9m|12m|36m)$")
     # Kategori: SellerSprite'ın döndürdüğü GÖRÜNEN ad (ör. "Toys & Games"). US'te doğrulanmış takma adla
     # SellerSprite'a gider; diğer pazarlarda taranan sayfalarda panel süzer (bkz. trends.py).
     category: str | None = Field(None, max_length=80)
@@ -1810,6 +1843,28 @@ def _trend_row(it: dict) -> dict:
     }
 
 
+async def _attach_volume_history(rows: list[dict], marketplace: str, period_months: int | None) -> int:
+    """Her satıra keyword'ün aylık arama hacmi geçmişini (`volume_history`) ve dönem modunda `period_change`'i
+    ekler. aba_research_trend DÜZ parametre ister (wrap_in_request=False — gerçek çağrıyla doğrulandı). Bir
+    keyword'ün çağrısı başarısız olursa yalnızca o kartın grafiği boş kalır; tarama düşmez. Çağrı sayısını döner."""
+    sem = asyncio.Semaphore(trends.HISTORY_CONCURRENCY)
+
+    async def one(row):
+        try:
+            async with sem:
+                raw = await call_tool("aba_research_trend", {
+                    "keyword": row["keyword"], "marketplace": marketplace, "timeGranularity": "M",
+                }, wrap_in_request=False)
+            row["volume_history"] = trends.parse_history(raw)
+        except Exception as e:
+            print(f"[trends] aba_research_trend hatası ({row.get('keyword')}): {e}", flush=True)
+            row["volume_history"] = []
+        row["period_change"] = trends.period_change(row["volume_history"], period_months) if period_months else None
+
+    await asyncio.gather(*(one(r) for r in rows))
+    return len(rows)
+
+
 @app.post("/api/discovery/trending")
 async def discovery_trending(req: TrendingRequest, user: dict = Depends(require_auth)):
     """
@@ -1827,6 +1882,9 @@ async def discovery_trending(req: TrendingRequest, user: dict = Depends(require_
     if req.search_model not in SEARCH_MODEL_LABELS:
         raise HTTPException(400, f"search_model 1-6 arası olmalı: {SEARCH_MODEL_LABELS}")
     tool = "aba_research_weekly" if req.granularity == "weekly" else "aba_research_monthly"
+    period_months = trends.PERIOD_MONTHS[req.granularity]
+    # Dönem modunda sonuç sayısından fazla aday toplanır; hacim değişimine göre sıralanıp kesilir.
+    pool_size = max(req.size, min(2 * req.size, trends.PERIOD_POOL_MAX)) if period_months else req.size
 
     category = req.category or (req.departments[0] if req.departments else None)
     if category is not None and not category.strip():
@@ -1883,20 +1941,29 @@ async def discovery_trending(req: TrendingRequest, user: dict = Depends(require_
             if not trends.passes_filters(row, filters):
                 filtered_out += 1
                 continue
-            if len(results) < req.size:
+            if len(results) < pool_size:
                 results.append(row)
-        if len(results) >= req.size or not items or not data.get("hasNextPage", True):
+        if len(results) >= pool_size or not items or not data.get("hasNextPage", True):
             break
+
+    history_calls = await _attach_volume_history(results, req.marketplace, period_months)
+    if period_months:
+        # Hacim değişimi en yüksek olan önde; değeri hesaplanamayan (geçmiş eksik) sonda
+        results.sort(key=lambda r: (r["period_change"] is None,
+                                    -(r["period_change"]["change"] if r["period_change"] else 0)))
+        results = results[:req.size]
 
     return {
         "search_model": req.search_model,
         "search_model_label": SEARCH_MODEL_LABELS[req.search_model],
         "granularity": req.granularity,
+        "period_months": period_months,
         "total": total,  # SellerSprite'ın eşleşme sayısı (yasak/panel filtreleri ÖNCESİ)
         "category": category,
         "category_mode": None if not category else ("sellersprite" if alias else "panel"),
         "scan": {"pages": pages, "scanned": scanned, "hidden_banned": hidden_banned,
-                 "filtered_out": filtered_out, "max_pages": trends.MAX_SCAN_PAGES},
+                 "filtered_out": filtered_out, "max_pages": trends.MAX_SCAN_PAGES,
+                 "history_calls": history_calls, "pool": pool_size},
         "departments_seen": sorted(dept_counts, key=lambda d: (-dept_counts[d], d)),
         "results": results,
     }
@@ -2003,12 +2070,14 @@ def youtube_video_id(url: str | None) -> str | None:
     return vid if vid and _YT_ID_RE.match(vid) else None
 
 
-def _lesson_out(row: dict, completed_at: int | None = None, staff: bool = False) -> dict:
+def _lesson_out(row: dict, completed_at: int | None = None, staff: bool = False, note: dict | None = None) -> dict:
     out = {
         "id": row["id"], "title": row["title"], "description": row.get("description") or "",
         "video_url": row.get("video_url"), "youtube_id": youtube_video_id(row.get("video_url")),
         "sort_order": row.get("sort_order", 0), "due_date": row.get("due_date"),
         "completed": completed_at is not None, "completed_at": completed_at,
+        # Kişinin KENDİ kazanım notu (yalnızca my_lessons'ta; başkasınınki burada dönmez)
+        "my_note": (note or {}).get("note") or "", "my_note_at": (note or {}).get("updated_at"),
     }
     if staff:
         out["assign_mode"] = row.get("assign_mode") or ("all" if row.get("assign_all") else "users")
@@ -2074,9 +2143,10 @@ async def _clean_lesson(req: LessonIn) -> dict:
 async def training_lessons(user: dict = Depends(require_user)):
     """Member: yalnızca kendisine atananlar. Owner/admin: tüm dersler + atama bilgisi. Hepsinde kendi tamamlaması."""
     mine = await db.completions_for_user(user["user_id"])
+    notes = await db.training_notes_for_user(user["user_id"])
     staff = user["role"] in ("owner", "admin")
     assigned = await db.list_lessons_for_user(user["user_id"])
-    my_lessons = [_lesson_out(r, mine.get(r["id"])) for r in assigned]
+    my_lessons = [_lesson_out(r, mine.get(r["id"]), note=notes.get(r["id"])) for r in assigned]
     resp = {"role": user["role"], "my_lessons": my_lessons,
             "my_progress": {"completed": sum(1 for l in my_lessons if l["completed"]), "total": len(my_lessons)}}
     if staff:
@@ -2121,6 +2191,28 @@ async def training_complete(lesson_id: int, req: CompletionIn, user: dict = Depe
     return {"ok": True, "completed": lesson_id in done, "completed_at": done.get(lesson_id)}
 
 
+TRAINING_NOTE_MAX = 4000
+_NOTE_CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+class TrainingNoteIn(BaseModel):
+    note: str = Field("", max_length=TRAINING_NOTE_MAX + 200)
+
+
+@app.put("/api/training/lessons/{lesson_id}/note")
+async def training_note(lesson_id: int, req: TrainingNoteIn, user: dict = Depends(require_user)):
+    """Kişinin bu dersten edindiği kazanımlar / öğrendikleri. Yalnızca KENDİ notu (user_id oturumdan) ve yalnızca
+    kendisine atanan ders (değilse 404). Düz metin; boş gönderilirse not silinir. Owner/admin İlerleme'de okur."""
+    if not await db.is_lesson_assigned(lesson_id, user["user_id"]):
+        raise HTTPException(404, "Ders bulunamadı ya da size atanmamış")
+    note = _NOTE_CTRL_RE.sub("", req.note or "").replace("\r\n", "\n").strip()
+    if len(note) > TRAINING_NOTE_MAX:
+        raise HTTPException(422, f"Not en fazla {TRAINING_NOTE_MAX} karakter olabilir")
+    await db.set_training_note(lesson_id, user["user_id"], note)
+    saved = (await db.training_notes_for_user(user["user_id"])).get(lesson_id)
+    return {"ok": True, "note": saved["note"] if saved else "", "updated_at": saved["updated_at"] if saved else None}
+
+
 @app.get("/api/training/progress")
 async def training_progress(team_id: int | None = Query(None, ge=1), user: dict = Depends(require_staff)):
     """Kişi × ders tamamlama tablosu (yalnızca owner/admin). Yalnızca ŞU AN en az bir ekipte olanlar;
@@ -2149,6 +2241,8 @@ async def training_progress(team_id: int | None = Query(None, ge=1), user: dict 
         "lessons": [{"id": l["id"], "title": l["title"], "sort_order": l["sort_order"], "due_date": l.get("due_date"),
                      "assign_mode": l["assign_mode"], "assignee_ids": assignees(l)} for l in lessons],
         "completions": [c for c in await db.all_completions() if c["user_id"] in members],
+        # Kişilerin kazanım notları (yalnızca owner/admin bu uçta görür)
+        "notes": [n for n in await db.all_training_notes() if n["user_id"] in members],
     }
 
 

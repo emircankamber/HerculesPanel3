@@ -339,6 +339,8 @@ select.field{padding-right:28px;}
 .trn-cell.todo{background:var(--tertiary-soft);color:var(--tertiary);}
 .trn-cell.late{background:var(--error-soft);color:var(--error);}
 .trn-cell.na{background:transparent;color:var(--outline-variant);}
+.trn-cell.has-note{box-shadow:inset 0 0 0 2px var(--primary);}
+.trn-note-text{white-space:pre-wrap;overflow-wrap:anywhere;}
 .trn-matrix th.lesson{min-width:110px;max-width:160px;white-space:normal;text-transform:none;letter-spacing:0;font-size:11.5px;text-align:center;}
 .trn-matrix td{text-align:center;}
 .trn-matrix th:first-child,.trn-matrix td:first-child{position:sticky;left:0;background:var(--surface-lowest);z-index:1;text-align:left;}

@@ -11,7 +11,9 @@ import db_adapter
 from db_adapter import execute, execute_returning_id, execute_fetch, fetch_all, fetch_one, storage_info, USE_POSTGRES
 import forum
 
-CACHE_TTL_SECONDS = 24 * 3600
+# ANALİZ ÖNBELLEĞİ (kullanıcı isteği): aynı anahtar + pazar son 72 saatte çekildiyse MCP'ye GİDİLMEZ, kayıtlı
+# ham veri döner (kişiye özel eşik/maliyet kısmı index.py'de yeniden hesaplanır). "Canlı veriyle yenile" atlar.
+CACHE_TTL_SECONDS = 72 * 3600
 
 # Payload biçimi her değiştiğinde bu sürüm artırılır. Eski sürümle kaydedilmiş
 # önbellek kayıtları otomatik geçersiz sayılır ve veri yeniden çekilir.
@@ -19,8 +21,10 @@ CACHE_TTL_SECONDS = 24 * 3600
 #  v3: search_volume_trend eklendi (keyword'ün kendi arama hacmi grafiği) —
 #  bu artış YAPILMADAN önce "Search Volume Trend" grafiği boş kalıyordu çünkü
 #  v2'de damgalanmış eski kayıtlarda bu alan hiç yoktu, panel önbellekten
-#  dönüyordu ve gerçek MCP çağrısı hiç yapılmıyordu.)
-PAYLOAD_VERSION = 3
+#  dönüyordu ve gerçek MCP çağrısı hiç yapılmıyordu.
+#  v4: önbellek okuması geri geldi (72 saat) — payload `_assess_inputs` + `_req` taşır; bunlar olmadan
+#  ön öneri kişiye göre yeniden hesaplanamaz, eski kayıtlar önbellek sayılmaz.)
+PAYLOAD_VERSION = 4
 
 _SCHEMAS = [
     """CREATE TABLE IF NOT EXISTS user_thresholds (
@@ -101,6 +105,11 @@ _SCHEMAS = [
     # name_key = küçük harfli ad (harf duyarsız tekillik). banned_by = kullanıcı id (hesap silinince NULL).
     """CREATE TABLE IF NOT EXISTS banned_categories (
         name_key TEXT PRIMARY KEY, name TEXT NOT NULL, banned_by INTEGER, banned_at INTEGER NOT NULL)""",
+    # EĞİTİM KAZANIMLARI: kişinin bir dersten ne öğrendiği (kişi × ders tek kayıt). Yalnızca kişinin kendisi
+    # yazar; kendisi ve owner/admin (İlerleme ekranı) okur. Ders/hesap silinince satır da silinir.
+    """CREATE TABLE IF NOT EXISTS training_notes (
+        lesson_id INTEGER NOT NULL, user_id INTEGER NOT NULL, note TEXT NOT NULL, updated_at INTEGER NOT NULL,
+        PRIMARY KEY (lesson_id, user_id))""",
     """CREATE TABLE IF NOT EXISTS schema_flags (
         key TEXT PRIMARY KEY, value TEXT, set_at INTEGER NOT NULL)""",
     """CREATE TABLE IF NOT EXISTS product_signals (
@@ -252,7 +261,7 @@ async def _ensure_staff_in_team():
 # ŞEMAYA/MİGRASYONA HER DEĞİŞİKLİKTE (yeni tablo, sütun, indeks, veri düzeltmesi, tohum) BU SAYIYI ARTIR —
 # artırmazsan canlı veritabanında migrasyon hiç çalışmaz.
 # ---------------------------------------------------------------------------
-SCHEMA_VERSION = 2  # v2: banned_categories
+SCHEMA_VERSION = 3  # v2: banned_categories · v3: training_notes
 
 
 def _migration_env_hash() -> str:
@@ -390,17 +399,20 @@ async def has_users() -> bool:
 # ANALİZ ÖNBELLEĞİ & GEÇMİŞ
 # ---------------------------------------------------------------------------
 async def get_cached(keyword: str, marketplace: str):
+    """CACHE_TTL_SECONDS içinde çekilmiş, güncel PAYLOAD_VERSION'lı kayıt → (payload, fetched_at); yoksa None."""
     row = await fetch_one(
-        "SELECT * FROM keyword_analysis WHERE keyword = ? AND marketplace = ?", (keyword, marketplace))
-    if not row:
+        "SELECT payload_json, fetched_at FROM keyword_analysis WHERE keyword = ? AND marketplace = ?",
+        (keyword, marketplace))
+    if not row or time.time() - (row["fetched_at"] or 0) > CACHE_TTL_SECONDS:
         return None
-    if time.time() - row["fetched_at"] > CACHE_TTL_SECONDS:
+    try:
+        payload = json.loads(row["payload_json"])
+    except (TypeError, ValueError):
         return None
-    payload = json.loads(row["payload_json"])
     # Eski biçimde kaydedilmiş kayıtları kullanma — yeniden çekilsin
     if payload.get("_v") != PAYLOAD_VERSION:
         return None
-    return payload
+    return payload, row["fetched_at"]
 
 
 async def save_analysis(keyword: str, marketplace: str, payload: dict, fetched_by: str = None):
@@ -1302,7 +1314,8 @@ EMAIL_REF_COLUMNS = [
 ]
 # Kişinin KENDİ satırları (user_id ile) — tamamen silinir.
 USER_ID_TABLES = ["sessions", "user_thresholds", "user_query_log", "market_decision",
-                  "training_completions", "training_assignments", "team_members", "competency_forms"]
+                  "training_completions", "training_assignments", "team_members", "competency_forms",
+                  "training_notes"]
 # Başkalarına ait kayıtlarda kişiyi id ile anan alanlar: NULL yapılır.
 ID_REF_COLUMNS = [("training_lessons", "created_by"), ("team_invites", "created_by"),
                   ("banned_categories", "banned_by")]
@@ -1464,6 +1477,7 @@ async def update_lesson(lesson_id: int, data: dict):
 
 async def delete_lesson(lesson_id: int):
     await execute("DELETE FROM training_completions WHERE lesson_id = ?", (lesson_id,))
+    await execute("DELETE FROM training_notes WHERE lesson_id = ?", (lesson_id,))
     await execute("DELETE FROM training_assignments WHERE lesson_id = ?", (lesson_id,))
     await execute("DELETE FROM training_lesson_teams WHERE lesson_id = ?", (lesson_id,))
     await execute("DELETE FROM training_lessons WHERE id = ?", (lesson_id,))
@@ -1486,6 +1500,26 @@ async def completions_for_user(user_id: int) -> dict[int, int]:
 
 async def all_completions() -> list[dict]:
     return await fetch_all("SELECT lesson_id, user_id, completed_at FROM training_completions")
+
+
+async def set_training_note(lesson_id: int, user_id: int, note: str):
+    """Yalnızca çağıranın KENDİ notu (user_id oturumdan). Boş not = kaydı sil."""
+    if note:
+        await execute(
+            "INSERT INTO training_notes (lesson_id, user_id, note, updated_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT (lesson_id, user_id) DO UPDATE SET note = excluded.note, updated_at = excluded.updated_at",
+            (lesson_id, user_id, note, int(time.time())))
+    else:
+        await execute("DELETE FROM training_notes WHERE lesson_id = ? AND user_id = ?", (lesson_id, user_id))
+
+
+async def training_notes_for_user(user_id: int) -> dict[int, dict]:
+    rows = await fetch_all("SELECT lesson_id, note, updated_at FROM training_notes WHERE user_id = ?", (user_id,))
+    return {r["lesson_id"]: {"note": r["note"], "updated_at": r["updated_at"]} for r in rows}
+
+
+async def all_training_notes() -> list[dict]:
+    return await fetch_all("SELECT lesson_id, user_id, note, updated_at FROM training_notes")
 
 
 
