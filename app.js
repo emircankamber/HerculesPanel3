@@ -283,12 +283,22 @@ function setAnalysisStatus(text, cls = "") {
   });
 }
 
+let lastAnalysisArgs = null;
+/** Önbellek yaşı (sn) → "3 saat önce" */
+function fmtCacheAge(sec) {
+  sec = Number(sec) || 0;
+  if (sec < 3600) return `${Math.max(1, Math.round(sec / 60))} dk önce`;
+  if (sec < 86400) return `${Math.round(sec / 3600)} saat önce`;
+  const d = Math.floor(sec / 86400), h = Math.round((sec % 86400) / 3600);
+  return `${d} gün${h ? ` ${h} saat` : ""} önce`;
+}
+
 /**
  * Tek analiz giriş noktası: Ürün Analizi formu, üst arama çubuğu, Keyword
  * Araştırma formu ve "yeniden analiz" butonları hepsi bunu çağırır — backend
  * sözleşmesi (/api/analyze, /api/analyze-asin) öncekiyle birebir aynı.
  */
-async function runAnalysis(keyword, marketplace, categoryOverride = "") {
+async function runAnalysis(keyword, marketplace, categoryOverride = "", forceRefresh = false) {
   keyword = (keyword || "").trim();
   if (!keyword || analysisBusy) return;
   // Reverse ASIN kayıtları geçmişte "B0XXXXXXXX — başlık" olarak tutuluyor; yeniden
@@ -317,13 +327,14 @@ async function runAnalysis(keyword, marketplace, categoryOverride = "") {
     const res = isAsin
       ? await apiFetch(`${API_BASE}/api/analyze-asin`, {
           method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ asin: keyword, marketplace, ...preCostBody() }),
+          body: JSON.stringify({ asin: keyword, marketplace, ...preCostBody(), ...(forceRefresh ? { force_refresh: true } : {}) }),
         })
       : await apiFetch(`${API_BASE}/api/analyze`, {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             keyword, marketplace, ...preCostBody(),
             ...(categoryOverride ? { category_override_node_id: categoryOverride } : {}),
+            ...(forceRefresh ? { force_refresh: true } : {}),
           }),
         });
     if (!res.ok) {
@@ -332,8 +343,9 @@ async function runAnalysis(keyword, marketplace, categoryOverride = "") {
     }
     const data = await res.json();
     setAnalysisStatus(data.source === "cache"
-      ? "önbellekten yüklendi (24 saat içinde daha önce çekilmiş)"
+      ? `Kayıtlı veri yüklendi — ${fmtCacheAge(data.cache_age_seconds)} çekilmiş; ${Math.round((data.cache_ttl_seconds || 259200) / 3600)} saat dolmadan MCP kotası harcanmaz. Güncel veri için "Canlı veriyle yenile".`
       : "canlı SellerSprite verisi yüklendi");
+    lastAnalysisArgs = { keyword, marketplace, categoryOverride };
     lastAnalysis = data;
     kwvResetSort();  // yeni analiz: sıralama varsayılana (Relevancy / Traffic Share, azalan)
     renderPanel(data);
@@ -378,9 +390,16 @@ function renderPanel(data) {
   const chips = [];
   if (isAsinMode && data.asin) chips.push(`<span class="chip">ASIN: ${esc(data.asin)}</span>`);
   chips.push(`<span class="chip">Pazar: ${esc(data.marketplace)}</span>`);
-  chips.push(`<span class="chip chip-dot ok">Canlı SellerSprite MCP Verisi</span>`);
-  if (fetchedTime) chips.push(`<span class="chip na">Çekilme: ${fetchedTime}</span>`);
+  chips.push(data.source === "cache"
+    ? `<span class="chip chip-dot warn" title="Son 72 saatte çekilmiş kayıtlı SellerSprite verisi — MCP kotası harcanmadı">Kayıtlı veri · ${esc(fmtCacheAge(data.cache_age_seconds))}</span>`
+    : `<span class="chip chip-dot ok">Canlı SellerSprite MCP Verisi</span>`);
+  if (fetchedTime) chips.push(`<span class="chip na">Çekilme: ${data.source === "cache" ? esc(new Date(data.fetched_at_iso).toLocaleString("tr-TR")) : fetchedTime}</span>`);
+  if (data.source === "cache") chips.push(`<button type="button" class="panel-refresh btn btn-outline btn-sm !h-[30px]"><span class="material-symbols-outlined">refresh</span>Canlı veriyle yenile</button>`);
   root.querySelector(".panel-chips").innerHTML = chips.join("");
+  root.querySelector(".panel-refresh")?.addEventListener("click", () => {
+    const a = lastAnalysisArgs || {};
+    runAnalysis(a.keyword || data.asin || data.keyword, a.marketplace || data.marketplace, a.categoryOverride || "", true);
+  });
   root.querySelector(".kw-title").textContent = (isAsinMode && data.asin_info?.title) || data.keyword;
 
   if (data.category_used) {
@@ -2367,7 +2386,49 @@ async function runSettingsAction(btn, fn) {
 // yalnızca liste/yönetim arayüzü var. Sayısal filtreler oran ise % girilir, API'ye 0-1 gider.
 // ---------------------------------------------------------------------------
 const SEARCH_MODEL_LABELS = { 1: "Popüler Pazar", 2: "Anormal Hareketli", 3: "Sürekli Büyüyen", 4: "Hızlı Yükselen", 5: "Potansiyel", 6: "Uzun Kuyruk" };
-const trdState = { data: null, lastParams: null, busy: false, sort: "backend", cats: null, seen: {} };
+const trdState = { data: null, lastParams: null, busy: false, sort: "backend", cats: null, seen: {}, charts: [] };
+const TRD_PERIOD_LABEL = { weekly: "haftalık", monthly: "aylık", "3m": "3 aylık", "6m": "6 aylık", "9m": "9 aylık", "12m": "12 aylık", "36m": "3 yıllık" };
+const TR_MONTHS = ["Oca", "Şub", "Mar", "Nis", "May", "Haz", "Tem", "Ağu", "Eyl", "Eki", "Kas", "Ara"];
+/** "202609" → "Eyl 26" */
+const fmtYm = (ym, long = false) => {
+  const y = String(ym || "").slice(0, 4), m = Number(String(ym || "").slice(4, 6));
+  return m >= 1 && m <= 12 ? `${TR_MONTHS[m - 1]} ${long ? y : y.slice(2)}` : String(ym || "");
+};
+function fmtChange(v) {
+  if (v == null || isNaN(v)) return "n/a";
+  const pct = Number(v) * 100;
+  return `${pct > 0 ? "+" : pct < 0 ? "−" : ""}%${Math.abs(pct).toFixed(Math.abs(pct) >= 100 ? 0 : 1)}`;
+}
+const changeClass = v => v == null ? "text-secondary" : v > 0 ? "text-primary" : v < 0 ? "text-error" : "text-secondary";
+
+/** Kart içi aylık arama hacmi grafiği (aba_research_trend). 3 yıllık periyotta 36 ay, diğerlerinde son 12 ay. */
+function drawTrendVolumeChart(canvas, history, months, pc) {
+  const rows = (history || []).slice(-months);
+  if (!rows.length || !window.Chart) return null;
+  const hl = pc ? new Set([pc.from, pc.to]) : new Set();
+  return new Chart(canvas, {
+    type: "line",
+    data: {
+      labels: rows.map(h => fmtYm(h.month)),
+      datasets: [{
+        data: rows.map(h => h.searches), borderColor: "#005c55", backgroundColor: "rgba(15,118,110,0.10)",
+        fill: true, tension: 0.3, borderWidth: 2,
+        pointRadius: rows.map(h => hl.has(h.month) ? 3.5 : 0), pointHoverRadius: 4,
+        pointBackgroundColor: "#005c55",
+      }],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      interaction: { mode: "index", intersect: false },
+      plugins: { legend: { display: false },
+        tooltip: { callbacks: { title: items => fmtYm(rows[items[0].dataIndex].month, true), label: c => ` ${fmtNum(c.parsed.y)} arama` } } },
+      scales: {
+        y: { grid: { color: CHART_GRID }, border: { display: false }, ticks: { color: CHART_TICK, maxTicksLimit: 4, font: { size: 10 }, callback: v => fmtCompact(v) } },
+        x: { grid: { display: false }, ticks: { color: CHART_TICK, maxTicksLimit: months > 12 ? 9 : 6, maxRotation: 0, font: { size: 10 } } },
+      },
+    },
+  });
+}
 
 /** Görsel URL'ine yalnızca https ise izin ver; aksi halde null */
 function safeHttpsUrl(v) {
@@ -2588,7 +2649,7 @@ async function scanTrends() {
   }
   trdState.busy = true;
   $("#trd-scan").disabled = true;
-  status.textContent = `${SEARCH_MODEL_LABELS[params.search_model]} keyword'ler taranıyor… (1–5 MCP çağrısı)`;
+  status.textContent = `${SEARCH_MODEL_LABELS[params.search_model]} keyword'ler taranıyor… (1–5 MCP çağrısı + keyword başına hacim geçmişi)`;
   status.className = "status-line loading";
   try {
     const res = await apiFetch(`${API_BASE}/api/discovery/trending`, {
@@ -2602,7 +2663,7 @@ async function scanTrends() {
     trdState.lastParams = params;
     const sc = data.scan || {};
     status.textContent = `Tarama tamamlandı · ${data.results.length} keyword`
-      + (sc.scanned != null ? ` · ${fmtNum(sc.scanned)} keyword tarandı (${sc.pages} MCP çağrısı)` : "")
+      + (sc.scanned != null ? ` · ${fmtNum(sc.scanned)} keyword tarandı (${sc.pages + (sc.history_calls || 0)} MCP çağrısı)` : "")
       + (sc.hidden_banned ? ` · ${fmtNum(sc.hidden_banned)} yasaklı kategoriden gizlendi` : "")
       + (sc.filtered_out ? ` · ${fmtNum(sc.filtered_out)} filtreye takıldı` : "");
     status.className = "status-line";
@@ -2627,7 +2688,8 @@ function renderTrends() {
   if (!d) return;
   const p = d._params;
   $("#trd-summary-chip").textContent = `${d.search_model_label || SEARCH_MODEL_LABELS[p.search_model]} · ${d.results.length} aday`;
-  $("#trd-meta").textContent = `${p.marketplace} · ${p.granularity === "monthly" ? "aylık" : "haftalık"}`
+  $("#trd-meta").textContent = `${p.marketplace} · ${TRD_PERIOD_LABEL[p.granularity] || p.granularity}`
+    + (d.period_months ? ` (son ayın arama hacmi ÷ ${d.period_months} ay önceki − 1'e göre sıralı)` : "")
     + (d.category ? ` · ${d.category}${d.category_mode === "panel" ? " (panelde süzüldü)" : ""}` : "")
     + (d.total != null ? ` · SellerSprite'ta ${fmtNum(d.total)} eşleşme` : "")
     + (d.scan?.hidden_banned ? ` · ${fmtNum(d.scan.hidden_banned)} yasaklı gizlendi` : "")
@@ -2638,12 +2700,17 @@ function renderTrends() {
     const k = trdState.sort;
     // Düşük olanın iyi olduğu metrikler artan, diğerleri azalan; değeri olmayan her zaman sonda
     const asc = k === "click_share" || k === "bid";
+    const val = r => k === "period_change" ? r.period_change?.change : r[k];
     rows.sort((a, b) => {
-      const x = a[k], y = b[k];
+      const x = val(a), y = val(b);
       if (x == null || y == null) return (x == null) - (y == null);
       return asc ? x - y : y - x;
     });
   }
+  trdState.charts.forEach(c => c.destroy());
+  trdState.charts = [];
+  // Dönem karşılaştırmasının başlangıç ayı da grafikte görünsün (12 ay → 13 nokta, 3 yıl → 37)
+  const chartMonths = d.period_months >= 12 ? d.period_months + 1 : 12;
   const manage = !!trdState.cats?.can_manage;
   const list = $("#trd-list");
   list.innerHTML = rows.length ? "" : `<div class="card card-pad text-sm text-secondary lg:col-span-2">Bu filtrelerle sonuç bulunamadı${d.scan?.pages ? ` (${fmtNum(d.scan.scanned)} keyword tarandı)` : ""}. Filtreleri gevşetmeyi, başka bir kategori ya da pazar tipini deneyin.</div>`;
@@ -2663,6 +2730,15 @@ function renderTrends() {
         <div class="min-w-0 text-[11px] leading-4"><div class="mono font-semibold truncate">${esc(a.asin || "—")}</div><div class="text-secondary">CTR ${fmtRate(a.click_rate)} · CVR ${fmtRate(a.conversion_rate)}</div></div>
       </div>`;
     }).join("");
+    const hasHist = (r.volume_history || []).length > 1;
+    const pc = r.period_change;
+    const periodHtml = d.period_months
+      ? (pc ? `<div class="text-xs tabular" title="${esc(fmtYm(pc.from, true))}: ${fmtNum(pc.from_searches)} → ${esc(fmtYm(pc.to, true))}: ${fmtNum(pc.to_searches)} arama">
+                 <span class="text-secondary">${d.period_months === 36 ? "3 yıl" : d.period_months + " ay"}:</span>
+                 <span class="font-semibold ${changeClass(pc.change)}">${fmtChange(pc.change)}</span>
+                 <span class="text-secondary">(${esc(fmtYm(pc.from))} → ${esc(fmtYm(pc.to))})</span></div>`
+            : `<span class="text-xs text-secondary">Dönem değişimi hesaplanamadı (geçmiş eksik)</span>`)
+      : "";
     const bidRange = r.bid_min != null && r.bid_max != null ? ` <span class="text-secondary font-normal text-xs">(${fmtUsd(r.bid_min)}–${fmtUsd(r.bid_max)})</span>` : "";
     card.innerHTML = `
       <div class="flex items-start justify-between gap-3">
@@ -2686,15 +2762,25 @@ function renderTrends() {
         <div><div class="text-secondary">Tıklama</div><div class="font-semibold text-sm tabular mt-0.5" title="${fmtNum(r.clicks)}">${fmtCompact(r.clicks)}</div></div>
         <div><div class="text-secondary">Kelime sayısı</div><div class="font-semibold text-sm tabular mt-0.5">${(r.keyword || "").trim().split(/\s+/).filter(Boolean).length || "n/a"}</div></div>
       </div>
+      <div>
+        <div class="flex flex-wrap items-baseline justify-between gap-2 mb-1.5">
+          <div class="eyebrow">Arama hacmi · son ${chartMonths > 13 ? "3 yıl" : "1 yıl"} (aylık)</div>
+          ${periodHtml}
+        </div>
+        ${hasHist ? `<div class="relative h-[120px]"><canvas class="trd-vol-chart" aria-label="${esc(r.keyword || "")} aylık arama hacmi grafiği"></canvas></div>`
+                  : `<div class="text-xs text-secondary">Hacim geçmişi alınamadı.</div>`}
+      </div>
       <div><div class="eyebrow mb-1.5">Tıklama payı en yüksek 3 marka</div><div class="flex flex-wrap gap-1.5">${brands}</div></div>
       ${asins ? `<div><div class="eyebrow mb-2">İlk 3 ASIN</div><div class="grid grid-cols-1 sm:grid-cols-3 gap-2">${asins}</div></div>` : ""}
       <div class="flex justify-end mt-auto"><button type="button" class="trd-analyze btn btn-outline btn-sm"><span class="material-symbols-outlined">monitoring</span>Analiz Et</button></div>`;
+    const cv = card.querySelector(".trd-vol-chart");
+    list.appendChild(card);
+    if (cv) { const ch = drawTrendVolumeChart(cv, r.volume_history, chartMonths, d.period_months ? pc : null); if (ch) trdState.charts.push(ch); }
     card.querySelectorAll(".trd-ban-chip").forEach(b => b.addEventListener("click", () => banTrendCategory(b.dataset.cat)));
     card.querySelector(".trd-analyze").addEventListener("click", () => {
       showView("search");
       runAnalysis(r.keyword, p.marketplace);
     });
-    list.appendChild(card);
   });
 }
 
@@ -2951,6 +3037,15 @@ function renderTraining() {
       </div>
       ${l.description ? `<p class="trn-desc text-[13.5px] text-on-surface-variant leading-relaxed">${esc(l.description)}</p>` : ""}
       ${lessonVideoHtml(l)}
+      <div class="trn-note flex flex-col gap-1.5">
+        <label class="eyebrow" for="trn-note-${esc(l.id)}">Kazanımlarım · Neler öğrendim?</label>
+        <textarea id="trn-note-${esc(l.id)}" class="trn-note-input field !h-auto py-2 text-[13px] leading-relaxed" rows="3" maxlength="${TRN_NOTE_MAX}"
+          placeholder="Bu ders / videodan edindiğin kazanımları ve öğrendiklerini yaz…">${esc(l.my_note || "")}</textarea>
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <span class="trn-note-status text-[11px] text-secondary">${l.my_note_at ? `Kaydedildi · ${esc(fmtStamp(l.my_note_at))}` : "Owner/admin bu notu görebilir."}</span>
+          <button type="button" class="trn-note-save btn btn-outline btn-sm" disabled><span class="material-symbols-outlined">save</span>Notu kaydet</button>
+        </div>
+      </div>
       <div class="flex flex-wrap items-center justify-between gap-2 mt-auto pt-2 border-t border-hairline">
         <span class="text-xs text-secondary">${l.completed ? `Tamamlanma: ${esc(fmtStamp(l.completed_at))}` : "Henüz tamamlanmadı"}</span>
         <button type="button" class="trn-toggle btn ${l.completed ? "btn-outline" : "btn-primary"} btn-sm">
@@ -2958,6 +3053,7 @@ function renderTraining() {
       </div>`;
     const play = card.querySelector(".trn-play");
     if (play) play.addEventListener("click", () => embedYouTube(play.parentElement, play.dataset.yt));
+    bindLessonNote(card, l);
     card.querySelector(".trn-toggle").addEventListener("click", async (e) => {
       const btn = e.currentTarget; btn.disabled = true;
       try {
@@ -2978,6 +3074,7 @@ function renderTraining() {
   if (!isStaff()) return;
   renderLessonAdmin();
   renderMatrix();
+  renderTrainingNotes();
 }
 
 // --- Ders yönetimi (owner/admin) ---
@@ -3093,6 +3190,64 @@ async function saveLesson(e) {
   finally { $("#trn-f-save").disabled = false; }
 }
 
+// --- Kazanım notu (kişinin KENDİ notu; PUT /api/training/lessons/{id}/note) ---
+const TRN_NOTE_MAX = 4000;
+function bindLessonNote(card, l) {
+  const ta = card.querySelector(".trn-note-input"), btn = card.querySelector(".trn-note-save");
+  const st = card.querySelector(".trn-note-status");
+  let saved = l.my_note || "";
+  ta.addEventListener("input", () => {
+    const dirty = ta.value.trim() !== saved;
+    btn.disabled = !dirty;
+    if (dirty) { st.textContent = "Kaydedilmemiş değişiklik"; st.className = "trn-note-status text-[11px] text-tertiary"; }
+  });
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    st.textContent = "kaydediliyor…"; st.className = "trn-note-status text-[11px] text-secondary";
+    try {
+      const r = await apiFetch(`${API_BASE}/api/training/lessons/${encodeURIComponent(l.id)}/note`, {
+        method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ note: ta.value }),
+      });
+      const b = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(apiErrorText(b, r.status));
+      saved = b.note || ""; l.my_note = saved; l.my_note_at = b.updated_at;
+      ta.value = saved;
+      st.textContent = saved ? `Kaydedildi · ${fmtStamp(b.updated_at)}` : "Not silindi.";
+      st.className = "trn-note-status text-[11px] text-primary";
+    } catch (err) {
+      btn.disabled = false;
+      st.textContent = `Hata: ${err.message}`; st.className = "trn-note-status text-[11px] text-error";
+    }
+  });
+}
+
+/** Owner/admin: ilerleme verisindeki kazanım notları (ekip filtresi sunucuda, ders filtresi burada). */
+function renderTrainingNotes() {
+  const pg = trnState.progress;
+  const sel = $("#trn-notes-lesson"), list = $("#trn-notes-list");
+  const lessons = pg?.lessons || [];
+  const prev = sel.value;
+  sel.innerHTML = `<option value="">Tüm dersler</option>` + lessons.map(l => `<option value="${esc(l.id)}">${esc(l.title.length > 50 ? l.title.slice(0, 50) + "…" : l.title)}</option>`).join("");
+  sel.value = lessons.some(l => String(l.id) === prev) ? prev : "";
+  const userOf = new Map((pg?.users || []).map(u => [u.id, u]));
+  const lessonOf = new Map(lessons.map(l => [l.id, l]));
+  const notes = (pg?.notes || [])
+    .filter(n => userOf.has(n.user_id) && lessonOf.has(n.lesson_id) && (!sel.value || String(n.lesson_id) === sel.value))
+    .sort((a, b) => b.updated_at - a.updated_at);
+  list.innerHTML = notes.length ? "" : `<div class="text-sm text-secondary">Henüz kazanım notu yok.</div>`;
+  notes.forEach(n => {
+    const u = userOf.get(n.user_id), l = lessonOf.get(n.lesson_id);
+    const el = document.createElement("article");
+    el.className = "rounded-xl border border-hairline p-4 min-w-0";
+    el.innerHTML = `<div class="flex flex-wrap items-baseline justify-between gap-2">
+        <div class="min-w-0"><span class="font-medium">${esc(u.name || "(ad girilmemiş)")}</span>
+          <span class="text-xs text-secondary"> · ${esc(l.title)}</span></div>
+        <span class="text-[11px] text-secondary">${esc(fmtStamp(n.updated_at))}</span></div>
+      <p class="trn-note-text text-[13.5px] text-on-surface-variant leading-relaxed mt-2">${esc(n.note)}</p>`;
+    list.appendChild(el);
+  });
+}
+
 // --- Kişi × ders tablosu ---
 function renderMatrix() {
   const pg = trnState.progress;
@@ -3103,6 +3258,7 @@ function renderMatrix() {
   if (pg && !pg.users.length && pg.lessons.length) { table.innerHTML = `<tbody><tr><td class="muted !py-6">Bu ekipte kimse yok.</td></tr></tbody>`; return; }
   if (!pg || !pg.lessons.length) { table.innerHTML = `<tbody><tr><td class="muted !py-6">Henüz ders yok.</td></tr></tbody>`; return; }
   const done = new Map(pg.completions.map(c => [`${c.lesson_id}:${c.user_id}`, c.completed_at]));
+  const noted = new Set((pg.notes || []).map(n => `${n.lesson_id}:${n.user_id}`));
   const t = todayISO();
   const head = `<thead><tr><th>Kişi</th><th>İlerleme</th>${pg.lessons.map(l => `<th class="lesson" title="${esc(l.title)}">${esc(l.title.length > 40 ? l.title.slice(0, 40) + "…" : l.title)}</th>`).join("")}</tr></thead>`;
   const rows = pg.users.map(u => {
@@ -3111,9 +3267,10 @@ function renderMatrix() {
     const cells = pg.lessons.map(l => {
       if (!l.assignee_ids.includes(u.id)) return `<td><span class="trn-cell na" title="Atanmadı">·</span></td>`;
       const at = done.get(`${l.id}:${u.id}`);
-      if (at) return `<td><span class="trn-cell done" title="Tamamlandı: ${esc(fmtStamp(at))}">✓</span></td>`;
+      const note = noted.has(`${l.id}:${u.id}`) ? " has-note" : "", noteTip = note ? " · kazanım notu var" : "";
+      if (at) return `<td><span class="trn-cell done${note}" title="Tamamlandı: ${esc(fmtStamp(at))}${noteTip}">✓</span></td>`;
       const late = l.due_date && l.due_date < t;
-      return `<td><span class="trn-cell ${late ? "late" : "todo"}" title="${late ? "Son tarih geçti" : "Atandı, tamamlanmadı"}">—</span></td>`;
+      return `<td><span class="trn-cell ${late ? "late" : "todo"}${note}" title="${late ? "Son tarih geçti" : "Atandı, tamamlanmadı"}${noteTip}">—</span></td>`;
     }).join("");
     return `<tr><td><div class="font-medium truncate max-w-[200px]" title="${esc(u.name || "")}">${esc(u.name || "(ad girilmemiş)")}</div><div class="text-[11px] text-secondary truncate max-w-[200px]">${esc(ROLE_LABEL[u.role] || u.role)}${u.email ? ` · ${esc(u.email)}` : ""}</div></td>
       <td class="tabular">${n}/${assigned.length}</td>${cells}</tr>`;
@@ -3126,6 +3283,7 @@ function renderMatrix() {
   $("#trn-f-cancel").addEventListener("click", () => { trnState.editing = null; resetLessonForm(); $("#trn-f-msg").textContent = ""; });
   $$('input[name="trn-assign"]').forEach(r => r.addEventListener("change", () => trnShowAssignPick($('input[name="trn-assign"]:checked').value)));
   $("#trn-prog-team").addEventListener("change", (e) => { trnState.progTeam = e.target.value || null; loadTraining(); });
+  $("#trn-notes-lesson").addEventListener("change", renderTrainingNotes);
   $("#trn-login").addEventListener("click", () => showLogin("", !authRequiredGlobal));
 })();
 
@@ -3712,7 +3870,7 @@ async function submitLaunchReport(e) {
 
 // ===========================================================================
 // EKİP AKTİVİTESİ (yalnızca owner; sunucu /api/team/activity -> require_owner, diğerleri 403)
-// Salt okunur. Kayda tıklamak runAnalysis ile CANLI yeni analiz başlatır (önbellek/kayıtlı sonuç yok).
+// Salt okunur. Kayda tıklamak runAnalysis ile analiz başlatır (son 72 saatte çekildiyse kayıtlı veri, değilse canlı).
 // ===========================================================================
 const tmState = { tab: "queries", data: null, timer: null, page: { queries: 1, decisions: 1 } };
 const TM_VERDICT_CLASS = { "Uygun": "ok", "Sınırda": "warn", "Elenmiş": "bad" };
@@ -4146,7 +4304,7 @@ function tgRenderInvites() {
   });
 })();
 
-/** Geçmiş'teki gibi: mevcut runAnalysis ile CANLI analiz (önbellek okunmaz; /api/analyze her zaman MCP'ye gider). */
+/** Geçmiş'teki gibi: mevcut runAnalysis ile analiz (son 72 saatte çekildiyse kayıtlı veri — MCP kotası harcanmaz). */
 function tmReanalyze(keyword, marketplace) {
   const target = tmAnalysisTarget(keyword);
   if (!target) return;
