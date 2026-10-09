@@ -10,6 +10,7 @@ import secrets
 import db_adapter
 from db_adapter import execute, execute_returning_id, execute_fetch, fetch_all, fetch_one, storage_info, USE_POSTGRES
 import forum
+import notify
 
 # ANALİZ ÖNBELLEĞİ (kullanıcı isteği): aynı anahtar + pazar son 72 saatte çekildiyse MCP'ye GİDİLMEZ, kayıtlı
 # ham veri döner (kişiye özel eşik/maliyet kısmı index.py'de yeniden hesaplanır). "Canlı veriyle yenile" atlar.
@@ -218,6 +219,14 @@ async def _migrate_schema():
         await execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_users_username ON users (LOWER(username))")
     except Exception:
         pass  # benzersizlik ayrıca kodda denetlenir
+    # FORUM: analizden açılan başlık (anahtar + pazar + özet) ve ders soru-cevap başlığı (ders başına tek)
+    for col, typ in (("analysis_key", "TEXT"), ("analysis_market", "TEXT"), ("analysis_json", "TEXT"), ("lesson_id", "INTEGER")):
+        await _add_column_if_missing("forum_threads", col, typ)
+    try:
+        await execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_forum_threads_lesson ON forum_threads (lesson_id) "
+                      "WHERE lesson_id IS NOT NULL")
+    except Exception:
+        pass  # tekillik ayrıca kodda denetlenir (forum.thread_for_lesson)
     await forum.seed_once()   # forum varsayılan kategorileri (bir kez)
 
 
@@ -261,7 +270,7 @@ async def _ensure_staff_in_team():
 # ŞEMAYA/MİGRASYONA HER DEĞİŞİKLİKTE (yeni tablo, sütun, indeks, veri düzeltmesi, tohum) BU SAYIYI ARTIR —
 # artırmazsan canlı veritabanında migrasyon hiç çalışmaz.
 # ---------------------------------------------------------------------------
-SCHEMA_VERSION = 3  # v2: banned_categories · v3: training_notes
+SCHEMA_VERSION = 4  # v2: banned_categories · v3: training_notes · v4: bildirimler, forum okunma/rapor/görsel, analiz/ders bağı
 
 
 def _migration_env_hash() -> str:
@@ -283,7 +292,7 @@ async def init_db():
     if await _schema_is_current():
         return
     async with db_adapter.single_connection():
-        for schema in _SCHEMAS + forum.SCHEMAS:
+        for schema in _SCHEMAS + forum.SCHEMAS + notify.SCHEMAS:
             await execute(schema)
         await _migrate_schema()
         await seed_cert_requirements_if_empty()
@@ -1439,6 +1448,14 @@ async def is_lesson_assigned(lesson_id: int, user_id: int) -> bool:
     return bool(row)
 
 
+async def lesson_audience(lesson_id: int) -> set[int]:
+    """Dersi ŞU AN görebilen kişiler (en az bir ekipte + atama kuralı) — bildirim alıcıları için TEK sorgu."""
+    sql = _LESSON_VISIBLE_SQL.replace("?", "u.id")
+    rows = await fetch_all(f"SELECT u.id FROM users u, training_lessons l WHERE l.id = ? "
+                           f"AND EXISTS (SELECT 1 FROM team_members tm WHERE tm.user_id = u.id) AND {sql}", (lesson_id,))
+    return {r["id"] for r in rows}
+
+
 async def get_lesson(lesson_id: int) -> dict | None:
     return await fetch_one("SELECT * FROM training_lessons WHERE id = ?", (lesson_id,))
 
@@ -1478,6 +1495,8 @@ async def update_lesson(lesson_id: int, data: dict):
 async def delete_lesson(lesson_id: int):
     await execute("DELETE FROM training_completions WHERE lesson_id = ?", (lesson_id,))
     await execute("DELETE FROM training_notes WHERE lesson_id = ?", (lesson_id,))
+    await forum.unlink_lesson(lesson_id)
+    await notify.delete_for(lesson_id=lesson_id)
     await execute("DELETE FROM training_assignments WHERE lesson_id = ?", (lesson_id,))
     await execute("DELETE FROM training_lesson_teams WHERE lesson_id = ?", (lesson_id,))
     await execute("DELETE FROM training_lessons WHERE id = ?", (lesson_id,))

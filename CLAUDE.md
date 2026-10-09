@@ -462,15 +462,63 @@ yüzden backend'e hiç bağlanmamalı, sahte veri olur.
 - **Gerçek veri:** istatistikte yalnızca toplam ve çözülen başlık; "Haftanın Katkıcıları" = son 7 gündeki cevap ve
   çözüm seçilen cevap sayısı (puan yok); popüler etiketler gerçek sayım. Tasarımdaki aktif satıcı/çözüm oranı/yanıt
   süresi, canlı yayın kartı, "Detay Raporu"/CPC kutuları uydurma olacağı için YOK.
-- **Metin DÜZ METİN:** sunucu ham saklar (kontrol karakterleri atılır, uzunluk sınırları). Panel `app.js::forumText`
-  her parçayı `esc()` ile kaçırır, yalnızca `http/https` URL'leri `<a target=_blank rel="noopener noreferrer nofollow">`
-  yapar (`javascript:` vb. düz metin kalır), satır sonları `white-space: pre-wrap`. Dosya yükleme yok. Etiketler
+- **Metin DÜZ METİN:** sunucu ham saklar (kontrol karakterleri atılır, uzunluk sınırları). Panel `app.js::forumRich`
+  (blok: ``` kod bloğu ```, "- "/"1. " listeler, paragraflar `pre-wrap`) + `forumText` (satır içi: `` `kod` `` dokunulmaz,
+  `**kalın**`, `@kullanıcıadı`, yalnızca `http/https` → `<a target=_blank rel="noopener noreferrer nofollow">`) her parçayı
+  `esc()` ile kaçırır; HTML/`javascript:` asla üretilmez. Kart önizlemesi `fmPlain` ile işaretleri atar. Etiketler
   `[\w.+-]` (≤5, ≤30 karakter; `#` atılır, boşluk → tire, harf duyarsız tekilleştirme).
+- **Görseller** (`forum_images`, veritabanında base64): gönderi başına ≤4, ≤1,5 MB, saatte ≤30 yükleme. İstemci
+  küçültür (≤1600 px, WebP/JPEG; hareketli GIF dokunulmaz), panodan yapıştırma çalışır. Sunucu türü DOSYA İMZASINDAN
+  belirler (png/jpeg/gif/webp; SVG ve diğerleri 415). Önce `POST /api/forum/images {data}` (bağlanmamış, yalnızca
+  yükleyen görür), gönderi kaydedilince `image_ids` ile bağlanır (`set_post_images`: kümeye eşitler, başkasının
+  görseli sessizce yok sayılır); 24 saat bağlanmayan silinir. `GET /api/forum/images/{id}` başlığın görünürlük
+  kuralıyla (yoksa 404), `nosniff` + `sandbox` CSP; panel yetkili `fetch` → blob URL ile gösterir. Neon'da yer
+  kapladığını unutma (ileride Vercel Blob'a taşınabilir).
+- **Takip & okunma:** başlığı açan ve cevap yazan OTOMATİK takipçi olur (`forum_saves`; "Takipten çık" ile bırakılır).
+  `forum_reads` = kişinin başlığı son açtığı an + o anda görülen SON CEVAP KİMLİĞİ (`last_reply_id`; saniye
+  karşılaştırması aynı saniyedeki cevabı kaçırıyor ya da kalıcı "yeni" bırakıyordu — kimlik kullan); `mark_read`
+  cevaplar okunmadan ÖNCE çağrılır. `thread_id=0` satırı başlangıç çizgisi (forumu ilk açışta son 7 gün "yeni";
+  "Tümünü okundu say" `POST /api/forum/read-all` çizgiyi şimdiye çeker). Listede `is_new` (hiç açılmamış yeni
+  başlık) ve `new_replies` (çizgiden sonra, görülen kimlikten büyük, BAŞKASININ cevabı), sekmeler
+  "Okunmamış" ve "Cevapsız" (soru + 0 cevap + çözülmemiş + kilitsiz; en uzun bekleyen önce). Owner/admin'e meta'da
+  `stale_unanswered` (24 saatten eski) ve açık bildirim sayısı.
+- **@bahsetme:** profildeki kullanıcı adı (`forum.MENTION_RE`, gönderi başına ≤10). Başlığı göremeyen kişiye bildirim
+  gitmez; düzenlemede yalnızca YENİ eklenen bahsetmeler. Öneri listesi `GET /api/forum/people?q=` (yalnızca kullanıcı
+  adı olanlar). Kullanıcı adı yoksa panel Profil'e yönlendiren ipucu gösterir.
+- **Analizden tartışma:** Ürün Analizi → "Forumda Tartış" → editör `analysis {key, marketplace}` ile açılır; özet
+  (`_analysis_brief`: ön öneri, arama, fiyat, ilk 10 ciro, yorum, ilk 3 marka payı, yeni marka) SUNUCUDA
+  `keyword_analysis` kaydından alınır (istemci değer göndermez; kayıt yoksa 422) ve `forum_threads.analysis_*`'a
+  yazılır — sonradan değişmez. "Analizi aç" `runAnalysis` (72 saat önbellek kuralı).
+- **Ders soru-cevap:** `POST /api/training/lessons/{id}/discussion` (dersi görebilen ya da owner/admin; değilse 404)
+  dersin TEK başlığını döner/oluşturur (`forum_threads.lesson_id`, `ux_forum_threads_lesson`; eşzamanlı ikinci oluşturma
+  var olanı döner). "Sadece ekip", tür Tartışma, kategori "Genel", yazarı dersi ekleyen (sorular ona bildirilir).
+  Ders silinince başlık kalır, bağ kopar. Kazanım notu yalnızca kişi "Başlıkta paylaş" derse cevap olarak eklenir.
+- **İçerik bildirme:** `POST /api/forum/{threads|replies}/{id}/report {reason ≥5}` (kendi içeriğine 403, ikinci kez 409),
+  owner/admin'e bildirim; `GET /api/forum/reports` + `POST …/reports/{id}/resolve` yalnızca owner/admin.
+- **Soru şablonu** (yalnızca yeni "Soru"): ASIN/keyword, pazar, ne denedin, ne bekliyordun → metnin başına
+  `**Alan:** değer` satırları olarak eklenir (istemcide; sunucu yine düz metin saklar).
 - **Paylaşım sınırı** (`forum.POST_LIMITS`/`THREAD_LIMITS`): başlık + cevap 1 dakikada 5, 1 saatte 40; yeni başlık
   10 dakikada 3 → 429. Düzenleme sınırlanmaz.
-- Doğrudan link `#forum/<id>`. Hesap silinince kişinin başlıkları (cevaplarıyla), cevapları, oy/kayıt/görüntülemeleri
-  silinir (`forum.delete_user_content`). Forum küçük ölçek varsayar: liste görünür başlıkların tamamını çekip
+- Doğrudan link `#forum/<id>`. Hesap silinince kişinin başlıkları (cevaplarıyla), cevapları, oy/kayıt/görüntüleme/okuma
+  kayıtları, bildirdiği içerikler, görselleri ve bildirimleri silinir (`forum.delete_user_content`). Forum küçük ölçek varsayar: liste görünür başlıkların tamamını çekip
   Python'da süzer/sayfalar (sayfa 10).
+
+## Panel içi bildirimler (`api/notify.py` + `/api/notifications*`)
+
+- Tablo `notifications` (alıcı, tür, actor_id, thread/reply/lesson id, `data_json` anlık görüntü: başlık adı, alıntı, oy
+  sayısı; `read_at`). Türler: reply (başlığına cevap), follow_reply (takip ettiğin başlık), mention, solution (cevabın
+  çözüm seçildi), vote (okunmamış oy bildirimi varsa sayaç artar — 10 oy = 1 bildirim), bulletin (herkese; "Sadece
+  ekip" bültende yalnızca ekiptekilere — TEK `INSERT … SELECT`), lesson (ders oluşturulunca görebilenlere,
+  düzenlemede yalnızca YENİ görebilenlere — `db.lesson_audience`), report (owner/admin'e). Olayı yapan kendine
+  bildirim almaz; bir cevapta öncelik: başlık sahibi "reply" > bahsedilen "mention" > diğer takipçiler "follow_reply".
+- **Görünürlük ÇIKTIDA da:** başlığı silinmiş ya da kişinin artık göremediği ("Sadece ekip" + ekip dışı) bildirimler
+  liste/sayımda görünmez (`index._visible_notifications`). Başlık/cevap/ders silinince bildirimleri de silinir; 90 günden
+  eski bildirimler liste okunurken temizlenir. Başlığı açmak o başlığın bildirimlerini okundu yapar.
+- Uçlar: `GET /api/notifications` (son 40 + unread), `GET /api/notifications/count` (panel sekme açıkken ~60 sn'de bir
+  yoklar), `POST /api/notifications/read {ids | all}` — hepsi `require_user`, yalnızca kişinin kendi kayıtları.
+- Panel: üst bardaki zil (`app.js::ntStart/ntPoll/ntGo`); tıklama ilgili başlığa (cevaba kaydırıp vurgular) ya da
+  Eğitim'e götürür. Zil başlatma kodu dosyanın BAŞINDA çalışır — orada `$` yardımcısı henüz tanımlı DEĞİL
+  (`getElementById` kullan). E-posta / web push / Slack-Teams bu tabloyu kaynak (giden kutusu) olarak kullanacak.
 
 ## Ön öneri kuralı (Uygun / Sınırda / Elenmiş)
 

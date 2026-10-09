@@ -62,6 +62,9 @@ import launch_report as lr
 import trends
 import competency as comp
 import forum
+import notify
+import base64
+import binascii
 import excel_export
 import supplier_scoring as sup
 import launch_control as lc
@@ -2146,7 +2149,9 @@ async def training_lessons(user: dict = Depends(require_user)):
     notes = await db.training_notes_for_user(user["user_id"])
     staff = user["role"] in ("owner", "admin")
     assigned = await db.list_lessons_for_user(user["user_id"])
-    my_lessons = [_lesson_out(r, mine.get(r["id"]), note=notes.get(r["id"])) for r in assigned]
+    disc = await forum.lesson_threads()
+    my_lessons = [{**_lesson_out(r, mine.get(r["id"]), note=notes.get(r["id"])), "discussion": disc.get(r["id"])}
+                  for r in assigned]
     resp = {"role": user["role"], "my_lessons": my_lessons,
             "my_progress": {"completed": sum(1 for l in my_lessons if l["completed"]), "total": len(my_lessons)}}
     if staff:
@@ -2158,6 +2163,8 @@ async def training_lessons(user: dict = Depends(require_user)):
 async def training_create(req: LessonIn, user: dict = Depends(require_staff)):
     data = await _clean_lesson(req)
     lesson_id = await db.create_lesson(data, user["user_id"])
+    await notify.add(await db.lesson_audience(lesson_id), "lesson", user["user_id"], lesson_id=lesson_id,
+                     data={"title": data["title"]})
     return {"ok": True, "id": lesson_id}
 
 
@@ -2165,7 +2172,12 @@ async def training_create(req: LessonIn, user: dict = Depends(require_staff)):
 async def training_update(lesson_id: int, req: LessonIn, user: dict = Depends(require_staff)):
     if not await db.get_lesson(lesson_id):
         raise HTTPException(404, "Ders bulunamadı")
-    await db.update_lesson(lesson_id, await _clean_lesson(req))
+    data = await _clean_lesson(req)
+    before = await db.lesson_audience(lesson_id)
+    await db.update_lesson(lesson_id, data)
+    # Yalnızca dersi YENİ görmeye başlayanlara bildirim (atama genişletildiyse)
+    await notify.add(await db.lesson_audience(lesson_id) - before, "lesson", user["user_id"], lesson_id=lesson_id,
+                     data={"title": data["title"]})
     return {"ok": True, "id": lesson_id}
 
 
@@ -2211,6 +2223,40 @@ async def training_note(lesson_id: int, req: TrainingNoteIn, user: dict = Depend
     await db.set_training_note(lesson_id, user["user_id"], note)
     saved = (await db.training_notes_for_user(user["user_id"])).get(lesson_id)
     return {"ok": True, "note": saved["note"] if saved else "", "updated_at": saved["updated_at"] if saved else None}
+
+
+LESSON_THREAD_BODY = ("Bu başlık “{title}” dersi için soru-cevap alanıdır. Takıldığın yerleri sor, dersten "
+                      "edindiğin kazanımları paylaş.")
+
+
+@app.post("/api/training/lessons/{lesson_id}/discussion")
+async def training_discussion(lesson_id: int, user: dict = Depends(require_user)):
+    """Dersin soru-cevap başlığı (ders başına TEK): varsa döner, yoksa oluşturur. Yalnızca dersi görebilen ya da
+    owner/admin. Başlık "Sadece ekip" görünürlükte, yazarı dersi ekleyen kişi (soruların bildirimi ona gitsin)."""
+    lesson = await db.get_lesson(lesson_id)
+    staff = user["role"] in ("owner", "admin")
+    if not lesson or not (staff or await db.is_lesson_assigned(lesson_id, user["user_id"])):
+        raise HTTPException(404, "Ders bulunamadı ya da size atanmamış")
+    existing = await forum.thread_for_lesson(lesson_id)
+    if existing:
+        return {"ok": True, "thread_id": existing["id"], "created": False}
+    cats = await forum.list_categories()
+    cat = next((c for c in cats if c["name"] == "Genel"), cats[0] if cats else None)
+    if not cat:
+        raise HTTPException(409, "Forumda kategori yok — önce bir kategori ekleyin")
+    author = lesson.get("created_by") if lesson.get("created_by") and await db.get_user_role(lesson["created_by"]) else user["user_id"]
+    title = f"Ders: {lesson['title']}"[: forum.TITLE_MAX - len(" — Soru & Cevap")] + " — Soru & Cevap"
+    try:
+        tid = await forum.create_thread(author, {
+            "category_id": cat["id"], "kind": "discussion", "visibility": "team", "title": title,
+            "body": LESSON_THREAD_BODY.format(title=lesson["title"]), "tags": ["egitim"], "lesson_id": lesson_id})
+    except Exception:   # eşzamanlı ikinci oluşturma (ux_forum_threads_lesson) -> var olanı döndür
+        existing = await forum.thread_for_lesson(lesson_id)
+        if not existing:
+            raise
+        return {"ok": True, "thread_id": existing["id"], "created": False}
+    await forum.set_saved(tid, user["user_id"], True)
+    return {"ok": True, "thread_id": tid, "created": True}
 
 
 @app.get("/api/training/progress")
@@ -2315,7 +2361,8 @@ async def _forum_viewer(user: dict) -> dict:
 
 
 def _forum_author(row: dict, uid_key: str = "user_id") -> dict:
-    return {"id": row.get(uid_key), "name": db.display_name(row) or "—", "title": row.get("author_title") or ""}
+    return {"id": row.get(uid_key), "name": db.display_name(row) or "—", "title": row.get("author_title") or "",
+            "username": row.get("author_username") or ""}
 
 
 def _excerpt(text: str, n: int = 280) -> str:
@@ -2335,10 +2382,39 @@ def _thread_out(t: dict, cats: dict, v: dict, full: bool = False) -> dict:
            "pinned": bool(t["pinned"]), "locked": bool(t["locked"]), "solved": bool(t.get("solution_reply_id")),
            "solution": {"id": sol["id"], "author": _forum_author(sol), "excerpt": _excerpt(sol["body"], 320)} if sol else None,
            "is_mine": t["user_id"] == v["id"], "can_edit": t["user_id"] == v["id"],
-           "can_delete": t["user_id"] == v["id"] or v["staff"], "can_moderate": v["staff"]}
+           "can_delete": t["user_id"] == v["id"] or v["staff"], "can_moderate": v["staff"],
+           "is_new": bool(t.get("is_new")), "new_replies": t.get("new_replies", 0),
+           "unanswered": _is_unanswered(t), "lesson_id": t.get("lesson_id"),
+           "analysis": _thread_analysis(t)}
     if full:
         out["body"] = t["body"]
     return out
+
+
+def _is_unanswered(t: dict) -> bool:
+    """Cevapsız soru: soru türü, hiç cevap yok, çözülmemiş, kilitli değil."""
+    return t["kind"] == "question" and not t.get("reply_count") and not t.get("solution_reply_id") and not t["locked"]
+
+
+def _thread_analysis(t: dict) -> dict | None:
+    if not t.get("analysis_key"):
+        return None
+    try:
+        brief = json.loads(t.get("analysis_json") or "{}")
+    except (TypeError, ValueError):
+        brief = {}
+    return {"key": t["analysis_key"], "marketplace": t.get("analysis_market"), "brief": brief}
+
+
+def _analysis_brief(payload: dict, fetched_at: int | None) -> dict:
+    """Foruma bağlanan analizin ÖZETİ — sunucuda keyword_analysis kaydından (istemci değer göndermez, kontrol
+    listesiyle aynı ilke). Başlık açıldığı andaki değerler; analiz sonradan değişse de başlıktaki özet değişmez."""
+    snap = ckl.extract_snapshot(payload, fetched_at)
+    pa = payload.get("pre_assessment") or {}
+    return {"label": (payload.get("asin_info") or {}).get("title") or payload.get("keyword"),
+            "mode": snap["analysis_mode"], "category": payload.get("category_used"),
+            "verdict": pa.get("verdict"), "fetched_at": fetched_at,
+            "values": {k: snap["values"].get(k) for k in ("searches", "price", "top10_revenue", "reviews", "top3_share", "new_brands")}}
 
 
 async def _visible_thread(tid: int, v: dict) -> dict:
@@ -2393,14 +2469,28 @@ async def forum_meta(user: dict = Depends(require_user)):
         "contributors": [{"author": _forum_author(c["user"]), "replies": c["replies"], "solutions": c["solutions"]}
                          for c in contrib[:5]],
         "tags": sorted(tag_count.values(), key=lambda x: (-x["count"], x["tag"].casefold()))[:10],
+        "unanswered": sum(1 for t in threads if _is_unanswered(t)),
+        # owner/admin: 24 saattir cevapsız soru sayısı ve açık içerik bildirimleri
+        "stale_unanswered": sum(1 for t in threads if _is_unanswered(t)
+                                and t["created_at"] < int(time.time()) - forum.UNANSWERED_STALE_SECONDS) if v["staff"] else None,
+        "open_reports": len(await forum.open_reports()) if v["staff"] else None,
+        "unread": sum(1 for t in threads if t["is_new"] or t["new_replies"]),
+        "has_username": bool(await _my_username(v["id"])),
         "kinds": forum.KINDS, "can_post_team": v["can_see_team"], "is_staff": v["staff"], "is_owner": v["role"] == "owner",
         "limits": {"title_min": forum.TITLE_MIN, "title_max": forum.TITLE_MAX, "body_max": forum.BODY_MAX,
-                   "reply_max": forum.REPLY_MAX, "max_tags": forum.MAX_TAGS, "tag_max": forum.TAG_MAX},
+                   "reply_max": forum.REPLY_MAX, "max_tags": forum.MAX_TAGS, "tag_max": forum.TAG_MAX,
+                   "images_per_post": forum.IMAGES_PER_POST, "image_max_bytes": forum.IMAGE_MAX_BYTES,
+                   "report_max": forum.REPORT_REASON_MAX},
     }
 
 
+async def _my_username(uid: int) -> str:
+    row = await db.fetch_one("SELECT username FROM users WHERE id = ?", (uid,))
+    return (row or {}).get("username") or ""
+
+
 @app.get("/api/forum/threads")
-async def forum_threads(tab: str = Query("all", pattern=r"^(all|solved|hot|bulletins|saved|mine)$"),
+async def forum_threads(tab: str = Query("all", pattern=r"^(all|solved|hot|bulletins|saved|mine|unanswered|unread)$"),
                         category: int | None = Query(None, ge=1), tag: str | None = Query(None, max_length=40),
                         q: str | None = Query(None, max_length=200), page: int = Query(1, ge=1, le=10000),
                         user: dict = Depends(require_user)):
@@ -2422,7 +2512,13 @@ async def forum_threads(tab: str = Query("all", pattern=r"^(all|solved|hot|bulle
         threads = [t for t in threads if t["saved"]]
     elif tab == "mine":
         threads = [t for t in threads if t["user_id"] == v["id"]]
-    if tab == "hot":
+    elif tab == "unanswered":
+        threads = [t for t in threads if _is_unanswered(t)]
+    elif tab == "unread":
+        threads = [t for t in threads if t["is_new"] or t["new_replies"]]
+    if tab == "unanswered":   # en uzun bekleyen önce
+        threads.sort(key=lambda t: (t["created_at"], t["id"]))
+    elif tab == "hot":
         score = await forum.interactions_since(int(time.time()) - forum.HOT_DAYS * 86400)
         threads = [t for t in threads if score.get(t["id"], 0) > 0]
         threads.sort(key=lambda t: (-score[t["id"]], -t["last_activity_at"], -t["id"]))
@@ -2441,19 +2537,34 @@ async def forum_thread(tid: int, user: dict = Depends(require_user)):
     v = await _forum_viewer(user)
     await _visible_thread(tid, v)
     await forum.record_view(tid, v["id"])
-    threads, cats = await _all_visible(v)
+    threads, cats = await _all_visible(v)   # okunma durumu AÇILMADAN önceki haliyle (hangi cevaplar yeni?)
     t = next(x for x in threads if x["id"] == tid)
+    baseline, reads = await forum.read_state(v["id"])
+    seen_id = reads.get(tid, 0)            # bu kişinin gördüğü son cevap (hiç açmadıysa 0)
+    await forum.mark_read(tid, v["id"])    # ÖNCE okundu, SONRA cevaplar okunur → arada gelen cevap kaçmaz
+    await notify.mark_read(v["id"], thread_id=tid)   # başlığı açınca o başlığın bildirimleri okundu
     replies = await forum.replies_of(tid, v["id"])
+    images = await forum.thread_images(tid)
+    mine = {(r["target_type"], r["target_id"]) for r in await db.fetch_all(
+        "SELECT target_type, target_id FROM forum_reports WHERE user_id = ? AND thread_id = ?", (v["id"], tid))}
     out = _thread_out(t, cats, v, full=True)
     out.update({
         "can_reply": not t["locked"], "can_mark_solution": t["kind"] != "bulletin" and (t["user_id"] == v["id"] or v["staff"]),
+        "image_ids": images.get(0, []), "reported": ("thread", tid) in mine,
         "replies": [{"id": r["id"], "body": r["body"], "author": _forum_author(r), "created_at": r["created_at"],
                      "edited_at": r.get("edited_at"), "useful": r["useful"], "voted": r["voted"],
                      "is_solution": r["id"] == t.get("solution_reply_id"), "is_mine": r["user_id"] == v["id"],
-                     "can_edit": r["user_id"] == v["id"], "can_delete": r["user_id"] == v["id"] or v["staff"]}
+                     "can_edit": r["user_id"] == v["id"], "can_delete": r["user_id"] == v["id"] or v["staff"],
+                     "is_new": r["user_id"] != v["id"] and r["id"] > seen_id and r["created_at"] > baseline,
+                     "image_ids": images.get(r["id"], []), "reported": ("reply", r["id"]) in mine}
                     for r in replies],
     })
     return out
+
+
+class AnalysisRefIn(BaseModel):
+    key: str = Field(..., min_length=1, max_length=300)
+    marketplace: str = Field("US", pattern=r"^[A-Z]{2}$")
 
 
 class ThreadIn(BaseModel):
@@ -2463,6 +2574,9 @@ class ThreadIn(BaseModel):
     category_id: int = Field(..., ge=1)
     visibility: str = Field("public", pattern=r"^(public|team)$")
     tags: list[str] = Field(default_factory=list, max_length=50)
+    image_ids: list[int] = Field(default_factory=list, max_length=20)
+    # Yalnızca yeni başlıkta: Ürün Analizi'nden "Forumda tartış" — özet SUNUCUDA kayıttan alınır
+    analysis: AnalysisRefIn | None = None
 
 
 async def _clean_thread(req: ThreadIn, v: dict) -> dict:
@@ -2480,14 +2594,47 @@ async def _clean_thread(req: ThreadIn, v: dict) -> dict:
     return d
 
 
+async def _audience_ok(thread: dict) -> set[int] | None:
+    """Bildirim alıcı süzgeci: "Sadece ekip" başlığında yalnızca en az bir ekipte olanlar (None = herkes)."""
+    return await db.team_member_ids() if thread["visibility"] == "team" else None
+
+
+async def _notify_mentions(text: str, thread: dict, actor_id: int, reply_id: int | None = None,
+                           skip: set[int] | None = None, before: str = "") -> set[int]:
+    """Metindeki @kullanıcıadı'lara bildirim (düzenlemede yalnızca YENİ eklenen bahsetmeler). Başlığı göremeyen
+    kişiye gitmez. Bildirim gidenleri döner."""
+    names = forum.extract_mentions(text) - forum.extract_mentions(before)
+    ids = set((await forum.users_by_username(names)).values()) - (skip or set()) - {actor_id}
+    allowed = await _audience_ok(thread)
+    if allowed is not None:
+        ids &= allowed
+    if ids:
+        await notify.add(ids, "mention", actor_id, thread["id"], reply_id,
+                         data={"title": thread["title"], "excerpt": _excerpt(text, 140)})
+    return ids
+
+
 @app.post("/api/forum/threads")
 async def forum_create(req: ThreadIn, user: dict = Depends(require_user)):
     v = await _forum_viewer(user)
     d = await _clean_thread(req, v)
+    if req.analysis:
+        key = _analysis_key(req.analysis.key)
+        rec = await db.get_analysis_record(key, req.analysis.marketplace)
+        if not rec:
+            raise HTTPException(422, "Bu analiz kayıtlı değil — önce Ürün Analizi'nde çalıştırın")
+        d["analysis"] = {"key": key, "marketplace": req.analysis.marketplace,
+                         "brief": _analysis_brief(rec["payload"], rec["fetched_at"])}
     msg = await forum.rate_limited(v["id"], new_thread=True)
     if msg:
         raise HTTPException(429, msg)
     tid = await forum.create_thread(v["id"], d)
+    await forum.set_post_images(v["id"], tid, None, req.image_ids)
+    thread = {**d, "id": tid}
+    mentioned = await _notify_mentions(d["body"], thread, v["id"])
+    if d["kind"] == "bulletin":
+        await notify.broadcast("bulletin", v["id"], tid, {"title": d["title"]}, team_only=d["visibility"] == "team",
+                               exclude=mentioned)
     return {"ok": True, "id": tid}
 
 
@@ -2498,7 +2645,10 @@ async def forum_update(tid: int, req: ThreadIn, user: dict = Depends(require_use
     t = await _visible_thread(tid, v)
     if t["user_id"] != v["id"]:
         raise HTTPException(403, "Yalnızca yazar düzenleyebilir")
-    await forum.update_thread(tid, await _clean_thread(req, v))
+    d = await _clean_thread(req, v)
+    await forum.update_thread(tid, d)
+    await forum.set_post_images(v["id"], tid, None, req.image_ids)
+    await _notify_mentions(d["body"], {**d, "id": tid}, v["id"], before=t["body"])
     return {"ok": True, "id": tid}
 
 
@@ -2534,6 +2684,7 @@ async def forum_lock(tid: int, req: FlagIn, user: dict = Depends(require_staff))
 
 class ReplyIn(BaseModel):
     body: str = Field(..., max_length=50_000)
+    image_ids: list[int] = Field(default_factory=list, max_length=20)
 
 
 def _clean_reply(body: str) -> str:
@@ -2556,16 +2707,30 @@ async def forum_reply(tid: int, req: ReplyIn, user: dict = Depends(require_user)
     rid = await forum.add_reply(tid, v["id"], body)
     if rid is None:   # bu arada kilitlendi
         raise HTTPException(423, "Başlık kilitli — cevap yazılamaz")
+    await forum.set_post_images(v["id"], tid, rid, req.image_ids)
+    # Bildirimler — öncelik: başlık sahibi "cevap", bahsedilen "bahsetme", diğer takipçiler "takip edilen başlık"
+    data = {"title": t["title"], "excerpt": _excerpt(body, 140)}
+    owner = {t["user_id"]} - {v["id"]}
+    await notify.add(owner, "reply", v["id"], tid, rid, data=data)
+    mentioned = await _notify_mentions(body, t, v["id"], rid, skip=owner)
+    rest = await forum.followers(tid) - owner - mentioned - {v["id"]}
+    allowed = await _audience_ok(t)
+    if allowed is not None:
+        rest &= allowed
+    await notify.add(rest, "follow_reply", v["id"], tid, rid, data=data)
     return {"ok": True, "id": rid}
 
 
 @app.put("/api/forum/replies/{rid}")
 async def forum_reply_update(rid: int, req: ReplyIn, user: dict = Depends(require_user)):
     v = await _forum_viewer(user)
-    r, _ = await _visible_reply(rid, v)
+    r, t = await _visible_reply(rid, v)
     if r["user_id"] != v["id"]:
         raise HTTPException(403, "Yalnızca yazar düzenleyebilir")
-    await forum.update_reply(rid, _clean_reply(req.body))
+    body = _clean_reply(req.body)
+    await forum.update_reply(rid, body)
+    await forum.set_post_images(v["id"], t["id"], rid, req.image_ids)
+    await _notify_mentions(body, t, v["id"], rid, before=r["body"])
     return {"ok": True}
 
 
@@ -2592,19 +2757,24 @@ async def forum_solution(tid: int, req: SolutionIn, user: dict = Depends(require
         raise HTTPException(403, "Çözümü yalnızca başlık sahibi ya da owner/admin işaretleyebilir")
     if t["kind"] == "bulletin":
         raise HTTPException(409, "Bülten başlıklarında çözüm işaretlenmez")
+    r = None
     if req.reply_id is not None:
         r = await forum.get_reply(req.reply_id)
         if not r or r["thread_id"] != tid:
             raise HTTPException(422, "Cevap bu başlığa ait değil")
     await forum.set_solution(tid, req.reply_id)
+    if r and req.reply_id != t.get("solution_reply_id"):
+        await notify.add([r["user_id"]], "solution", v["id"], tid, r["id"], data={"title": t["title"]})
     return {"ok": True, "solution_reply_id": req.reply_id}
 
 
 async def _vote(target: str, target_id: int, v: dict, add: bool):
     if target == "thread":
-        owner_id = (await _visible_thread(target_id, v))["user_id"]
+        t = await _visible_thread(target_id, v)
+        owner_id = t["user_id"]
     else:
-        owner_id = (await _visible_reply(target_id, v))[0]["user_id"]
+        r, t = await _visible_reply(target_id, v)
+        owner_id = r["user_id"]
     if not add:
         await forum.remove_vote(target, target_id, v["id"])
         return {"ok": True, "voted": False}
@@ -2612,6 +2782,8 @@ async def _vote(target: str, target_id: int, v: dict, add: bool):
         raise HTTPException(403, "Kendi içeriğine \"Faydalı\" veremezsin")
     if not await forum.add_vote(target, target_id, v["id"]):
         raise HTTPException(409, "Bu içerik için zaten \"Faydalı\" verdin")
+    await notify.add_vote(owner_id, v["id"], t["id"], target_id if target == "reply" else None,
+                          {"title": t["title"], "target": target})
     return {"ok": True, "voted": True}
 
 
@@ -2649,6 +2821,192 @@ async def forum_unsave(tid: int, user: dict = Depends(require_user)):
     await _visible_thread(tid, v)
     await forum.set_saved(tid, v["id"], False)
     return {"ok": True, "saved": False}
+
+
+@app.post("/api/forum/read-all")
+async def forum_read_all(user: dict = Depends(require_user)):
+    """Tüm başlıkları okundu say (başlangıç çizgisi şimdi)."""
+    v = await _forum_viewer(user)
+    await forum.mark_all_read(v["id"])
+    return {"ok": True}
+
+
+@app.get("/api/forum/people")
+async def forum_people(q: str = Query("", max_length=40), user: dict = Depends(require_user)):
+    """@bahsetme önerisi — yalnızca kullanıcı adı belirlemiş kişiler (kullanıcı adı forumda zaten görünür)."""
+    return {"people": [{"username": r["username"], "name": db.display_name(r) or r["username"], "title": r.get("title") or ""}
+                       for r in await forum.search_people(q)]}
+
+
+# --- Görseller: veritabanında; erişim başlığın görünürlüğüyle aynı ---
+class ImageIn(BaseModel):
+    data: str = Field(..., max_length=2_200_000)   # data:image/...;base64,... ya da düz base64
+
+
+@app.post("/api/forum/images")
+async def forum_image_upload(req: ImageIn, user: dict = Depends(require_user)):
+    v = await _forum_viewer(user)
+    raw_b64 = req.data.split(",", 1)[1] if req.data.startswith("data:") else req.data
+    try:
+        raw = base64.b64decode(raw_b64, validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(422, "Görsel okunamadı")
+    if len(raw) > forum.IMAGE_MAX_BYTES:
+        raise HTTPException(413, f"Görsel en fazla {forum.IMAGE_MAX_BYTES // 1000} KB olabilir")
+    mime = forum.sniff_image(raw)
+    if not mime:
+        raise HTTPException(415, "Yalnızca PNG, JPEG, GIF ya da WebP görsel yüklenebilir")
+    if await forum.image_upload_blocked(v["id"]):
+        raise HTTPException(429, f"Saatte en fazla {forum.IMAGE_UPLOADS_PER_HOUR} görsel yüklenebilir")
+    iid = await forum.save_image(v["id"], mime, len(raw), base64.b64encode(raw).decode())
+    return {"ok": True, "id": iid, "size": len(raw), "mime": mime}
+
+
+@app.get("/api/forum/images/{iid}")
+async def forum_image(iid: int, user: dict = Depends(require_user)):
+    """Bağlı görsel: başlığı görebilen herkes. Henüz bağlanmamış: yalnızca yükleyen. Aksi halde 404."""
+    v = await _forum_viewer(user)
+    img = await forum.get_image(iid)
+    if not img:
+        raise HTTPException(404, "Görsel bulunamadı")
+    if img["thread_id"] is None:
+        if img["user_id"] != v["id"]:
+            raise HTTPException(404, "Görsel bulunamadı")
+    else:
+        await _visible_thread(img["thread_id"], v)
+    return Response(content=base64.b64decode(img["data"]), media_type=img["mime"],
+                    headers={"Cache-Control": "private, max-age=86400", "X-Content-Type-Options": "nosniff",
+                             "Content-Security-Policy": "default-src 'none'; sandbox", "Content-Disposition": "inline"})
+
+
+# --- İçerik bildirme ---
+class ReportIn(BaseModel):
+    reason: str = Field(..., max_length=5000)
+
+
+async def _report(target: str, target_id: int, req: ReportIn, user: dict):
+    v = await _forum_viewer(user)
+    if target == "thread":
+        t = await _visible_thread(target_id, v)
+        owner = t["user_id"]
+    else:
+        r, t = await _visible_reply(target_id, v)
+        owner = r["user_id"]
+    if owner == v["id"]:
+        raise HTTPException(403, "Kendi içeriğini bildiremezsin")
+    try:
+        reason = forum.clean_text(req.reason, "Gerekçe", 5, forum.REPORT_REASON_MAX)
+    except forum.ForumError as e:
+        raise HTTPException(422, str(e))
+    rid = await forum.add_report(target, target_id, t["id"], v["id"], reason)
+    if rid is None:
+        raise HTTPException(409, "Bu içeriği zaten bildirdin")
+    staff = {u["id"] for u in await db.list_users() if u["role"] in ("owner", "admin")}
+    await notify.add(staff, "report", v["id"], t["id"], target_id if target == "reply" else None,
+                     data={"title": t["title"], "excerpt": _excerpt(reason, 140)})
+    return {"ok": True}
+
+
+@app.post("/api/forum/threads/{tid}/report")
+async def forum_report_thread(tid: int, req: ReportIn, user: dict = Depends(require_user)):
+    return await _report("thread", tid, req, user)
+
+
+@app.post("/api/forum/replies/{rid}/report")
+async def forum_report_reply(rid: int, req: ReportIn, user: dict = Depends(require_user)):
+    return await _report("reply", rid, req, user)
+
+
+@app.get("/api/forum/reports")
+async def forum_reports(user: dict = Depends(require_staff)):
+    """Açık içerik bildirimleri (yalnızca owner/admin)."""
+    return {"items": [{"id": r["id"], "target_type": r["target_type"], "target_id": r["target_id"],
+                       "thread_id": r["thread_id"], "thread_title": r["thread_title"], "reason": r["reason"],
+                       "excerpt": _excerpt(r.get("body") or "", 200), "created_at": r["created_at"],
+                       "reporter": db.display_name(r) or "—"} for r in await forum.open_reports()]}
+
+
+@app.post("/api/forum/reports/{rid}/resolve")
+async def forum_report_resolve(rid: int, user: dict = Depends(require_staff)):
+    if not await forum.resolve_report(rid, user["user_id"]):
+        raise HTTPException(404, "Açık bildirim bulunamadı")
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# PANEL İÇİ BİLDİRİMLER (notify.py) — kişi yalnızca KENDİ bildirimlerini görür/okur
+# ---------------------------------------------------------------------------
+_NOTIF_TEXT = {
+    "reply": "{actor}, “{title}” başlığına cevap yazdı",
+    "follow_reply": "{actor}, takip ettiğin “{title}” başlığına cevap yazdı",
+    "mention": "{actor} senden bahsetti: “{title}”",
+    "solution": "{actor}, “{title}” başlığında cevabını çözüm olarak işaretledi",
+    "vote": "{actor}{others} “{title}” içindeki {what} faydalı buldu",
+    "bulletin": "Yeni bülten: “{title}” ({actor})",
+    "lesson": "Sana yeni bir ders atandı: “{title}”",
+    "report": "{actor} bir içeriği bildirdi: “{title}”",
+}
+
+
+async def _visible_notifications(uid: int, rows: list[dict]) -> tuple[list[dict], list[int]]:
+    """Başlığı silinmiş ya da artık görülemeyen ("Sadece ekip" + ekip dışı) bildirimleri ayıklar."""
+    tids = sorted({r["thread_id"] for r in rows if r.get("thread_id")})
+    vis = {}
+    if tids:
+        marks = ",".join("?" * len(tids))
+        vis = {r["id"]: r["visibility"] for r in await db.fetch_all(
+            f"SELECT id, visibility FROM forum_threads WHERE id IN ({marks})", tuple(tids))}
+    st = _auth_state(uid)
+    in_team = st["in_team"] if st else await db.is_in_team(uid)
+    keep, drop = [], []
+    for r in rows:
+        tid = r.get("thread_id")
+        if tid and (tid not in vis or (vis[tid] == "team" and not in_team)):
+            drop.append(r["id"])
+        else:
+            keep.append(r)
+    return keep, drop
+
+
+def _notif_out(n: dict) -> dict:
+    d = n.get("data") or {}
+    cnt = int(d.get("count") or 1)
+    text = _NOTIF_TEXT.get(n["kind"], "{title}").format(
+        actor=db.display_name(n) or "Biri", title=d.get("title") or "—",
+        others=f" ve {cnt - 1} kişi daha" if cnt > 1 else "", what="cevabını" if d.get("target") == "reply" else "başlığını")
+    return {"id": n["id"], "kind": n["kind"], "text": text, "excerpt": d.get("excerpt") or "",
+            "thread_id": n.get("thread_id"), "reply_id": n.get("reply_id"), "lesson_id": n.get("lesson_id"),
+            "created_at": n["created_at"], "read": n.get("read_at") is not None}
+
+
+@app.get("/api/notifications")
+async def notifications_list(user: dict = Depends(require_user)):
+    rows = await notify.list_for(user["user_id"])
+    keep, drop = await _visible_notifications(user["user_id"], rows)
+    if drop:
+        await notify.mark_read(user["user_id"], ids=drop)
+    return {"items": [_notif_out(n) for n in keep], "unread": sum(1 for n in keep if n.get("read_at") is None)}
+
+
+@app.get("/api/notifications/count")
+async def notifications_count(user: dict = Depends(require_user)):
+    """Panel bunu ~60 sn'de bir (sekme açıkken) yoklar — hafif."""
+    keep, _ = await _visible_notifications(user["user_id"], await notify.unread_rows(user["user_id"]))
+    return {"unread": len(keep)}
+
+
+class NotifReadIn(BaseModel):
+    ids: list[int] = Field(default_factory=list, max_length=500)
+    all: bool = False
+
+
+@app.post("/api/notifications/read")
+async def notifications_read(req: NotifReadIn, user: dict = Depends(require_user)):
+    if req.all:
+        await notify.mark_read(user["user_id"])
+    elif req.ids:
+        await notify.mark_read(user["user_id"], ids=req.ids)
+    return {"ok": True}
 
 
 class CategoryIn(BaseModel):
