@@ -34,8 +34,13 @@ GROUP_LABELS = {
     "vote": "İçeriğimin faydalı bulunması",
     "report": "Bildirilen içerikler (owner/admin)",
 }
-DEFAULTS = {"instant": {"direct": True, "lesson": True, "report": True, "follow": False, "bulletin": False, "vote": False},
+# Varsayılan: HEPSİ açık (kullanıcı isteği) — isteyen Profilim → Bildirim Ayarları'ndan kapatır.
+DEFAULTS = {"instant": {"direct": True, "lesson": True, "report": True, "follow": True, "bulletin": True, "vote": True},
             "weekly": True, "email_off": False}
+# İlk sürümün varsayılanı (takip/bülten/oy kapalı). Bu değerde KAYITLI satırlar (kişi ayarı hiç değiştirmemiş, satır
+# abonelik bağlantısı için oluşmuş) bir kez yeni varsayılana çekilir — migrate_defaults_once.
+_OLD_DEFAULTS = {"instant": {"direct": True, "lesson": True, "report": True, "follow": False, "bulletin": False, "vote": False},
+                 "weekly": True, "email_off": False}
 COALESCE_SECONDS = 30 * 60
 
 SCHEMAS = [
@@ -52,6 +57,20 @@ def clean_prefs(raw: dict | None) -> dict:
     return {"instant": {g: bool(inst.get(g, DEFAULTS["instant"][g])) for g in GROUPS},
             "weekly": bool(raw.get("weekly", DEFAULTS["weekly"])),
             "email_off": bool(raw.get("email_off", DEFAULTS["email_off"]))}
+
+
+async def migrate_defaults_once():
+    """Bir kez (schema_flags): eski varsayılanda duran tercihleri yeni varsayılana (hepsi açık) çeker. Kişinin
+    kendi değiştirdiği (eski varsayılandan farklı) tercihlere ve 'tümünü kapat'a dokunmaz."""
+    if await fetch_one("SELECT 1 AS ok FROM schema_flags WHERE key = 'notif_defaults_all_on'"):
+        return
+    try:
+        await execute("INSERT INTO schema_flags (key, value, set_at) VALUES ('notif_defaults_all_on', '1', ?)", (int(time.time()),))
+    except Exception:
+        return   # başka bir örnek yapıyor
+    for r in await fetch_all("SELECT user_id, prefs_json FROM notification_prefs"):
+        if clean_prefs(json.loads(r["prefs_json"])) == _OLD_DEFAULTS:
+            await execute("UPDATE notification_prefs SET prefs_json = ? WHERE user_id = ?", (json.dumps(DEFAULTS), r["user_id"]))
 
 
 async def _row(user_id: int) -> dict | None:
