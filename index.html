@@ -741,6 +741,7 @@
               <span id="trd-summary-chip" class="chip ok"></span>
               <span id="trd-meta" class="text-xs text-secondary"></span>
             </div>
+            <button type="button" id="trd-refresh" class="btn btn-outline btn-sm ml-auto" style="display:none;" title="72 saatlik kayıtlı veriyi atla, SellerSprite'tan yeniden çek (MCP kotası harcar)"><span class="material-symbols-outlined">refresh</span>Canlı veriyle tara</button>
             <label class="flex items-center gap-2 text-xs text-secondary">Sıralama
               <select id="trd-sort" class="field !h-8 text-xs">
                 <option value="backend">Backend sırası</option>
@@ -1210,7 +1211,7 @@
               <label class="flex flex-col gap-1.5"><span class="eyebrow">Soyad *</span><input type="text" id="pf-last" class="field" maxlength="60" autocomplete="family-name"></label>
               <label class="flex flex-col gap-1.5"><span class="eyebrow">Kullanıcı adı</span><input type="text" id="pf-username" class="field mono" maxlength="30" autocomplete="off" spellcheck="false" placeholder="örn. ayse.k">
                 <span class="text-[11px] text-secondary">Benzersiz; forumda görünecek. Giriş bilgini (e-posta) değiştirmez. Küçük harf, rakam, nokta, alt çizgi, tire.</span></label>
-              <label class="flex flex-col gap-1.5"><span class="eyebrow">Unvan</span><input type="text" id="pf-title" class="field" maxlength="80" placeholder="örn. Kıdemli PL Araştırmacı"></label>
+              <label class="flex flex-col gap-1.5"><span class="eyebrow">Unvan</span><input type="text" id="pf-title" class="field" maxlength="80" placeholder="örn. PPC Uzmanı"><span id="pf-title-note" class="text-[11px] text-secondary" style="display:none;">Unvanını panel yöneticisi (owner) belirler.</span></label>
               <label class="flex flex-col gap-1.5"><span class="eyebrow">Telefon (opsiyonel)</span><input type="tel" id="pf-phone" class="field" maxlength="30" autocomplete="tel" placeholder="+90 5xx xxx xx xx"></label>
               <div class="flex flex-col gap-1.5"><span class="eyebrow">Ekipler</span><div id="pf-teams-field" class="flex flex-wrap gap-1.5 min-h-[40px] items-center"></div>
                 <span class="text-[11px] text-secondary">Üye olduğun ekipleri panel yöneticisi (owner) belirler.</span></div>
@@ -1436,7 +1437,7 @@
 
           <!-- Aktivite -->
           <div id="tg-pane-activity" class="tg-pane" style="display:none;">
-        <p class="text-xs text-secondary mt-4">Yalnızca en az bir ekipte olan kişilerin aramaları ve pazar kararları görünür (ekip dışı ve tüm ekiplerden çıkarılmış kişilerinki görünmez; tekrar eklenince geri gelir). Kayıtlar salt okunurdur. Bir kayda tıklamak o keyword/ASIN için <b>canlı</b> yeni analiz başlatır (MCP kotası kullanılır).</p>
+        <p class="text-xs text-secondary mt-4">Yalnızca en az bir ekipte olan kişilerin aramaları ve pazar kararları görünür (ekip dışı ve tüm ekiplerden çıkarılmış kişilerinki görünmez; tekrar eklenince geri gelir). Kayıtlar salt okunurdur. Bir kayda tıklamak o keyword/ASIN için analiz başlatır (son 72 saatte çekildiyse kayıtlı veri gelir, MCP kotası harcanmaz).</p>
         <div id="tm-body">
           <form id="tm-filters" class="card card-pad mt-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3" novalidate>
             <label class="block min-w-0"><span class="text-xs font-medium text-on-surface-variant">Ekip</span>

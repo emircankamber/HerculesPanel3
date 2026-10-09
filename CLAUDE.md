@@ -168,8 +168,15 @@ gerçek bir keyword'le test et (henüz denenmedi).
   **kişiye özel kısım yeniden hesaplanır**: payload `_assess_inputs` (avg_price, gross_margin, acos_detail,
   top_brand_share, strong_new_brands, return_rate) taşır, `index._initial_assessment` bu kişinin eşikleri + analiz öncesi
   maliyetiyle `profit_inputs` ve `pre_assessment`'ı üretir (canlı yol da aynı fonksiyonu kullanır). Sorgu Geçmiş'e
-  yine yazılır. `_` ile başlayan alanlar yanıtta dönmez. `PAYLOAD_VERSION` artık ETKİN: payload biçimi değişirse artır
-  (v4'ten eski kayıtlar önbellek sayılmaz). Trend taraması (`/api/discovery/trending`) önbelleklenmez.
+  yine yazılır. `_` ile başlayan alanlar yanıtta dönmez. `PAYLOAD_VERSION` artık ETKİN: payload biçimi değişirse artır.
+  **Hata geçmişi (canlıda "önceden aranmış ama canlı çekiyor"):** (1) önbellekten ÖNCEKİ v3 kayıtlar sayılmıyordu →
+  artık `CACHE_MIN_PAYLOAD_VERSION`=3: `_req` yoksa varsayılan parametreler, `_assess_inputs` yoksa
+  `index._assess_inputs_from_payload` payload'dan kurar; (2) anahtar harf/boşluk duyarlıydı → `get_cached`
+  `LOWER(keyword)` ile en yeni kaydı alır, `/api/analyze` keyword'deki fazla boşlukları sadeleştirir.
+- **Trendler de 72 saat:** `mcp_cache` tablosu (anahtar = tool + parametrelerin sha256'sı, ham yanıt). `aba_research_*`
+  sayfaları ve keyword hacim geçmişi (`aba_research_trend`, keyword küçük harfle) buradan; yalnızca başarılı yanıt
+  saklanır. `force_refresh` ("Canlı veriyle tara") atlar ve yeniler. Yanıtta `source` (live|cache|mixed),
+  `cache_age_seconds`, `scan.mcp_calls` (GERÇEK çağrı — hata verenler dahil, çağrıdan önce sayılır) / `cached_calls`.
 - **Kararlar ve Geçmiş kullanıcıya özel** — `market_decision` ve
   `user_query_log` tabloları `user_id` ile izole. Ham SellerSprite verisi
   (`keyword_analysis`) paylaşımlı kalabilirdi ama artık önbellek okunmadığı
@@ -422,10 +429,15 @@ yüzden backend'e hiç bağlanmamalı, sahte veri olur.
   Veritabanında e-posta sütunları (checked_by vb.) aynen kalır; dönüşüm yalnızca çıktıda.
 - **Profil** (`GET/PUT /api/profile`, herkes yalnızca KENDİSİ): ad, soyad, kullanıcı adı (3–30, `[a-z0-9._-]`, küçük
   harfe çevrilir, büyük/küçük harf duyarsız benzersiz → 409; forumda görünecek, GİRİŞİ DEĞİŞTİRMEZ — giriş e-postayla),
-  unvan (≤80), telefon (opsiyonel). PUT yalnızca gönderilen alanları değiştirir. Departman serbest metni YOK → kişinin
+  unvan (≤80; **owner atar** — aşağıya bak), telefon (opsiyonel). PUT yalnızca gönderilen alanları değiştirir. Departman serbest metni YOK → kişinin
   ekipleri gösterilir. Fotoğraf yok, baş harflerden avatar (`app.js::initials`). **TC kimlik, doğum tarihi, adres,
   medeni durum, sağlık gibi kişisel veri alanları bilinçli olarak YOK — ekleme.** Hesap & Güvenlik:
   `POST /api/profile/password` (mevcut şifre yanlışsa 403; değişince bu oturum dışındakiler kapanır).
+- **Unvan (owner atar):** `PUT /api/users/{id}/title {title}` (`require_owner`; ≤80, boş = unvansız) — Ekip Yönetimi →
+  Üyeler'de rolün altındaki alan (öneri listesi `GET /api/users/titles`: kullanılanlar + `TITLE_SUGGESTIONS`). Profilde
+  yalnızca owner kendi unvanını değiştirir; diğerleri farklı değer gönderirse 403 (aynı değer yok sayılır, panelde alan
+  salt okunur). `users.title` sütunu; adın yanında gösterilir: forum yazarı, Aktivite (özet + listeler + kişi filtresi),
+  eğitim ilerleme tablosu, Yetenek Haritası.
 - **Yetkinlik formu** — şema TEK kaynak `api/competency.py` (15 bölüm; `GET /api/competency/schema`, panel buradan
   çizer). Cevaplar düz sözlük; 04–13 bölümlerinin seviyeleri tek `levels` sözlüğünde (madde → 1–5). `clean_answers()`
   bilinmeyeni atar, seçenek/seviye doğrular, metni kırpar. Tablo `competency_forms` (user_id PK, answers_json, status
@@ -543,7 +555,9 @@ yüzden backend'e hiç bağlanmamalı, sahte veri olur.
   saatte 10. IP = `X-Forwarded-For` ilk değeri.
 - **Bildirim e-postaları:** her bildirim kaydı (`notify.add` / `broadcast`) `notify_email.dispatch`'i çağırır; e-posta yalnızca
   alıcının e-postası DOĞRULANMIŞ + tercihi o grup için anlık + `email_off` değilse. Gruplar ve varsayılanlar
-  `notify_email.GROUPS`/`DEFAULTS` (bana yazılanlar, eğitim, raporlar açık; takip, bülten, oy kapalı; haftalık özet açık).
+  `notify_email.GROUPS`/`DEFAULTS` — HEPSİ AÇIK (kullanıcı isteği; isteyen kapatır). İlk sürümün varsayılanında
+  (takip/bülten/oy kapalı) KAYITLI satırlar bir kez yeni varsayılana çekildi (`migrate_defaults_once`,
+  `schema_flags.notif_defaults_all_on`); kişinin kendi değiştirdiği tercihlere dokunulmaz.
   Aynı başlık için 30 dk içinde okunmamış e-posta varsa yenisi gitmez; okunmamış oy bildirimi varken yeni oy sayaca eklenir
   (e-posta yok). Gönderim isteğin içinde tek toplu çağrı; hata isteği düşürmez, loglanır; gidenler `notifications.emailed_at`.
   Cümleler panelle ortak (`notify.render`). Kullanıcı içeriği şablonlarda `html.escape`. Her e-postada ayarlar bağlantısı

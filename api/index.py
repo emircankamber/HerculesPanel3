@@ -17,6 +17,7 @@ import os
 import sys
 import time
 import json
+import hashlib
 import re
 from datetime import datetime, timezone
 from urllib.parse import quote
@@ -416,6 +417,27 @@ def _initial_assessment(ai: dict, thresholds: dict | None, pre_cost: dict | None
     return profit_inputs, assessment
 
 
+_DEFAULT_REQ_KW = {"top_relevancy": 50, "keyword_list_size": 20, "category_override_node_id": None}
+_DEFAULT_REQ_ASIN = {"keyword_list_size": 20}
+
+
+def _assess_inputs_from_payload(p: dict) -> dict | None:
+    """Önbellekten önceki (v3) kayıtlardan kişiye özel hesabın girdilerini yeniden kurar — canlı yolla AYNI
+    kaynaklar: pazar istatistiği, ön değerlendirmedeki ACOS ayrıntısı ve "Güçlü Yeni Marka" değeri, marka payı."""
+    pa = p.get("pre_assessment") or {}
+    acos_detail = pa.get("acos_detail")
+    if not isinstance(acos_detail, dict) or "value" not in acos_detail:
+        return None
+    stats = p.get("market_stats") or {}
+    raw_gm = stats.get("avgProfit")
+    gross_margin = (raw_gm / 100 if raw_gm and raw_gm > 1 else raw_gm) if raw_gm is not None else None
+    brands = p.get("brand_concentration") or []
+    top_share = max((b.get("totalRevenueRatio", 0) for b in brands), default=None) if brands else None
+    new_brands = next((c.get("value") for c in pa.get("criteria") or [] if c.get("label") == "Güçlü Yeni Marka (1 yıl)"), None)
+    return {"avg_price": stats.get("avgPrice"), "gross_margin": gross_margin, "acos_detail": acos_detail,
+            "top_brand_share": top_share, "strong_new_brands": new_brands, "return_rate": p.get("market_return_rate")}
+
+
 async def _cached_analysis(key: str, marketplace: str, req_params: dict, uid: int, pre_cost: dict | None):
     """Son db.CACHE_TTL_SECONDS (72 saat) içinde aynı anahtar + pazar + istek parametreleriyle çekilmiş analiz
     varsa MCP'ye GİTMEDEN döner (ön öneri bu kişinin eşik/maliyetiyle yeniden hesaplanır, sorgu Geçmiş'e yazılır).
@@ -424,9 +446,12 @@ async def _cached_analysis(key: str, marketplace: str, req_params: dict, uid: in
     if not hit:
         return None
     payload, fetched_at = hit
-    if payload.get("_req") != req_params or not isinstance(payload.get("_assess_inputs"), dict):
+    # v3 kayıtlarında (önbellekten önce) _req yok: varsayılan parametrelerle çekilmişlerdi
+    stored_req = payload.get("_req") or (_DEFAULT_REQ_ASIN if payload.get("analysis_mode") == "asin" else _DEFAULT_REQ_KW)
+    ai = payload.get("_assess_inputs") if isinstance(payload.get("_assess_inputs"), dict) else _assess_inputs_from_payload(payload)
+    if stored_req != req_params or not ai:
         return None
-    profit_inputs, assessment = _initial_assessment(payload["_assess_inputs"], await db.get_user_thresholds(uid), pre_cost)
+    profit_inputs, assessment = _initial_assessment(ai, await db.get_user_thresholds(uid), pre_cost)
     await db.log_user_query(uid, key, marketplace, assessment.get("verdict"))
     out = {k: v for k, v in payload.items() if not k.startswith("_")}
     return {**out, "profit_inputs": profit_inputs, "pre_assessment": assessment, "source": "cache",
@@ -437,6 +462,9 @@ async def _cached_analysis(key: str, marketplace: str, req_params: dict, uid: in
 @app.post("/api/analyze")
 async def analyze(req: AnalyzeRequest, user: dict = Depends(require_auth)):
     uid = user.get("user_id", 0)
+    req.keyword = " ".join((req.keyword or "").split())   # fazla boşluk aynı aramayı farklı anahtar yapmasın
+    if not req.keyword:
+        raise HTTPException(422, "Keyword boş olamaz")
     # ÖNBELLEK (kullanıcı isteği, 72 saat): aynı keyword + pazar + parametrelerle son 72 saatte çekildiyse
     # MCP kotası harcanmaz, kayıtlı veri döner. force_refresh=True ("Canlı veriyle yenile") her zaman çeker.
     req_params = {"top_relevancy": req.top_relevancy, "keyword_list_size": req.keyword_list_size,
@@ -1971,6 +1999,7 @@ class TrendingRequest(BaseModel):
     max_bid: float | None = Field(None, ge=0)
     max_words: int | None = Field(None, ge=1, le=20)
     size: int = Field(20, ge=1, le=50)
+    force_refresh: bool = False   # "Canlı veriyle tara": 72 saatlik önbelleği atla
 
 
 TREND_FILTER_KEYS = ("min_searches", "max_searches", "min_purchases", "min_purchase_rate",
@@ -2002,7 +2031,32 @@ def _trend_row(it: dict) -> dict:
     }
 
 
-async def _attach_volume_history(rows: list[dict], marketplace: str, period_months: int | None) -> int:
+TREND_CACHE_TTL = db.CACHE_TTL_SECONDS   # Trendler de analizlerle aynı 72 saat kuralı
+
+
+def _mcp_cache_key(tool: str, args: dict) -> str:
+    return tool + ":" + hashlib.sha256(json.dumps(args, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+
+async def _cached_tool(tool: str, args: dict, wrap: bool, force: bool, stats: dict) -> dict:
+    """MCP çağrısı 72 saatlik ham yanıt önbelleğiyle (paylaşımlı). force=True her zaman canlı çeker ve önbelleği
+    yeniler. Yalnızca başarılı yanıt saklanır (hata/kota yanıtı önbelleğe girmez). stats: live / cached / oldest."""
+    key = _mcp_cache_key(tool, args)
+    if not force:
+        hit = await db.mcp_cache_get(key, TREND_CACHE_TTL)
+        if hit:
+            stats["cached"] += 1
+            stats["oldest"] = min(stats.get("oldest") or hit[1], hit[1])
+            return hit[0]
+    stats["live"] += 1   # hata verse de kota harcanmış olabilir → çağrıdan ÖNCE say
+    raw = await call_tool(tool, args, wrap_in_request=wrap)
+    if isinstance(raw, dict) and raw.get("data") is not None and str(raw.get("code", "OK")).upper() == "OK":
+        await db.mcp_cache_set(key, raw)
+    return raw
+
+
+async def _attach_volume_history(rows: list[dict], marketplace: str, period_months: int | None,
+                                 force: bool = False, stats: dict | None = None) -> int:
     """Her satıra keyword'ün aylık arama hacmi geçmişini (`volume_history`) ve dönem modunda `period_change`'i
     ekler. aba_research_trend DÜZ parametre ister (wrap_in_request=False — gerçek çağrıyla doğrulandı). Bir
     keyword'ün çağrısı başarısız olursa yalnızca o kartın grafiği boş kalır; tarama düşmez. Çağrı sayısını döner."""
@@ -2011,9 +2065,9 @@ async def _attach_volume_history(rows: list[dict], marketplace: str, period_mont
     async def one(row):
         try:
             async with sem:
-                raw = await call_tool("aba_research_trend", {
-                    "keyword": row["keyword"], "marketplace": marketplace, "timeGranularity": "M",
-                }, wrap_in_request=False)
+                raw = await _cached_tool("aba_research_trend", {
+                    "keyword": (row["keyword"] or "").lower(), "marketplace": marketplace, "timeGranularity": "M",
+                }, False, force, stats if stats is not None else {"live": 0, "cached": 0})
             row["volume_history"] = trends.parse_history(raw)
         except Exception as e:
             print(f"[trends] aba_research_trend hatası ({row.get('keyword')}): {e}", flush=True)
@@ -2075,8 +2129,9 @@ async def discovery_trending(req: TrendingRequest, user: dict = Depends(require_
     scanned = hidden_banned = filtered_out = pages = 0
     total = None
     dept_counts: dict[str, int] = {}
+    stats = {"live": 0, "cached": 0, "oldest": None}
     for page in range(1, trends.MAX_SCAN_PAGES + 1):
-        raw = await call_tool(tool, {**base, "page": page})
+        raw = await _cached_tool(tool, {**base, "page": page}, True, req.force_refresh, stats)
         data = raw.get("data") if isinstance(raw.get("data"), dict) else {}
         items = data.get("items") or []
         pages += 1
@@ -2105,7 +2160,7 @@ async def discovery_trending(req: TrendingRequest, user: dict = Depends(require_
         if len(results) >= pool_size or not items or not data.get("hasNextPage", True):
             break
 
-    history_calls = await _attach_volume_history(results, req.marketplace, period_months)
+    history_calls = await _attach_volume_history(results, req.marketplace, period_months, req.force_refresh, stats)
     if period_months:
         # Hacim değişimi en yüksek olan önde; değeri hesaplanamayan (geçmiş eksik) sonda
         results.sort(key=lambda r: (r["period_change"] is None,
@@ -2122,7 +2177,11 @@ async def discovery_trending(req: TrendingRequest, user: dict = Depends(require_
         "category_mode": None if not category else ("sellersprite" if alias else "panel"),
         "scan": {"pages": pages, "scanned": scanned, "hidden_banned": hidden_banned,
                  "filtered_out": filtered_out, "max_pages": trends.MAX_SCAN_PAGES,
-                 "history_calls": history_calls, "pool": pool_size},
+                 "history_calls": history_calls, "pool": pool_size,
+                 # Gerçekten yapılan MCP çağrısı / önbellekten gelen yanıt sayısı (72 saat kuralı)
+                 "mcp_calls": stats["live"], "cached_calls": stats["cached"]},
+        "source": "cache" if stats["cached"] and not stats["live"] else ("mixed" if stats["cached"] else "live"),
+        "cache_age_seconds": int(time.time()) - stats["oldest"] if stats.get("oldest") else None,
         "departments_seen": sorted(dept_counts, key=lambda d: (-dept_counts[d], d)),
         "results": results,
     }
@@ -3325,10 +3384,13 @@ async def profile_put(req: ProfileIn, user: dict = Depends(require_profile_user)
             raise HTTPException(422, "Kullanıcı adı 3–30 karakter olmalı; küçük harf, rakam, nokta, alt çizgi ve tire kullanılabilir")
         fields["username"] = u
     if "title" in sent:
-        t = " ".join(_CTRL_RE.sub(" ", req.title or "").split())
-        if len(t) > 80:
-            raise HTTPException(422, "Unvan en fazla 80 karakter olabilir")
-        fields["title"] = t
+        # Unvanı owner atar (Ekip Yönetimi → Üyeler). Owner kendi profilinden de değiştirebilir; diğerleri
+        # aynı değeri gönderirse yok sayılır, farklıysa 403.
+        t = _clean_title(req.title)
+        if user["role"] == "owner":
+            fields["title"] = t
+        elif t != ((await db.get_profile(user["user_id"])) or {}).get("title", ""):
+            raise HTTPException(403, "Unvanını panel yöneticisi (owner) belirler")
     if "phone" in sent:
         ph = " ".join((req.phone or "").split())
         if ph and not PHONE_RE.match(ph):
@@ -3339,6 +3401,44 @@ async def profile_put(req: ProfileIn, user: dict = Depends(require_profile_user)
     except db.UsernameTakenError as e:
         raise HTTPException(409, str(e))
     return await profile_get(user)
+
+
+TITLE_MAX = 80
+TITLE_SUGGESTIONS = ["PPC Uzmanı", "Ürün Araştırmacısı", "Listing & SEO Uzmanı", "Tedarik Sorumlusu",
+                     "Operasyon Sorumlusu", "Grafik Tasarımcı", "Ekip Lideri"]
+
+
+def _clean_title(v: str | None) -> str:
+    t = " ".join(_CTRL_RE.sub(" ", v or "").split())
+    if len(t) > TITLE_MAX:
+        raise HTTPException(422, f"Unvan en fazla {TITLE_MAX} karakter olabilir")
+    return t
+
+
+class TitleIn(BaseModel):
+    title: str = Field("", max_length=500)
+
+
+@app.put("/api/users/{target_id}/title")
+async def users_set_title(target_id: int, req: TitleIn, user: dict = Depends(require_owner)):
+    """Owner bir kişiye unvan atar (ör. "PPC Uzmanı"); boş = unvansız. Forumda, Ekip Aktivitesi'nde, eğitim
+    ilerlemesinde ve Yetenek Haritası'nda adın yanında görünür."""
+    if await db.get_user_role(target_id) is None:
+        raise HTTPException(404, "Kullanıcı bulunamadı")
+    t = _clean_title(req.title)
+    await db.update_profile(target_id, {"title": t})
+    return {"ok": True, "id": target_id, "title": t}
+
+
+@app.get("/api/users/titles")
+async def users_titles(user: dict = Depends(require_owner)):
+    """Unvan seçim listesi: şu an kullanılan unvanlar (kişi sayısıyla) + öneriler."""
+    used: dict[str, int] = {}
+    for u in await db.list_users():
+        if u.get("title"):
+            used[u["title"]] = used.get(u["title"], 0) + 1
+    return {"used": [{"title": t, "count": c} for t, c in sorted(used.items(), key=lambda x: (-x[1], x[0].casefold()))],
+            "suggestions": [t for t in TITLE_SUGGESTIONS if t not in used]}
 
 
 class PasswordIn(BaseModel):
@@ -3451,7 +3551,7 @@ async def skills_map(team: str = Query("all", max_length=20), field: str = Query
     rows, pending = [], []
     for u in scope:
         f = forms.get(u["id"])
-        person = {"id": u["id"], "name": u["name"] or u["email"], "email": u["email"],
+        person = {"id": u["id"], "name": u["name"] or u["email"], "email": u["email"], "title": u.get("title") or "",
                   "teams": [teams[t] for t in u["direct_team_ids"] if t in teams]}
         if not f or f.get("status") != "submitted":
             prog = comp.progress((f or {}).get("answers") or {})
@@ -4048,6 +4148,7 @@ async def team_activity(user_id: int | None = Query(None, ge=0), team_id: int | 
     users = [u for u in await db.list_users() if u["id"] in members]
     emails = {u["id"]: u["email"] for u in users}
     names = {u["id"]: u["name"] for u in users}   # panelde "Ad Soyad"; e-posta yalnızca ikincil bilgi (owner ekranı)
+    titles = {u["id"]: u.get("title") or "" for u in users}   # owner'ın atadığı unvan (ör. PPC Uzmanı)
     team = set(emails)
     teams = await db.list_teams()
     team_names = {t["id"]: t["label"] for t in teams}
@@ -4070,10 +4171,10 @@ async def team_activity(user_id: int | None = Query(None, ge=0), team_id: int | 
     def who(uid, email):
         return names.get(uid) or emails.get(uid) or "—"
 
-    q_out = [{"id": r["id"], "user_id": r["user_id"], "user": who(r["user_id"], r.get("email")), "email": emails.get(r["user_id"]),
+    q_out = [{"id": r["id"], "user_id": r["user_id"], "user": who(r["user_id"], r.get("email")), "title": titles.get(r["user_id"], ""), "email": emails.get(r["user_id"]),
               "keyword": r["keyword"], "marketplace": r["marketplace"], "at": r["queried_at"],
               "verdict": r.get("verdict")} for r in q_rows]
-    d_out = [{"id": r["id"], "user_id": r["user_id"], "user": who(r["user_id"], r.get("email")), "email": emails.get(r["user_id"]),
+    d_out = [{"id": r["id"], "user_id": r["user_id"], "user": who(r["user_id"], r.get("email")), "title": titles.get(r["user_id"], ""), "email": emails.get(r["user_id"]),
               "keyword": r["keyword"], "marketplace": r["marketplace"], "at": r["decided_at"],
               "decision": r["decision"], "note": r.get("note") or "",
               "verdict": _verdict_for(vindex, r["user_id"], r["keyword"], r["marketplace"], r["decided_at"])}
@@ -4081,14 +4182,14 @@ async def team_activity(user_id: int | None = Query(None, ge=0), team_id: int | 
 
     # Özet: seçili tarih aralığı (since/until), aralık yoksa TÜM ZAMANLAR. Kişi/karar/arama filtreleri özete uygulanmaz.
     counts = await db.team_counts(since, until)
-    summary = [{"user_id": u["id"], "user": u["name"] or u["email"], "email": u["email"], "role": u["role"],
+    summary = [{"user_id": u["id"], "user": u["name"] or u["email"], "title": u.get("title") or "", "email": u["email"], "role": u["role"],
                 "teams": [team_names[t] for t in u["direct_team_ids"] if t in team_names],
                 "queries": counts["queries"].get(u["id"], 0), "decisions": counts["decisions"].get(u["id"], 0)}
                for u in users]
 
     return {"range": {"since": since, "until": until}, "team_id": team_id,
             "teams": _team_opts(teams),
-            "users": [{"id": u["id"], "name": u["name"] or u["email"], "email": u["email"], "role": u["role"]} for u in users],
+            "users": [{"id": u["id"], "name": u["name"] or u["email"], "title": u.get("title") or "", "email": u["email"], "role": u["role"]} for u in users],
             "summary": summary,
             "queries": q_out, "decisions": d_out,
             "totals": {"queries": len(queries), "decisions": len(decisions)},

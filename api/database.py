@@ -122,6 +122,9 @@ _SCHEMAS = [
     """CREATE TABLE IF NOT EXISTS auth_attempts (
         id INTEGER PRIMARY KEY AUTOINCREMENT, scope TEXT NOT NULL, key TEXT NOT NULL, at INTEGER NOT NULL)""",
     "CREATE INDEX IF NOT EXISTS ix_auth_attempts ON auth_attempts (scope, key, at)",
+    # Ham MCP yanıt önbelleği (Trendler) — anahtar = tool + parametrelerin özeti; 72 saat, 7 günden eskisi silinir.
+    """CREATE TABLE IF NOT EXISTS mcp_cache (
+        cache_key TEXT PRIMARY KEY, response_json TEXT NOT NULL, fetched_at INTEGER NOT NULL)""",
     """CREATE TABLE IF NOT EXISTS schema_flags (
         key TEXT PRIMARY KEY, value TEXT, set_at INTEGER NOT NULL)""",
     """CREATE TABLE IF NOT EXISTS product_signals (
@@ -243,6 +246,7 @@ async def _migrate_schema():
     # doğrulanmış sayılır (schema_flags) — sonra kaydolanlar bağlantıya tıklayana kadar doğrulanmamış kalır.
     await _add_column_if_missing("users", "email_verified_at", "INTEGER")
     await _add_column_if_missing("notifications", "emailed_at", "INTEGER")
+    await notify_email.migrate_defaults_once()   # bildirim e-postaları: eski varsayılandakiler → hepsi açık
     if not await fetch_one("SELECT 1 AS ok FROM schema_flags WHERE key = 'email_verify_grandfathered'"):
         try:
             await execute("INSERT INTO schema_flags (key, value, set_at) VALUES ('email_verify_grandfathered', '1', ?)",
@@ -293,8 +297,9 @@ async def _ensure_staff_in_team():
 # ŞEMAYA/MİGRASYONA HER DEĞİŞİKLİKTE (yeni tablo, sütun, indeks, veri düzeltmesi, tohum) BU SAYIYI ARTIR —
 # artırmazsan canlı veritabanında migrasyon hiç çalışmaz.
 # ---------------------------------------------------------------------------
-SCHEMA_VERSION = 5  # v2: banned_categories · v3: training_notes · v4: bildirimler, forum okunma/rapor/görsel, analiz/ders bağı
+SCHEMA_VERSION = 6  # v2: banned_categories · v3: training_notes · v4: bildirimler, forum okunma/rapor/görsel, analiz/ders bağı
                     # v5: e-posta doğrulama/sıfırlama, deneme sınırı, bildirim tercihleri
+                    # v6: mcp_cache (Trendler 72 saat), bildirim varsayılanı hepsi açık
 
 
 def _migration_env_hash() -> str:
@@ -502,21 +507,45 @@ async def has_users() -> bool:
 # ---------------------------------------------------------------------------
 # ANALİZ ÖNBELLEĞİ & GEÇMİŞ
 # ---------------------------------------------------------------------------
+# v3 kayıtları (72 saat önbelleğinden ÖNCE) de önbellek sayılır: kişiye özel girdiler payload'dan yeniden
+# kurulabiliyor (index._assess_inputs_from_payload). Daha eskileri (search_volume_trend yok) sayılmaz.
+CACHE_MIN_PAYLOAD_VERSION = 3
+
+
 async def get_cached(keyword: str, marketplace: str):
-    """CACHE_TTL_SECONDS içinde çekilmiş, güncel PAYLOAD_VERSION'lı kayıt → (payload, fetched_at); yoksa None."""
+    """CACHE_TTL_SECONDS içinde çekilmiş kayıt → (payload, fetched_at); yoksa None. Anahtar büyük/küçük harf
+    DUYARSIZ ("Magnetic Tiles" = "magnetic tiles"); aynı anahtarın farklı yazımları varsa en yenisi."""
     row = await fetch_one(
-        "SELECT payload_json, fetched_at FROM keyword_analysis WHERE keyword = ? AND marketplace = ?",
-        (keyword, marketplace))
+        "SELECT payload_json, fetched_at FROM keyword_analysis WHERE LOWER(keyword) = LOWER(?) AND marketplace = ? "
+        "ORDER BY fetched_at DESC LIMIT 1", (keyword, marketplace))
     if not row or time.time() - (row["fetched_at"] or 0) > CACHE_TTL_SECONDS:
         return None
     try:
         payload = json.loads(row["payload_json"])
     except (TypeError, ValueError):
         return None
-    # Eski biçimde kaydedilmiş kayıtları kullanma — yeniden çekilsin
-    if payload.get("_v") != PAYLOAD_VERSION:
+    if not isinstance(payload, dict) or int(payload.get("_v") or 0) < CACHE_MIN_PAYLOAD_VERSION:
         return None
     return payload, row["fetched_at"]
+
+
+# --- Ham MCP yanıt önbelleği (Trendler: aba_research_* listeleri ve keyword hacim geçmişi) ---
+async def mcp_cache_get(key: str, ttl: int) -> tuple[dict, int] | None:
+    row = await fetch_one("SELECT response_json, fetched_at FROM mcp_cache WHERE cache_key = ?", (key,))
+    if not row or time.time() - (row["fetched_at"] or 0) > ttl:
+        return None
+    try:
+        return json.loads(row["response_json"]), int(row["fetched_at"])
+    except (TypeError, ValueError):
+        return None
+
+
+async def mcp_cache_set(key: str, response: dict):
+    now = int(time.time())
+    await execute("INSERT INTO mcp_cache (cache_key, response_json, fetched_at) VALUES (?, ?, ?) "
+                  "ON CONFLICT (cache_key) DO UPDATE SET response_json = excluded.response_json, fetched_at = excluded.fetched_at",
+                  (key, json.dumps(response, ensure_ascii=False), now))
+    await execute("DELETE FROM mcp_cache WHERE fetched_at < ?", (now - 7 * 86400,))
 
 
 async def save_analysis(keyword: str, marketplace: str, payload: dict, fetched_by: str = None):
@@ -554,7 +583,7 @@ async def list_recent(user_id: int, limit: int = 50):
     """Yalnızca BU kullanıcının sorguladığı keyword'leri döner — herkese özel."""
     return await fetch_all(
         "SELECT id, keyword, marketplace, queried_at AS fetched_at, verdict FROM user_query_log "
-        "WHERE user_id = ? ORDER BY queried_at DESC LIMIT ?", (user_id, limit))
+        "WHERE user_id = ? ORDER BY queried_at DESC, id DESC LIMIT ?", (user_id, limit))
 
 
 async def delete_analysis(user_id: int, keyword: str, marketplace: str):
