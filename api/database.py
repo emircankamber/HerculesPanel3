@@ -11,6 +11,7 @@ import db_adapter
 from db_adapter import execute, execute_returning_id, execute_fetch, fetch_all, fetch_one, storage_info, USE_POSTGRES
 import forum
 import notify
+import notify_email
 
 # ANALİZ ÖNBELLEĞİ (kullanıcı isteği): aynı anahtar + pazar son 72 saatte çekildiyse MCP'ye GİDİLMEZ, kayıtlı
 # ham veri döner (kişiye özel eşik/maliyet kısmı index.py'de yeniden hesaplanır). "Canlı veriyle yenile" atlar.
@@ -111,6 +112,16 @@ _SCHEMAS = [
     """CREATE TABLE IF NOT EXISTS training_notes (
         lesson_id INTEGER NOT NULL, user_id INTEGER NOT NULL, note TEXT NOT NULL, updated_at INTEGER NOT NULL,
         PRIMARY KEY (lesson_id, user_id))""",
+    # E-POSTA BAĞLANTILARI (doğrulama / şifre sıfırlama): bağlantıdaki kod YALNIZCA sha256 olarak saklanır,
+    # tek kullanımlık (used_at), süreli (expires_at). Hesap silinince silinir (USER_ID_TABLES).
+    """CREATE TABLE IF NOT EXISTS email_tokens (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, kind TEXT NOT NULL,
+        token_hash TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, used_at INTEGER)""",
+    # DENEME SAYAÇLARI (giriş hatası, şifre sıfırlama / doğrulama e-postası isteği): sunucusuz örnekler arasında
+    # ortak olsun diye veritabanında. scope + key (ör. "login_email", "a@b.com"), at = zaman.
+    """CREATE TABLE IF NOT EXISTS auth_attempts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, scope TEXT NOT NULL, key TEXT NOT NULL, at INTEGER NOT NULL)""",
+    "CREATE INDEX IF NOT EXISTS ix_auth_attempts ON auth_attempts (scope, key, at)",
     """CREATE TABLE IF NOT EXISTS schema_flags (
         key TEXT PRIMARY KEY, value TEXT, set_at INTEGER NOT NULL)""",
     """CREATE TABLE IF NOT EXISTS product_signals (
@@ -228,6 +239,18 @@ async def _migrate_schema():
     except Exception:
         pass  # tekillik ayrıca kodda denetlenir (forum.thread_for_lesson)
     await forum.seed_once()   # forum varsayılan kategorileri (bir kez)
+    # E-POSTA DOĞRULAMA: email_verified_at NULL = doğrulanmamış. Özellik gelmeden önce kayıtlı OLAN herkes BİR KEZ
+    # doğrulanmış sayılır (schema_flags) — sonra kaydolanlar bağlantıya tıklayana kadar doğrulanmamış kalır.
+    await _add_column_if_missing("users", "email_verified_at", "INTEGER")
+    await _add_column_if_missing("notifications", "emailed_at", "INTEGER")
+    if not await fetch_one("SELECT 1 AS ok FROM schema_flags WHERE key = 'email_verify_grandfathered'"):
+        try:
+            await execute("INSERT INTO schema_flags (key, value, set_at) VALUES ('email_verify_grandfathered', '1', ?)",
+                          (int(time.time()),))
+            await execute("UPDATE users SET email_verified_at = COALESCE(created_at, ?) WHERE email_verified_at IS NULL",
+                          (int(time.time()),))
+        except Exception:
+            pass  # başka bir örnek yaptı
 
 
 async def _seed_teams_once():
@@ -270,7 +293,8 @@ async def _ensure_staff_in_team():
 # ŞEMAYA/MİGRASYONA HER DEĞİŞİKLİKTE (yeni tablo, sütun, indeks, veri düzeltmesi, tohum) BU SAYIYI ARTIR —
 # artırmazsan canlı veritabanında migrasyon hiç çalışmaz.
 # ---------------------------------------------------------------------------
-SCHEMA_VERSION = 4  # v2: banned_categories · v3: training_notes · v4: bildirimler, forum okunma/rapor/görsel, analiz/ders bağı
+SCHEMA_VERSION = 5  # v2: banned_categories · v3: training_notes · v4: bildirimler, forum okunma/rapor/görsel, analiz/ders bağı
+                    # v5: e-posta doğrulama/sıfırlama, deneme sınırı, bildirim tercihleri
 
 
 def _migration_env_hash() -> str:
@@ -292,7 +316,7 @@ async def init_db():
     if await _schema_is_current():
         return
     async with db_adapter.single_connection():
-        for schema in _SCHEMAS + forum.SCHEMAS + notify.SCHEMAS:
+        for schema in _SCHEMAS + forum.SCHEMAS + notify.SCHEMAS + notify_email.SCHEMAS:
             await execute(schema)
         await _migrate_schema()
         await seed_cert_requirements_if_empty()
@@ -330,10 +354,15 @@ async def create_user(email: str, password: str, invite_code: str | None = None,
         raise ValueError("Bu e-posta zaten kayıtlı")
     salt = secrets.token_hex(16)
     pw_hash = _hash_password(password, salt)
-    role = "owner" if email in permanent_owner_emails() or await user_count() == 0 else "member"
+    first_user = await user_count() == 0
+    role = "owner" if email in permanent_owner_emails() or first_user else "member"
+    now = int(time.time())
+    # İlk kullanıcı (kurulum) doğrulanmış başlar: e-posta ayarı bozuksa bile panelin sahibi dışarıda kalmasın.
+    # OWNER_EMAILS dahil diğer herkes e-postasını doğrulamalı (o adresle başkası kaydolup owner olamasın).
     user_id = await execute_returning_id(
-        "INSERT INTO users (email, password_hash, salt, created_at, role, first_name, last_name) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (email, pw_hash, salt, int(time.time()), role, first_name or None, last_name or None))
+        "INSERT INTO users (email, password_hash, salt, created_at, role, first_name, last_name, email_verified_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (email, pw_hash, salt, now, role, first_name or None, last_name or None, now if first_user else None))
     if role == "owner":
         await _add_member(await _default_team_id(), user_id)
     invite = None
@@ -344,7 +373,7 @@ async def create_user(email: str, password: str, invite_code: str | None = None,
             invite = {"status": "joined", "team": team["name"]}
         else:
             invite = {"status": "invalid"}
-    return {"id": user_id, "email": email, "invite": invite}
+    return {"id": user_id, "email": email, "invite": invite, "verified": first_user}
 
 
 async def verify_user(email: str, password: str) -> dict | None:
@@ -372,15 +401,81 @@ async def get_session(token: str) -> dict | None:
         return None
     row = await fetch_one(
         "SELECT s.*, u.first_name, u.last_name, u.id AS u_id, u.email AS u_email, u.role AS u_role, "
+        "u.email_verified_at AS u_verified, "
         "EXISTS (SELECT 1 FROM team_members m WHERE m.user_id = s.user_id) AS u_in_team "
         "FROM sessions s LEFT JOIN users u ON u.id = s.user_id WHERE s.token = ?", (token,))
     if not row:
         return None
     exists = row.pop("u_id") is not None
     email, role, in_team = row.pop("u_email"), row.pop("u_role"), row.pop("u_in_team")
+    row["email_verified"] = bool(row.pop("u_verified"))
     row["role"] = ("owner" if _is_permanent(email) else _norm_role(role)) if exists else None
     row["in_team"] = bool(in_team)
     return row
+
+
+# --- E-posta bağlantıları (doğrulama / sıfırlama) & deneme sayaçları -------------------------------------
+def _token_hash(code: str) -> str:
+    return hashlib.sha256((code or "").encode()).hexdigest()
+
+
+async def user_by_email(email: str) -> dict | None:
+    return await fetch_one("SELECT id, email, first_name, last_name, email_verified_at FROM users WHERE email = ?",
+                           ((email or "").strip().lower(),))
+
+
+async def user_brief(user_id: int) -> dict | None:
+    return await fetch_one("SELECT id, email, first_name, last_name, email_verified_at FROM users WHERE id = ?", (user_id,))
+
+
+async def create_email_token(user_id: int, kind: str, ttl_seconds: int) -> str:
+    """Düz kod YALNIZCA burada döner (e-postaya yazılır); veritabanında özeti. Aynı türdeki eski kodlar geçersizleşir."""
+    assert kind in ("verify", "reset")
+    now = int(time.time())
+    await execute("UPDATE email_tokens SET used_at = ? WHERE user_id = ? AND kind = ? AND used_at IS NULL", (now, user_id, kind))
+    code = secrets.token_urlsafe(32)
+    await execute("INSERT INTO email_tokens (user_id, kind, token_hash, created_at, expires_at) VALUES (?, ?, ?, ?, ?)",
+                  (user_id, kind, _token_hash(code), now, now + ttl_seconds))
+    return code
+
+
+async def consume_email_token(code: str, kind: str) -> int | None:
+    """Geçerli (doğru tür, kullanılmamış, süresi dolmamış) kodu TEK sorguda harcar → user_id; değilse None.
+    Eşzamanlı iki istekte yalnızca biri başarır."""
+    now = int(time.time())
+    rows = await execute_fetch(
+        "UPDATE email_tokens SET used_at = ? WHERE token_hash = ? AND kind = ? AND used_at IS NULL AND expires_at > ? "
+        "RETURNING user_id", (now, _token_hash(code), kind, now))
+    return rows[0]["user_id"] if rows else None
+
+
+async def mark_email_verified(user_id: int):
+    await execute("UPDATE users SET email_verified_at = COALESCE(email_verified_at, ?) WHERE id = ?", (int(time.time()), user_id))
+
+
+async def reset_password(user_id: int, new: str):
+    """Şifre sıfırlama: yeni şifre + TÜM oturumlar kapanır + diğer sıfırlama bağlantıları geçersiz."""
+    salt = secrets.token_hex(16)
+    now = int(time.time())
+    await execute("UPDATE users SET password_hash = ?, salt = ? WHERE id = ?", (_hash_password(new, salt), salt, user_id))
+    await execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+    await execute("UPDATE email_tokens SET used_at = ? WHERE user_id = ? AND kind = 'reset' AND used_at IS NULL", (now, user_id))
+
+
+async def record_attempt(scope: str, key: str):
+    now = int(time.time())
+    await execute("INSERT INTO auth_attempts (scope, key, at) VALUES (?, ?, ?)", (scope, key, now))
+    await execute("DELETE FROM auth_attempts WHERE at < ?", (now - 2 * 86400,))   # eski kayıtları temizle
+
+
+async def count_attempts(scope: str, key: str, window_seconds: int) -> int:
+    row = await fetch_one("SELECT COUNT(*) AS c FROM auth_attempts WHERE scope = ? AND key = ? AND at > ?",
+                          (scope, key, int(time.time()) - window_seconds))
+    return int(row["c"])
+
+
+async def clear_attempts(scope: str, key: str):
+    await execute("DELETE FROM auth_attempts WHERE scope = ? AND key = ?", (scope, key))
 
 
 async def delete_session(token: str):
@@ -1324,7 +1419,7 @@ EMAIL_REF_COLUMNS = [
 # Kişinin KENDİ satırları (user_id ile) — tamamen silinir.
 USER_ID_TABLES = ["sessions", "user_thresholds", "user_query_log", "market_decision",
                   "training_completions", "training_assignments", "team_members", "competency_forms",
-                  "training_notes"]
+                  "training_notes", "email_tokens", "notification_prefs"]
 # Başkalarına ait kayıtlarda kişiyi id ile anan alanlar: NULL yapılır.
 ID_REF_COLUMNS = [("training_lessons", "created_by"), ("team_invites", "created_by"),
                   ("banned_categories", "banned_by")]
@@ -1361,6 +1456,7 @@ async def delete_user_completely(user_id: int) -> dict:
     await execute("DELETE FROM checklists WHERE user_id = ?", (user_id,))
     for t in USER_ID_TABLES:
         await execute(f"DELETE FROM {t} WHERE user_id = ?", (user_id,))
+    await execute("DELETE FROM auth_attempts WHERE key = ? OR key = ?", (email, str(user_id)))
     for t, col in ID_REF_COLUMNS:
         await execute(f"UPDATE {t} SET {col} = NULL WHERE {col} = ?", (user_id,))
     for t, col in EMAIL_REF_COLUMNS:

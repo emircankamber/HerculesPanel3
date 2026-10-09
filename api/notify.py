@@ -25,6 +25,27 @@ KINDS = {
     "lesson": "Yeni ders",
     "report": "Bildirilen içerik",
 }
+TEMPLATES = {
+    "reply": "{actor}, “{title}” başlığına cevap yazdı",
+    "follow_reply": "{actor}, takip ettiğin “{title}” başlığına cevap yazdı",
+    "mention": "{actor} senden bahsetti: “{title}”",
+    "solution": "{actor}, “{title}” başlığında cevabını çözüm olarak işaretledi",
+    "vote": "{actor}{others} “{title}” içindeki {what} faydalı buldu",
+    "bulletin": "Yeni bülten: “{title}” ({actor})",
+    "lesson": "Sana yeni bir ders atandı: “{title}”",
+    "report": "{actor} bir içeriği bildirdi: “{title}”",
+}
+
+
+def render(kind: str, actor_name: str, data: dict) -> str:
+    """Bildirim cümlesi — panel (index._notif_out) ve e-posta (notify_email) AYNI metni kullanır."""
+    cnt = int(data.get("count") or 1)
+    return TEMPLATES.get(kind, "{title}").format(
+        actor=actor_name or "Biri", title=data.get("title") or "—",
+        others=f" ve {cnt - 1} kişi daha" if cnt > 1 else "",
+        what="cevabını" if data.get("target") == "reply" else "başlığını")
+
+
 LIST_LIMIT = 40
 KEEP_DAYS = 90
 
@@ -51,6 +72,9 @@ async def add(user_ids, kind: str, actor_id: int | None, thread_id: int | None =
         await execute("INSERT INTO notifications (user_id, kind, actor_id, thread_id, reply_id, lesson_id, data_json, "
                       "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                       (uid, kind, actor_id, thread_id, reply_id, lesson_id, payload, now))
+    if ids:
+        import notify_email   # döngüsel içe aktarmayı önlemek için geç yükleme
+        await notify_email.dispatch(kind, set(ids), actor_id, thread_id, reply_id, lesson_id, data or {})
     return len(ids)
 
 
@@ -83,6 +107,9 @@ async def broadcast(kind: str, actor_id: int, thread_id: int | None, data: dict,
         f"INSERT INTO notifications (user_id, kind, actor_id, thread_id, data_json, created_at) "
         f"SELECT u.id, ?, ?, ?, ?, ? FROM users u WHERE u.id NOT IN ({marks}){team}",
         (kind, actor_id, thread_id, json.dumps(data, ensure_ascii=False), int(time.time()), *excl))
+    import notify_email
+    rows = await fetch_all(f"SELECT u.id FROM users u WHERE u.id NOT IN ({marks}){team}", tuple(excl))
+    await notify_email.dispatch(kind, {r["id"] for r in rows}, actor_id, thread_id, None, None, data)
     return 1
 
 

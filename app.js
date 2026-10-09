@@ -21,10 +21,12 @@ async function apiFetch(url, options = {}) {
     showLogin("Oturumunuz sona erdi — lütfen tekrar giriş yapın.");
   }
   if (res.status === 428) showNameGate();   // ad soyad girilmemiş eski hesap (kapı sunucuda)
+  if (res.status === 403 && res.headers.get("X-Email-Verify")) showVerifyGate();   // e-posta doğrulanmamış (kapı sunucuda)
   return res;
 }
 
 let authRequiredGlobal = false;
+let emailEnabledGlobal = false;   // e-posta servisi açık mı ("Şifremi unuttum" bağlantısı)
 // Oturumdaki kullanıcı (yalnızca GÖRÜNÜM için; tüm yetki kontrolleri sunucuda yapılır)
 let currentUser = { role: null, user_id: null, email: null, name: null };
 
@@ -57,6 +59,46 @@ function clearInvite() { try { sessionStorage.removeItem(INVITE_KEY); } catch { 
   } catch { /* yok say */ }
 })();
 function inviteCode() { return pendingInvite() || window.__plInvite || ""; }
+
+// --- E-postadaki bağlantılar: ?verify=KOD (doğrulama) ve ?reset=KOD (şifre sıfırlama) — adres çubuğundan hemen silinir.
+const MAIL_LINK = (() => {
+  try {
+    const u = new URL(location.href);
+    const out = { verify: (u.searchParams.get("verify") || "").trim(), reset: (u.searchParams.get("reset") || "").trim() };
+    if (out.verify || out.reset) {
+      u.searchParams.delete("verify"); u.searchParams.delete("reset");
+      history.replaceState(null, "", u.pathname + (u.search || "") + u.hash);
+    }
+    return out;
+  } catch { return { verify: "", reset: "" }; }
+})();
+
+function showVerifyGate(email = currentUser.email) {
+  const o = document.getElementById("verify-overlay");
+  if (!o || o.style.display === "flex") return;
+  document.getElementById("verify-email").textContent = email || "e-posta";
+  document.getElementById("verify-msg").textContent = "";
+  o.style.display = "flex";
+}
+async function postJson(url, body, auth = false) {
+  const res = await (auth ? apiFetch : fetch)(`${API_BASE}${url}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+  const b = await res.json().catch(() => ({}));
+  if (!res.ok) { const e = new Error(apiErrorText(b, res.status)); e.status = res.status; throw e; }
+  return b;
+}
+/** Doğrulama bağlantısı oturum durumu OKUNMADAN önce işlenir (yoksa doğrulama ekranı açık kalır). */
+async function handleVerifyLink() {
+  if (!MAIL_LINK.verify) return;
+  try { await postJson("/api/auth/verify", { token: MAIL_LINK.verify }); showNotice("E-posta adresin doğrulandı — teşekkürler!"); }
+  catch (err) { showNotice(err.message, "warn"); }
+  MAIL_LINK.verify = "";
+}
+function handleResetLink() {
+  if (MAIL_LINK.reset) {
+    document.getElementById("reset-overlay").style.display = "flex";
+    setTimeout(() => document.getElementById("reset-pass")?.focus(), 0);
+  }
+}
 
 function showNotice(text, kind = "") {
   const el = document.getElementById("app-notice");
@@ -182,12 +224,15 @@ async function checkAuthStatus() {
     const res = await apiFetch(`${API_BASE}/api/auth/status`);
     const s = await res.json();
     authRequiredGlobal = !!s.auth_required;
+    emailEnabledGlobal = !!s.email_enabled;
+    const fl = document.getElementById("forgot-link"); if (fl) fl.style.display = emailEnabledGlobal ? "" : "none";
     currentUser = { role: s.role || null, user_id: s.user_id || null, email: s.email || null, name: s.name || null };
     const profNav = document.querySelector('.nav-btn[data-view="profile"]');
     if (profNav) profNav.style.display = s.logged_in && s.role ? "" : "none";
     const forumNav = document.querySelector('.nav-btn[data-view="forum"]');
     if (forumNav) forumNav.style.display = s.logged_in && s.role ? "" : "none";
     if (s.logged_in && s.needs_name) showNameGate();
+    if (s.logged_in && s.needs_verify) showVerifyGate(s.email);
     ntStart();
     // Ekip Aktivitesi menüsü yalnızca owner'a görünür (yetki yine sunucuda: diğerleri 403)
     const teamNav = document.querySelector('.nav-btn[data-view="team"]');
@@ -257,6 +302,8 @@ async function doAuth(endpoint) {
     }
     setToken(body.token);
     hideLogin();
+    err.style.color = "";
+    if (endpoint === "register" && body.needs_verify && !body.verify_sent) showNotice("Doğrulama e-postası şu an gönderilemedi — açılan ekrandan tekrar gönderebilirsin.", "warn");
     await checkAuthStatus();
     if ($("#view-home")?.classList.contains("active")) loadHome();
     if ($("#view-training")?.classList.contains("active")) loadTraining();
@@ -291,6 +338,56 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("ng-logout")?.addEventListener("click", async () => {
     await apiFetch(`${API_BASE}/api/auth/logout`, { method: "POST" }); setToken(""); location.reload();
   });
+  // --- E-posta doğrulama kapısı ---
+  document.getElementById("verify-logout")?.addEventListener("click", async () => {
+    await fetch(`${API_BASE}/api/auth/logout`, { method: "POST", headers: { Authorization: `Bearer ${getToken()}` } }); setToken(""); location.reload();
+  });
+  document.getElementById("verify-check")?.addEventListener("click", async () => {
+    const r = await fetch(`${API_BASE}/api/auth/status`, { headers: { Authorization: `Bearer ${getToken()}` } });
+    const s = await r.json().catch(() => ({}));
+    if (s.needs_verify) { document.getElementById("verify-msg").textContent = "Henüz doğrulanmamış görünüyor — e-postadaki bağlantıya tıkladın mı?"; return; }
+    location.reload();
+  });
+  document.getElementById("verify-resend")?.addEventListener("click", async (e) => {
+    const btn = e.currentTarget, msg = document.getElementById("verify-msg"); btn.disabled = true;
+    try {
+      const r = await fetch(`${API_BASE}/api/auth/resend-verification`, { method: "POST", headers: { Authorization: `Bearer ${getToken()}` } });
+      const b = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(apiErrorText(b, r.status));
+      msg.style.color = "var(--primary)"; msg.textContent = b.already ? "Adresin zaten doğrulanmış — devam edebilirsin." : "Gönderildi — gelen kutunu kontrol et.";
+    } catch (err) { msg.style.color = ""; msg.textContent = err.message; }
+    finally { setTimeout(() => { btn.disabled = false; }, 30000); }
+  });
+  // --- Şifremi unuttum / sıfırlama ---
+  document.getElementById("forgot-link")?.addEventListener("click", () => {
+    document.getElementById("forgot-email").value = document.getElementById("login-email").value.trim();
+    document.getElementById("forgot-msg").textContent = "";
+    document.getElementById("forgot-overlay").style.display = "flex";
+  });
+  document.getElementById("forgot-back")?.addEventListener("click", () => { document.getElementById("forgot-overlay").style.display = "none"; });
+  document.getElementById("forgot-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const msg = document.getElementById("forgot-msg"), email = document.getElementById("forgot-email").value.trim();
+    if (!email) { msg.textContent = "E-posta adresini yaz."; return; }
+    const btn = e.submitter; if (btn) btn.disabled = true;
+    try { const b = await postJson("/api/auth/forgot", { email }); msg.style.color = "var(--primary)"; msg.textContent = b.message; }
+    catch (err) { msg.style.color = ""; msg.textContent = err.message; }
+    finally { if (btn) btn.disabled = false; }
+  });
+  document.getElementById("reset-cancel")?.addEventListener("click", () => { document.getElementById("reset-overlay").style.display = "none"; MAIL_LINK.reset = ""; });
+  document.getElementById("reset-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const msg = document.getElementById("reset-msg"), p1 = document.getElementById("reset-pass").value, p2 = document.getElementById("reset-pass2").value;
+    if (p1.length < 6) { msg.textContent = "Şifre en az 6 karakter olmalı."; return; }
+    if (p1 !== p2) { msg.textContent = "Şifreler aynı değil."; return; }
+    try {
+      await postJson("/api/auth/reset", { token: MAIL_LINK.reset, password: p1 });
+      MAIL_LINK.reset = ""; setToken("");
+      document.getElementById("reset-overlay").style.display = "none";
+      showLogin("Şifren değiştirildi — yeni şifrenle giriş yap.");
+      document.getElementById("login-error").style.color = "var(--primary)";
+    } catch (err) { msg.textContent = err.message; }
+  });
   const noticeClose = document.getElementById("app-notice-close");
   if (noticeClose) noticeClose.addEventListener("click", () => { document.getElementById("app-notice").style.display = "none"; });
   if (logoutBtn) logoutBtn.addEventListener("click", async () => {
@@ -307,8 +404,11 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // Ana Sayfa varsayılan görünüm: yalnızca DB okuyan uçlar (MCP çağrısı YOK).
   // Giriş zorunlu ve oturum yoksa 401 yerine önce girişi bekle.
-  checkAuthStatus().then(s => {
+  handleVerifyLink().then(checkAuthStatus).then(s => {
+    handleResetLink();
     if (s && s.auth_required && !s.logged_in) return;
+    if (s && s.logged_in && s.role && location.hash === "#training") { showView("training"); return; }
+    if (s && s.logged_in && s.role && location.hash === "#bildirim-ayarlari") { pfState.tab = "notif"; showView("profile"); return; }
     if (s && s.logged_in && s.role && /^#forum\/\d+$/.test(location.hash)) { showView("forum"); return; }   // doğrudan başlık linki
     if ($("#view-home")?.classList.contains("active")) loadHome();
   });
@@ -4621,6 +4721,7 @@ async function loadProfile() {
     if (!pfState.dirty) { pfState.form = f; cfRender($("#pf-form"), sch, f.answers, { prefix: "pf", progress: f.progress }); }
     pfRenderFormMeta(); pfRenderNav();
     pfSelectTab(pfState.tab);
+    npLoad();
     st.textContent = ""; st.className = "status-line mt-4";
   } catch (err) { st.textContent = `Hata: ${err.message}`; st.className = "status-line mt-4 error"; }
 }
@@ -4698,8 +4799,39 @@ async function pfSave() {
   if (pfState.dirty) pfScheduleSave();
 }
 
+// --- Bildirim Ayarları (GET/PUT /api/notification-prefs — yalnızca kendi ayarın) ---
+async function npLoad() {
+  const intro = $("#np-intro"), box = $("#np-groups");
+  try {
+    const d = await pfApi("/api/notification-prefs");
+    const p = d.prefs;
+    intro.textContent = !d.email_enabled ? "E-posta servisi henüz yapılandırılmadı — ayarların kaydedilir, servis açılınca geçerli olur."
+      : !d.email_verified ? `E-postan (${d.email}) doğrulanmadığı için şu an e-posta gönderilmiyor.`
+      : `E-postalar ${d.email} adresine gider.`;
+    box.innerHTML = `<legend class="text-[13px] font-semibold mb-1">Anlık e-posta gönderilsin:</legend>` + Object.entries(d.groups)
+      .filter(([g]) => g !== "report" || d.is_staff)
+      .map(([g, label]) => `<label class="pf-check"><input type="checkbox" data-g="${esc(g)}" ${p.instant[g] ? "checked" : ""}><span>${esc(label)}</span></label>`).join("");
+    $("#np-off").checked = p.email_off; $("#np-weekly").checked = p.weekly;
+    npSyncDisabled();
+  } catch (err) { intro.textContent = `Yüklenemedi: ${err.message}`; }
+}
+function npSyncDisabled() {
+  const off = $("#np-off").checked;
+  $$("#np-groups input, #np-weekly").forEach(i => { i.disabled = off; });
+}
+
 (function initProfile() {
   if (!$("#view-profile")) return;
+  $("#np-off").addEventListener("change", npSyncDisabled);
+  $("#np-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const msg = $("#np-msg"), instant = {};
+    $$("#np-groups input[data-g]").forEach(i => { instant[i.dataset.g] = i.checked; });
+    try {
+      await pfApi("/api/notification-prefs", { method: "PUT", body: JSON.stringify({ instant, weekly: $("#np-weekly").checked, email_off: $("#np-off").checked }) });
+      msg.className = "text-xs text-primary"; msg.textContent = "Kaydedildi.";
+    } catch (err) { msg.className = "text-xs text-error"; msg.textContent = err.message; }
+  });
   $$("#pf-tabs .tab-btn").forEach(b => b.addEventListener("click", () => pfSelectTab(b.dataset.tab)));
   const form = $("#pf-form");
   form.addEventListener("input", (e) => { if (e.target.matches("input[type=text], textarea")) pfScheduleSave(); });

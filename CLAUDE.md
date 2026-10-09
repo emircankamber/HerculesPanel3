@@ -520,6 +520,40 @@ yüzden backend'e hiç bağlanmamalı, sahte veri olur.
   Eğitim'e götürür. Zil başlatma kodu dosyanın BAŞINDA çalışır — orada `$` yardımcısı henüz tanımlı DEĞİL
   (`getElementById` kullan). E-posta / web push / Slack-Teams bu tabloyu kaynak (giden kutusu) olarak kullanacak.
 
+## E-posta (Resend) — doğrulama, şifre sıfırlama, bildirimler (`api/mailer.py`, `api/notify_email.py`)
+
+- **Ortam değişkenleri (istek anında okunur):** `RESEND_API_KEY`, `EMAIL_FROM` ("Ad <adres@doğrulanmış-alan>"),
+  `APP_BASE_URL` (https; e-postadaki TÜM bağlantılar buradan — Host başlığından ASLA, yoksa sıfırlama bağlantısı
+  saldırganın sitesine yönlendirilebilir), `CRON_SECRET` (haftalık özet), isteğe bağlı `EMAIL_VERIFY_MODE=soft`.
+  İlk üçü yoksa e-posta KAPALI: doğrulama zorunlu değil, `/api/auth/forgot` 503, bildirim e-postası yok — sistem
+  e-postasız çalışmaya devam eder. Gönderim `httpx` ile `https://api.resend.com/emails` (tek) ve `/emails/batch` (≤100).
+- **Doğrulama kapısı SUNUCUDA** (`require_auth`, ad soyad kapısından sonra): e-posta açık + mod strict + `users.email_verified_at`
+  NULL → 403 + `X-Email-Verify: required` başlığı; panel `apiFetch` bu başlıkta doğrulama ekranını açar. Profil uçları ve
+  `/api/auth/resend-verification` (`require_session`) muaf. İlk kullanıcı doğrulanmış başlar (kurulum kilitlenmesin);
+  OWNER_EMAILS DAHİL diğer herkes doğrular (o adresle başkası kaydolup owner olamasın). Özellikten önce kayıtlı herkes BİR
+  KEZ doğrulanmış sayıldı (`schema_flags.email_verify_grandfathered`). Şifre sıfırlamak da e-postayı doğrular.
+- **Bağlantı kodları** `email_tokens` (kind verify|reset; yalnızca sha256; tek kullanımlık, `consume_email_token` TEK
+  `UPDATE … RETURNING`; yeni kod aynı türdeki eskileri geçersiz kılar). Doğrulama 24 saat, sıfırlama 60 dk. Panel
+  `?verify=`/`?reset=` parametrelerini adres çubuğundan siler; doğrulama bağlantısı oturum durumu OKUNMADAN önce
+  işlenir (yoksa doğrulama ekranı açık kalıyordu).
+- **Şifremi unuttum:** `POST /api/auth/forgot` hesap olsun olmasın AYNI yanıt (`FORGOT_OK`); `POST /api/auth/reset` yeni
+  şifre + TÜM oturumlar kapanır + giriş kilidi temizlenir + "şifren değişti" e-postası (profilden şifre değişince de).
+- **Deneme sınırları** (`auth_attempts`, veritabanında — sunucusuz örnekler ortak): giriş hatası e-posta başına 15 dk'da 5,
+  IP başına 30 → 429; doğrulama/sıfırlama e-postası kişi başına dakikada 1, saatte 3; şifre sıfırlama isteği IP başına
+  saatte 10. IP = `X-Forwarded-For` ilk değeri.
+- **Bildirim e-postaları:** her bildirim kaydı (`notify.add` / `broadcast`) `notify_email.dispatch`'i çağırır; e-posta yalnızca
+  alıcının e-postası DOĞRULANMIŞ + tercihi o grup için anlık + `email_off` değilse. Gruplar ve varsayılanlar
+  `notify_email.GROUPS`/`DEFAULTS` (bana yazılanlar, eğitim, raporlar açık; takip, bülten, oy kapalı; haftalık özet açık).
+  Aynı başlık için 30 dk içinde okunmamış e-posta varsa yenisi gitmez; okunmamış oy bildirimi varken yeni oy sayaca eklenir
+  (e-posta yok). Gönderim isteğin içinde tek toplu çağrı; hata isteği düşürmez, loglanır; gidenler `notifications.emailed_at`.
+  Cümleler panelle ortak (`notify.render`). Kullanıcı içeriği şablonlarda `html.escape`. Her e-postada ayarlar bağlantısı
+  (`/#bildirim-ayarlari`) + `List-Unsubscribe` + girişsiz "tüm e-postaları kapat" (`GET /api/notifications/unsubscribe?t=`,
+  kişiye özel rastgele `notification_prefs.unsub_token`). Tercihler `GET/PUT /api/notification-prefs` (Profilim → Bildirim Ayarları).
+- **Haftalık özet:** `vercel.json` `crons` → `GET /api/cron/weekly-digest` pazartesi 06:00 UTC; Vercel `Authorization: Bearer
+  CRON_SECRET` gönderir (yoksa 401/503). Kişi başına: son 7 günün okunmamış bildirimleri, bültenler, cevap bekleyen sorular
+  (görünürlük kuralıyla); boşsa gönderilmez; `digest_sent_at` ile 6 günde bir.
+- Test: `mailer.httpx.AsyncClient`'ı `httpx.MockTransport`'lu istemciyle değiştirip giden gövdeleri doğrula (gerçek Resend'e gitme).
+
 ## Ön öneri kuralı (Uygun / Sınırda / Elenmiş)
 
 - **TEK kaynak:** `scoring.py` → `UYGUN_MAX_NEGATIVE`, `ELIMINATE_AT`, `verdict_for()`,

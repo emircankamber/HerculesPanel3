@@ -435,3 +435,7 @@ select.field{padding-right:28px;}
 .fm-hl{animation:fmhl 2.4s ease-out;}
 @keyframes fmhl{0%{box-shadow:0 0 0 3px var(--primary);}100%{box-shadow:0 0 0 3px transparent;}}
 @media (max-width:640px){.nt-panel{position:fixed;left:16px;right:16px;top:72px;width:auto;}}
+/* Bildirim ayarları onay kutuları */
+.pf-check{display:flex;align-items:flex-start;gap:10px;font-size:13.5px;line-height:1.45;cursor:pointer;}
+.pf-check input{margin-top:3px;width:16px;height:16px;accent-color:var(--primary);flex-shrink:0;}
+.pf-check:has(input:disabled){opacity:.55;cursor:default;}

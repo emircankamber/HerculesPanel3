@@ -30,7 +30,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import asyncio
 import contextvars
-from fastapi import FastAPI, HTTPException, Query, BackgroundTasks, Depends, Header
+from fastapi import FastAPI, HTTPException, Query, BackgroundTasks, Depends, Header, Request
 from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -63,6 +63,8 @@ import trends
 import competency as comp
 import forum
 import notify
+import notify_email
+import mailer
 import base64
 import binascii
 import excel_export
@@ -155,10 +157,12 @@ async def require_session(authorization: str | None = Header(default=None)) -> d
         raise HTTPException(401, "Oturum geçersiz veya süresi dolmuş — lütfen giriş yapın")
     _AUTH_CTX.set({"user_id": session["user_id"], "role": session["role"], "in_team": session["in_team"]})
     return {"email": session["email"], "user_id": session["user_id"], "token": token,
-            "needs_name": not ((session.get("first_name") or "").strip() and (session.get("last_name") or "").strip())}
+            "needs_name": not ((session.get("first_name") or "").strip() and (session.get("last_name") or "").strip()),
+            "needs_verify": mailer.verification_enforced() and not session.get("email_verified")}
 
 
 NAME_REQUIRED_DETAIL = "Devam etmek için önce adını ve soyadını girmen gerekiyor"
+VERIFY_REQUIRED_DETAIL = "Devam etmek için e-posta adresini doğrulaman gerekiyor — gelen kutuna gönderdiğimiz bağlantıya tıkla"
 
 
 async def require_auth(authorization: str | None = Header(default=None)) -> dict:
@@ -173,6 +177,9 @@ async def require_auth(authorization: str | None = Header(default=None)) -> dict
     # AD SOYAD KAPISI (sunucuda): adı/soyadı olmayan (eski) hesap, profil uçları dışında hiçbir şey yapamaz.
     if user.pop("needs_name", False):
         raise HTTPException(428, NAME_REQUIRED_DETAIL)
+    # E-POSTA DOĞRULAMA KAPISI (sunucuda, yalnızca e-posta açık + strict modda): panel bu başlıkla doğrulama ekranını açar
+    if user.pop("needs_verify", False):
+        raise HTTPException(403, VERIFY_REQUIRED_DETAIL, headers={"X-Email-Verify": "required"})
     return user
 
 
@@ -1525,16 +1532,161 @@ async def auth_register(req: RegisterRequest):
     except ValueError as e:
         raise HTTPException(400, str(e))
     token = await db.create_session(user)
-    return {"token": token, "email": user["email"], "invite": user.get("invite")}
+    verify_sent = False
+    if mailer.enabled() and not user.get("verified"):
+        await db.record_attempt("verify_mail", str(user["id"]))   # "tekrar gönder" hemen ikinci e-postayı atmasın
+        verify_sent = await _send_verify_email(user["id"])
+    return {"token": token, "email": user["email"], "invite": user.get("invite"),
+            "needs_verify": mailer.verification_enforced() and not user.get("verified"), "verify_sent": verify_sent}
+
+
+# --- Giriş deneme sınırı & e-posta bağlantıları ---
+LOGIN_WINDOW = 15 * 60
+LOGIN_MAX_PER_EMAIL = 5        # 15 dakikada aynı e-postaya 5 hatalı deneme
+LOGIN_MAX_PER_IP = 30          # 15 dakikada aynı IP'den 30 hatalı deneme
+VERIFY_TTL = 24 * 3600
+RESET_TTL_MIN = 60
+MAIL_MAX_PER_HOUR = 3          # kişi başına saatte doğrulama / sıfırlama e-postası
+MAIL_MIN_GAP = 60              # iki e-posta arası en az (sn)
+FORGOT_MAX_PER_IP = 10         # saatte IP başına şifre sıfırlama isteği
+
+
+def _client_ip(request: Request) -> str:
+    """Vercel'de istemci IP'si X-Forwarded-For'un ilk değeri."""
+    fwd = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+    return fwd or (request.client.host if request.client else "unknown")
+
+
+async def _mail_allowed(user_id: int, scope: str) -> bool:
+    key = str(user_id)
+    if await db.count_attempts(scope, key, MAIL_MIN_GAP) or await db.count_attempts(scope, key, 3600) >= MAIL_MAX_PER_HOUR:
+        return False
+    await db.record_attempt(scope, key)
+    return True
+
+
+async def _send_verify_email(user_id: int) -> bool:
+    u = await db.user_brief(user_id)
+    if not u or not mailer.enabled():
+        return False
+    code = await db.create_email_token(user_id, "verify", VERIFY_TTL)
+    subject, html_body, text = mailer.verify_email(db.display_name(u), mailer.link(f"/?verify={code}"))
+    try:
+        await mailer.send(u["email"], subject, html_body, text)
+        return True
+    except mailer.MailError as e:
+        print(f"[mail] doğrulama e-postası gönderilemedi: {e}", flush=True)
+        return False
+
+
+async def _send_password_changed(user_id: int):
+    u = await db.user_brief(user_id)
+    if not u or not mailer.enabled():
+        return
+    subject, html_body, text = mailer.password_changed_email(db.display_name(u), mailer.link("/"))
+    try:
+        await mailer.send(u["email"], subject, html_body, text)
+    except mailer.MailError as e:
+        print(f"[mail] şifre değişti e-postası gönderilemedi: {e}", flush=True)
 
 
 @app.post("/api/auth/login")
-async def auth_login(req: AuthRequest):
+async def auth_login(req: AuthRequest, request: Request):
+    email, ip = (req.email or "").strip().lower(), _client_ip(request)
+    if (await db.count_attempts("login_email", email, LOGIN_WINDOW) >= LOGIN_MAX_PER_EMAIL
+            or await db.count_attempts("login_ip", ip, LOGIN_WINDOW) >= LOGIN_MAX_PER_IP):
+        raise HTTPException(429, "Çok fazla hatalı deneme — 15 dakika sonra tekrar dene"
+                                 + (" ya da \"Şifremi unuttum\" ile şifreni sıfırla" if mailer.enabled() else ""))
     user = await db.verify_user(req.email, req.password)
     if not user:
+        await db.record_attempt("login_email", email)
+        await db.record_attempt("login_ip", ip)
         raise HTTPException(401, "E-posta veya şifre hatalı")
+    await db.clear_attempts("login_email", email)
     token = await db.create_session(user)
     return {"token": token, "email": user["email"]}
+
+
+class TokenIn(BaseModel):
+    token: str = Field(..., min_length=10, max_length=200)
+
+
+@app.post("/api/auth/verify")
+async def auth_verify(req: TokenIn):
+    """E-postadaki doğrulama bağlantısı (?verify=KOD). Girişsiz çalışır; kod tek kullanımlık, 24 saat."""
+    uid = await db.consume_email_token(req.token, "verify")
+    if not uid:
+        raise HTTPException(400, "Doğrulama bağlantısı geçersiz, kullanılmış ya da süresi dolmuş — panelden yenisini iste")
+    await db.mark_email_verified(uid)
+    return {"ok": True}
+
+
+@app.post("/api/auth/resend-verification")
+async def auth_resend_verification(user: dict = Depends(require_session)):
+    """Doğrulama e-postasını yeniden gönder (dakikada 1, saatte 3). Ad soyad / doğrulama kapısından muaf."""
+    if user.get("auth_disabled") or not user.get("user_id"):
+        raise HTTPException(401, "Giriş yapın")
+    if not mailer.enabled():
+        raise HTTPException(503, "E-posta servisi henüz yapılandırılmadı — panel yöneticine başvur")
+    u = await db.user_brief(user["user_id"])
+    if u and u.get("email_verified_at"):
+        return {"ok": True, "already": True}
+    if not await _mail_allowed(user["user_id"], "verify_mail"):
+        raise HTTPException(429, "Kısa süre önce gönderdik — birkaç dakika bekleyip gelen kutunu ve spam klasörünü kontrol et")
+    if not await _send_verify_email(user["user_id"]):
+        raise HTTPException(502, "E-posta gönderilemedi — biraz sonra tekrar dene")
+    return {"ok": True}
+
+
+class ForgotIn(BaseModel):
+    email: str = Field(..., max_length=320)
+
+
+FORGOT_OK = {"ok": True, "message": "Bu adresle kayıtlı bir hesap varsa şifre sıfırlama bağlantısı gönderdik. "
+                                     "Gelen kutunu ve spam klasörünü kontrol et."}
+
+
+@app.post("/api/auth/forgot")
+async def auth_forgot(req: ForgotIn, request: Request):
+    """Hesap olsun olmasın AYNI yanıt (kimin hesabı olduğu dışarıdan öğrenilemez). Bağlantı 60 dk, tek kullanımlık."""
+    if not mailer.enabled():
+        raise HTTPException(503, "E-posta servisi henüz yapılandırılmadı — şifre sıfırlama için panel yöneticine başvur")
+    ip = _client_ip(request)
+    if await db.count_attempts("forgot_ip", ip, 3600) >= FORGOT_MAX_PER_IP:
+        raise HTTPException(429, "Çok fazla istek — biraz sonra tekrar dene")
+    await db.record_attempt("forgot_ip", ip)
+    u = await db.user_by_email(req.email)
+    if u and await _mail_allowed(u["id"], "reset_mail"):
+        code = await db.create_email_token(u["id"], "reset", RESET_TTL_MIN * 60)
+        subject, html_body, text = mailer.reset_email(db.display_name(u), mailer.link(f"/?reset={code}"), RESET_TTL_MIN)
+        try:
+            await mailer.send(u["email"], subject, html_body, text)
+        except mailer.MailError as e:
+            print(f"[mail] sıfırlama e-postası gönderilemedi: {e}", flush=True)
+    return FORGOT_OK
+
+
+class ResetIn(BaseModel):
+    token: str = Field(..., min_length=10, max_length=200)
+    password: str = Field(..., max_length=500)
+
+
+@app.post("/api/auth/reset")
+async def auth_reset(req: ResetIn):
+    """Yeni şifre: TÜM oturumlar kapanır, e-posta doğrulanmış sayılır (gelen kutusuna erişim kanıtlandı),
+    kişiye "şifren değişti" e-postası gider."""
+    if len(req.password) < 6:
+        raise HTTPException(422, "Şifre en az 6 karakter olmalı")
+    uid = await db.consume_email_token(req.token, "reset")
+    if not uid:
+        raise HTTPException(400, "Sıfırlama bağlantısı geçersiz, kullanılmış ya da süresi dolmuş — yenisini iste")
+    await db.reset_password(uid, req.password)
+    await db.mark_email_verified(uid)
+    u = await db.user_brief(uid)
+    if u:
+        await db.clear_attempts("login_email", u["email"])
+    await _send_password_changed(uid)
+    return {"ok": True}
 
 
 @app.post("/api/auth/logout")
@@ -1562,6 +1714,10 @@ async def auth_status(authorization: str | None = Header(default=None)):
                                              and (session.get("last_name") or "").strip()),
         "user_id": session["user_id"] if session and role else None,
         "role": role,  # "owner" | "admin" | "member" | None — yetki kontrolü yine sunucuda yapılır
+        # E-posta: servis açık mı (şifremi unuttum bağlantısı), doğrulama gerekiyor mu (panel doğrulama ekranı)
+        "email_enabled": mailer.enabled(),
+        "email_verified": bool(session and session.get("email_verified")),
+        "needs_verify": bool(session) and mailer.verification_enforced() and not session.get("email_verified"),
         "storage": db.storage_info(),
         # Owner menü rozeti: son 7 günde kaydolan, hiçbir ekipte olmayan hesaplar
         "new_outsiders_7d": await db.new_outsider_count(7) if role == "owner" else None,
@@ -2936,16 +3092,6 @@ async def forum_report_resolve(rid: int, user: dict = Depends(require_staff)):
 # ---------------------------------------------------------------------------
 # PANEL İÇİ BİLDİRİMLER (notify.py) — kişi yalnızca KENDİ bildirimlerini görür/okur
 # ---------------------------------------------------------------------------
-_NOTIF_TEXT = {
-    "reply": "{actor}, “{title}” başlığına cevap yazdı",
-    "follow_reply": "{actor}, takip ettiğin “{title}” başlığına cevap yazdı",
-    "mention": "{actor} senden bahsetti: “{title}”",
-    "solution": "{actor}, “{title}” başlığında cevabını çözüm olarak işaretledi",
-    "vote": "{actor}{others} “{title}” içindeki {what} faydalı buldu",
-    "bulletin": "Yeni bülten: “{title}” ({actor})",
-    "lesson": "Sana yeni bir ders atandı: “{title}”",
-    "report": "{actor} bir içeriği bildirdi: “{title}”",
-}
 
 
 async def _visible_notifications(uid: int, rows: list[dict]) -> tuple[list[dict], list[int]]:
@@ -2970,10 +3116,7 @@ async def _visible_notifications(uid: int, rows: list[dict]) -> tuple[list[dict]
 
 def _notif_out(n: dict) -> dict:
     d = n.get("data") or {}
-    cnt = int(d.get("count") or 1)
-    text = _NOTIF_TEXT.get(n["kind"], "{title}").format(
-        actor=db.display_name(n) or "Biri", title=d.get("title") or "—",
-        others=f" ve {cnt - 1} kişi daha" if cnt > 1 else "", what="cevabını" if d.get("target") == "reply" else "başlığını")
+    text = notify.render(n["kind"], db.display_name(n), d)
     return {"id": n["id"], "kind": n["kind"], "text": text, "excerpt": d.get("excerpt") or "",
             "thread_id": n.get("thread_id"), "reply_id": n.get("reply_id"), "lesson_id": n.get("lesson_id"),
             "created_at": n["created_at"], "read": n.get("read_at") is not None}
@@ -3007,6 +3150,97 @@ async def notifications_read(req: NotifReadIn, user: dict = Depends(require_user
     elif req.ids:
         await notify.mark_read(user["user_id"], ids=req.ids)
     return {"ok": True}
+
+
+# --- E-posta bildirim tercihleri (kişi yalnızca KENDİ ayarı) ---
+@app.get("/api/notification-prefs")
+async def notification_prefs(user: dict = Depends(require_user)):
+    u = await db.user_brief(user["user_id"])
+    return {"prefs": await notify_email.get_prefs(user["user_id"]), "groups": notify_email.GROUP_LABELS,
+            "email_enabled": mailer.enabled(), "email": (u or {}).get("email"),
+            "email_verified": bool((u or {}).get("email_verified_at")), "is_staff": user["role"] in ("owner", "admin")}
+
+
+class PrefsIn(BaseModel):
+    instant: dict[str, bool] = Field(default_factory=dict)
+    weekly: bool = True
+    email_off: bool = False
+
+
+@app.put("/api/notification-prefs")
+async def notification_prefs_update(req: PrefsIn, user: dict = Depends(require_user)):
+    return {"ok": True, "prefs": await notify_email.set_prefs(user["user_id"], req.model_dump())}
+
+
+@app.get("/api/notifications/unsubscribe")
+async def notifications_unsubscribe(t: str = Query("", max_length=200)):
+    """E-postadaki "tüm e-postaları kapat" bağlantısı — girişsiz, kişiye özel rastgele kodla. Küçük bir HTML sayfa döner."""
+    ok = await notify_email.unsubscribe(t)
+    msg = ("Tüm bildirim e-postaları kapatıldı. Panel içi bildirimler sürer; e-postaları yeniden açmak için panelde "
+           "Profilim → Bildirim Ayarları'nı kullan.") if ok else "Bağlantı geçersiz ya da süresi dolmuş."
+    page = mailer.layout("E-posta bildirimleri", f"<p>{mailer.E(msg)}</p>",
+                         ("Panele git", mailer.link("/")) if mailer.base_url() else None)
+    return Response(content=page, media_type="text/html; charset=utf-8", status_code=200 if ok else 404,
+                    headers={"Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'", "Cache-Control": "no-store"})
+
+
+# --- Haftalık özet: Vercel Cron (vercel.json "crons") GET ile çağırır, Authorization: Bearer CRON_SECRET ---
+DIGEST_MIN_GAP = 6 * 86400
+
+
+@app.get("/api/cron/weekly-digest")
+async def cron_weekly_digest(authorization: str | None = Header(default=None)):
+    secret = (os.environ.get("CRON_SECRET") or "").strip()
+    if not secret:
+        raise HTTPException(503, "CRON_SECRET tanımlı değil")
+    if (authorization or "") != f"Bearer {secret}":
+        raise HTTPException(401, "Yetkisiz")
+    if not mailer.enabled():
+        return {"ok": True, "sent": 0, "skipped": "e-posta kapalı"}
+    now = int(time.time())
+    since = now - 7 * 86400
+    users = await db.fetch_all("SELECT id, email, first_name, last_name FROM users WHERE email_verified_at IS NOT NULL")
+    prefs = await notify_email.prefs_for([u["id"] for u in users])
+    sent_rows = {r["user_id"]: r["digest_sent_at"] for r in await db.fetch_all(
+        "SELECT user_id, digest_sent_at FROM notification_prefs")}
+    in_team = await db.team_member_ids()
+    all_threads = await db.fetch_all("SELECT id, title, kind, visibility, created_at, locked, solution_reply_id, "
+                                     "(SELECT COUNT(*) FROM forum_replies r WHERE r.thread_id = t.id) AS rc FROM forum_threads t")
+    msgs, sent_ids = [], []
+    for u in users:
+        p = prefs[u["id"]]
+        if p["email_off"] or not p["weekly"] or (sent_rows.get(u["id"]) or 0) > now - DIGEST_MIN_GAP:
+            continue
+        visible = [t for t in all_threads if t["visibility"] == "public" or u["id"] in in_team]
+        rows = [n for n in await notify.list_for(u["id"]) if n.get("read_at") is None and n["created_at"] >= since]
+        rows, _ = await _visible_notifications(u["id"], rows)
+        sections = []
+        if rows:
+            sections.append((f"Okunmamış bildirimlerin ({len(rows)})", [
+                (notify.render(n["kind"], db.display_name(n), n.get("data") or {}),
+                 notify_email.target_link(n.get("thread_id"), n.get("reply_id"), n.get("lesson_id"))[0]) for n in rows[:6]]))
+        bulletins = sorted([t for t in visible if t["kind"] == "bulletin" and t["created_at"] >= since], key=lambda t: -t["created_at"])
+        if bulletins:
+            sections.append(("Bu haftanın bültenleri", [(t["title"], mailer.link(f"/#forum/{t['id']}")) for t in bulletins[:5]]))
+        unanswered = sorted([t for t in visible if t["kind"] == "question" and not int(t["rc"]) and not t["solution_reply_id"]
+                             and not t["locked"]], key=lambda t: t["created_at"])
+        if unanswered:
+            sections.append((f"Cevap bekleyen sorular ({len(unanswered)})",
+                             [(t["title"], mailer.link(f"/#forum/{t['id']}")) for t in unanswered[:5]]))
+        if not sections:
+            continue
+        settings_url, unsub_url = await notify_email.footer_links(u["id"])
+        subject, html_body, text = mailer.digest_email(db.display_name(u), sections, mailer.link("/#forum"), settings_url, unsub_url)
+        msgs.append({"to": u["email"], "subject": subject, "html": html_body, "text": text,
+                     "headers": {"List-Unsubscribe": f"<{unsub_url}>"}})
+        sent_ids.append(u["id"])
+    try:
+        await mailer.send_batch(msgs)
+    except mailer.MailError as e:
+        raise HTTPException(502, f"Özet gönderilemedi: {e}")
+    for uid in sent_ids:
+        await db.execute("UPDATE notification_prefs SET digest_sent_at = ? WHERE user_id = ?", (now, uid))
+    return {"ok": True, "sent": len(msgs)}
 
 
 class CategoryIn(BaseModel):
@@ -3119,6 +3353,7 @@ async def profile_password(req: PasswordIn, user: dict = Depends(require_profile
         raise HTTPException(422, "Yeni şifre en az 6 karakter olmalı")
     if not await db.change_password(user["user_id"], req.current_password, req.new_password, user["token"]):
         raise HTTPException(403, "Mevcut şifre hatalı")
+    await _send_password_changed(user["user_id"])
     return {"ok": True}
 
 

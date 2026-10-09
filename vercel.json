@@ -5,6 +5,15 @@
     }
   },
   "rewrites": [
-    { "source": "/api/(.*)", "destination": "/api/index" }
+    {
+      "source": "/api/(.*)",
+      "destination": "/api/index"
+    }
+  ],
+  "crons": [
+    {
+      "path": "/api/cron/weekly-digest",
+      "schedule": "0 6 * * 1"
+    }
   ]
 }
