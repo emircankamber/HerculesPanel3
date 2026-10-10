@@ -255,6 +255,13 @@ async def _migrate_schema():
                           (int(time.time()),))
         except Exception:
             pass  # başka bir örnek yaptı
+    # KURAL (v7): doğrulama YALNIZCA kayıt sırasında kendisine doğrulama bağlantısı gönderilmiş (email_tokens'ta
+    # 'verify' kaydı olan) kişilerden istenir. E-posta sistemi açılmadan önce/kapalıyken kaydolan herkes doğrulanmış
+    # sayılır — tek seferlik eşik (v5) PR önizleme sürümleri aynı veritabanında erken çalıştığı için bazı eski
+    # kullanıcıları dışarıda bırakmıştı. Her migrasyonda çalışır (idempotent).
+    await execute("UPDATE users SET email_verified_at = COALESCE(created_at, ?) WHERE email_verified_at IS NULL "
+                  "AND NOT EXISTS (SELECT 1 FROM email_tokens t WHERE t.user_id = users.id AND t.kind = 'verify')",
+                  (int(time.time()),))
 
 
 async def _seed_teams_once():
@@ -297,9 +304,10 @@ async def _ensure_staff_in_team():
 # ŞEMAYA/MİGRASYONA HER DEĞİŞİKLİKTE (yeni tablo, sütun, indeks, veri düzeltmesi, tohum) BU SAYIYI ARTIR —
 # artırmazsan canlı veritabanında migrasyon hiç çalışmaz.
 # ---------------------------------------------------------------------------
-SCHEMA_VERSION = 6  # v2: banned_categories · v3: training_notes · v4: bildirimler, forum okunma/rapor/görsel, analiz/ders bağı
+SCHEMA_VERSION = 7  # v2: banned_categories · v3: training_notes · v4: bildirimler, forum okunma/rapor/görsel, analiz/ders bağı
                     # v5: e-posta doğrulama/sıfırlama, deneme sınırı, bildirim tercihleri
                     # v6: mcp_cache (Trendler 72 saat), bildirim varsayılanı hepsi açık
+                    # v7: doğrulama bağlantısı hiç gönderilmemiş (eski) kullanıcılar doğrulanmış sayılır
 
 
 def _migration_env_hash() -> str:
@@ -1580,6 +1588,14 @@ async def lesson_audience(lesson_id: int) -> set[int]:
     rows = await fetch_all(f"SELECT u.id FROM users u, training_lessons l WHERE l.id = ? "
                            f"AND EXISTS (SELECT 1 FROM team_members tm WHERE tm.user_id = u.id) AND {sql}", (lesson_id,))
     return {r["id"] for r in rows}
+
+
+async def lesson_explicit_assignees(lesson_id: int) -> list[int]:
+    """'Seçilen kişiler' modundaki açık atamalar (diğer modlarda boş)."""
+    row = await fetch_one("SELECT assign_mode FROM training_lessons WHERE id = ?", (lesson_id,))
+    if not row or row.get("assign_mode") != "users":
+        return []
+    return [r["user_id"] for r in await fetch_all("SELECT user_id FROM training_assignments WHERE lesson_id = ?", (lesson_id,))]
 
 
 async def get_lesson(lesson_id: int) -> dict | None:

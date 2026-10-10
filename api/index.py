@@ -1564,6 +1564,10 @@ async def auth_register(req: RegisterRequest):
     if mailer.enabled() and not user.get("verified"):
         await db.record_attempt("verify_mail", str(user["id"]))   # "tekrar gönder" hemen ikinci e-postayı atmasın
         verify_sent = await _send_verify_email(user["id"])
+    elif not user.get("verified"):
+        # E-posta servisi kapalıyken kaydolan doğrulama bağlantısı alamaz → doğrulanmış sayılır (eski kullanıcılar gibi)
+        await db.mark_email_verified(user["id"])
+        user["verified"] = True
     return {"token": token, "email": user["email"], "invite": user.get("invite"),
             "needs_verify": mailer.verification_enforced() and not user.get("verified"), "verify_sent": verify_sent}
 
@@ -2389,9 +2393,13 @@ async def training_update(lesson_id: int, req: LessonIn, user: dict = Depends(re
         raise HTTPException(404, "Ders bulunamadı")
     data = await _clean_lesson(req)
     before = await db.lesson_audience(lesson_id)
+    before_explicit = set(await db.lesson_explicit_assignees(lesson_id))
     await db.update_lesson(lesson_id, data)
-    # Yalnızca dersi YENİ görmeye başlayanlara bildirim (atama genişletildiyse)
-    await notify.add(await db.lesson_audience(lesson_id) - before, "lesson", user["user_id"], lesson_id=lesson_id,
+    after = await db.lesson_audience(lesson_id)
+    # Bildirim: dersi YENİ görmeye başlayanlar + "Seçilen kişiler"e AÇIKÇA yeni eklenenler (ders onlara zaten
+    # "Tüm ekipler"/ekip üzerinden görünüyor olsa bile — owner'ın kişiyi seçmesi bir atamadır)
+    explicit_new = (set(data["assignee_ids"]) - before_explicit) if data["assign_mode"] == "users" else set()
+    await notify.add((after - before) | (explicit_new & after), "lesson", user["user_id"], lesson_id=lesson_id,
                      data={"title": data["title"]})
     return {"ok": True, "id": lesson_id}
 
