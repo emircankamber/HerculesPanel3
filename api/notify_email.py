@@ -149,7 +149,7 @@ async def dispatch(kind: str, recipients: set[int], actor_id: int | None, thread
             return
         ids = sorted(recipients)
         marks = ",".join("?" * len(ids))
-        users = await fetch_all(f"SELECT id, email FROM users WHERE id IN ({marks}) AND email_verified_at IS NOT NULL", tuple(ids))
+        users = await fetch_all(f"SELECT id, email, first_name FROM users WHERE id IN ({marks}) AND email_verified_at IS NOT NULL", tuple(ids))
         prefs = await prefs_for([u["id"] for u in users])
         users = [u for u in users if not prefs[u["id"]]["email_off"] and prefs[u["id"]]["instant"][group]]
         now = int(time.time())
@@ -169,10 +169,12 @@ async def dispatch(kind: str, recipients: set[int], actor_id: int | None, thread
         msgs = []
         for u in users:
             settings_url, unsub_url = await footer_links(u["id"])
-            subject, html_body, plain = mailer.notification_email(text, data.get("excerpt") or "", url, button,
+            subject, html_body, plain = mailer.notification_email((u.get("first_name") or "").strip(), text,
+                                                                  data.get("excerpt") or "", url, button,
                                                                   settings_url, unsub_url)
-            msgs.append({"to": u["email"], "subject": subject, "html": html_body, "text": plain,
-                         "headers": {"List-Unsubscribe": f"<{unsub_url}>"}})
+            # List-Unsubscribe YALNIZCA haftalık özette: Gmail bu başlığı toplu/pazarlama postası işareti sayıp
+            # kişisel bildirimleri "Tanıtımlar"a atıyordu. Kapatma bağlantısı gövdede duruyor.
+            msgs.append({"to": u["email"], "subject": subject, "html": html_body, "text": plain})
         await mailer.send_batch(msgs)
         umarks = ",".join("?" * len(users))
         await execute(

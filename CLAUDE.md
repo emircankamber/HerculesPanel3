@@ -564,8 +564,10 @@ yüzden backend'e hiç bağlanmamalı, sahte veri olur.
   `schema_flags.notif_defaults_all_on`); kişinin kendi değiştirdiği tercihlere dokunulmaz.
   Aynı başlık için 30 dk içinde okunmamış e-posta varsa yenisi gitmez; okunmamış oy bildirimi varken yeni oy sayaca eklenir
   (e-posta yok). Gönderim isteğin içinde tek toplu çağrı; hata isteği düşürmez, loglanır; gidenler `notifications.emailed_at`.
-  Cümleler panelle ortak (`notify.render`). Kullanıcı içeriği şablonlarda `html.escape`. Her e-postada ayarlar bağlantısı
-  (`/#bildirim-ayarlari`) + `List-Unsubscribe` + girişsiz "tüm e-postaları kapat" (`GET /api/notifications/unsubscribe?t=`,
+  **Anlık bildirimler SADE gövdeyle gider** (`mailer.plain_layout`: "Merhaba Ad,", düz bağlantı; marka kartı/büyük düğme
+  YOK) ve `List-Unsubscribe` başlığı TAŞIMAZ — Gmail ikisini de toplu/pazarlama işareti sayıp "Tanıtımlar"a atıyordu.
+  `List-Unsubscribe` yalnızca haftalık özette. Cümleler panelle ortak (`notify.render`). Kullanıcı içeriği şablonlarda `html.escape`. Her e-postada ayarlar bağlantısı
+  (`/#bildirim-ayarlari`) + girişsiz "tüm e-postaları kapat" (`GET /api/notifications/unsubscribe?t=`,
   kişiye özel rastgele `notification_prefs.unsub_token`). Tercihler `GET/PUT /api/notification-prefs` (Profilim → Bildirim Ayarları).
 - **Haftalık özet:** `vercel.json` `crons` → `GET /api/cron/weekly-digest` pazartesi 06:00 UTC; Vercel `Authorization: Bearer
   CRON_SECRET` gönderir (yoksa 401/503). Kişi başına: son 7 günün okunmamış bildirimleri, bültenler, cevap bekleyen sorular

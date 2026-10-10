@@ -142,19 +142,31 @@ def password_changed_email(name: str, url: str) -> tuple[str, str, str]:
 
 
 def notify_footer(settings_url: str, unsub_url: str) -> tuple[str, str]:
-    h = (f'Bu e-postayı bildirim ayarların nedeniyle aldın. <a href="{E(settings_url)}" style="color:#005c55">Bildirim '
-         f'ayarlarını değiştir</a> · <a href="{E(unsub_url)}" style="color:#565e74">Tüm e-postaları kapat</a>')
+    h = (f'Bu e-postayı bildirim ayarların nedeniyle aldın. <a href="{E(settings_url)}" style="color:inherit">Bildirim '
+         f'ayarlarını değiştir</a> · <a href="{E(unsub_url)}" style="color:inherit">Tüm e-postaları kapat</a>')
     t = f"Bildirim ayarları: {settings_url}\nTüm e-postaları kapat: {unsub_url}"
     return h, t
 
 
-def notification_email(text: str, excerpt: str, url: str, button: str, settings_url: str,
+def plain_layout(body_html: str, footer_html: str = "") -> str:
+    """Kişisel bildirimler için SADE gövde: marka şeridi, renkli kart ve büyük düğme yok. Gmail'in "Tanıtımlar"
+    sekmesi yoğun biçimli (bülten benzeri) HTML'i pazarlama sayar; düz, mektup gibi bir e-posta "Birincil"e
+    düşme şansını artırır (garanti değil — sınıflandırma Gmail'in)."""
+    return (f'<!doctype html><html lang="tr"><body style="font-family:Arial,sans-serif;font-size:14px;line-height:1.5;'
+            f'color:#202124">{body_html}<p style="margin-top:28px;font-size:12px;color:#5f6368">{footer_html}</p>'
+            f'</body></html>')
+
+
+def notification_email(name: str, text: str, excerpt: str, url: str, button: str, settings_url: str,
                        unsub_url: str) -> tuple[str, str, str]:
     subject = text if len(text) <= 120 else text[:117] + "…"
-    body = f"<p>{E(text)}</p>" + (f'<blockquote style="margin:12px 0;padding:10px 14px;background:#eff4ff;'
-                                  f'border-radius:8px;color:#3e4947">{E(excerpt)}</blockquote>' if excerpt else "")
+    hi = f"Merhaba {name}," if name else "Merhaba,"
+    body = (f"<p>{E(hi)}</p><p>{E(text)}.</p>"
+            + (f'<p style="border-left:3px solid #dadce0;padding-left:10px;color:#3c4043">{E(excerpt)}</p>' if excerpt else "")
+            + f'<p><a href="{E(url)}">{E(button)}</a></p><p>{E(BRAND)}</p>')
     fh, ft = notify_footer(settings_url, unsub_url)
-    return subject, layout(subject, body, (button, url), fh), _plain(text, excerpt or None, "", url, "", ft)
+    return subject, plain_layout(body, fh), _plain(hi, "", text + ".", excerpt or None, "", f"{button}: {url}", "",
+                                                   BRAND, "", ft)
 
 
 def digest_email(name: str, sections: list[tuple[str, list[tuple[str, str]]]], url: str, settings_url: str,
