@@ -542,8 +542,12 @@ yüzden backend'e hiç bağlanmamalı, sahte veri olur.
 - **Doğrulama kapısı SUNUCUDA** (`require_auth`, ad soyad kapısından sonra): e-posta açık + mod strict + `users.email_verified_at`
   NULL → 403 + `X-Email-Verify: required` başlığı; panel `apiFetch` bu başlıkta doğrulama ekranını açar. Profil uçları ve
   `/api/auth/resend-verification` (`require_session`) muaf. İlk kullanıcı doğrulanmış başlar (kurulum kilitlenmesin);
-  OWNER_EMAILS DAHİL diğer herkes doğrular (o adresle başkası kaydolup owner olamasın). Özellikten önce kayıtlı herkes BİR
-  KEZ doğrulanmış sayıldı (`schema_flags.email_verify_grandfathered`). Şifre sıfırlamak da e-postayı doğrular.
+  OWNER_EMAILS DAHİL diğer herkes doğrular (o adresle başkası kaydolup owner olamasın). **Doğrulama YALNIZCA kayıtta
+  kendisine doğrulama bağlantısı gönderilmiş (`email_tokens` kind=verify) kişilerden istenir:** e-posta kapalıyken
+  kaydolan anında doğrulanmış sayılır (`auth_register`), eski kullanıcılar her migrasyonda (v7+) doğrulanmış yapılır.
+  (Hata geçmişi: tek seferlik eşik `schema_flags.email_verify_grandfathered` PR önizleme sürümü aynı veritabanında erken
+  çalıştırınca sonradan eski kodla kaydolanları dışarıda bırakıyordu → bu kişilere bildirim e-postası da gitmiyordu.)
+  Şifre sıfırlamak da e-postayı doğrular.
 - **Bağlantı kodları** `email_tokens` (kind verify|reset; yalnızca sha256; tek kullanımlık, `consume_email_token` TEK
   `UPDATE … RETURNING`; yeni kod aynı türdeki eskileri geçersiz kılar). Doğrulama 24 saat, sıfırlama 60 dk. Panel
   `?verify=`/`?reset=` parametrelerini adres çubuğundan siler; doğrulama bağlantısı oturum durumu OKUNMADAN önce
@@ -566,6 +570,12 @@ yüzden backend'e hiç bağlanmamalı, sahte veri olur.
 - **Haftalık özet:** `vercel.json` `crons` → `GET /api/cron/weekly-digest` pazartesi 06:00 UTC; Vercel `Authorization: Bearer
   CRON_SECRET` gönderir (yoksa 401/503). Kişi başına: son 7 günün okunmamış bildirimleri, bültenler, cevap bekleyen sorular
   (görünürlük kuralıyla); boşsa gönderilmez; `digest_sent_at` ile 6 günde bir.
+- **Teşhis (owner):** `/api/users` owner'a kişi başına `email_verified` + `email_notify {enabled, off, groups_off}` döner;
+  Ekip Yönetimi → Üyeler'de "e-posta doğrulanmadı / e-postalar kapalı / kapalı: eğitim…" rozetleri. Doğrulanmamış kişiye
+  owner `POST /api/users/{id}/resend-verification` ile bağlantıyı yeniden gönderir (kişinin kendi sınırıyla aynı).
+  "Owner'a ders e-postası gelmiyor" incelemesinde owner'a özel bir engel YOKTU (kişiler/ekipler/tümü hepsi gönderiyor);
+  nedenler alıcıya özel: doğrulanmamış adres, kapatılmış tercih ya da DÜZENLEMEDE kişinin dersi zaten görüyor olması.
+  Düzenlemede artık "Seçilen kişiler"e AÇIKÇA yeni eklenen herkes de bildirim alır (`lesson_explicit_assignees`).
 - Test: `mailer.httpx.AsyncClient`'ı `httpx.MockTransport`'lu istemciyle değiştirip giden gövdeleri doğrula (gerçek Resend'e gitme).
 
 ## Ön öneri kuralı (Uygun / Sınırda / Elenmiş)

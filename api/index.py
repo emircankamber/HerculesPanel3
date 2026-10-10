@@ -1564,6 +1564,10 @@ async def auth_register(req: RegisterRequest):
     if mailer.enabled() and not user.get("verified"):
         await db.record_attempt("verify_mail", str(user["id"]))   # "tekrar gönder" hemen ikinci e-postayı atmasın
         verify_sent = await _send_verify_email(user["id"])
+    elif not user.get("verified"):
+        # E-posta servisi kapalıyken kaydolan doğrulama bağlantısı alamaz → doğrulanmış sayılır (eski kullanıcılar gibi)
+        await db.mark_email_verified(user["id"])
+        user["verified"] = True
     return {"token": token, "email": user["email"], "invite": user.get("invite"),
             "needs_verify": mailer.verification_enforced() and not user.get("verified"), "verify_sent": verify_sent}
 
@@ -2389,9 +2393,13 @@ async def training_update(lesson_id: int, req: LessonIn, user: dict = Depends(re
         raise HTTPException(404, "Ders bulunamadı")
     data = await _clean_lesson(req)
     before = await db.lesson_audience(lesson_id)
+    before_explicit = set(await db.lesson_explicit_assignees(lesson_id))
     await db.update_lesson(lesson_id, data)
-    # Yalnızca dersi YENİ görmeye başlayanlara bildirim (atama genişletildiyse)
-    await notify.add(await db.lesson_audience(lesson_id) - before, "lesson", user["user_id"], lesson_id=lesson_id,
+    after = await db.lesson_audience(lesson_id)
+    # Bildirim: dersi YENİ görmeye başlayanlar + "Seçilen kişiler"e AÇIKÇA yeni eklenenler (ders onlara zaten
+    # "Tüm ekipler"/ekip üzerinden görünüyor olsa bile — owner'ın kişiyi seçmesi bir atamadır)
+    explicit_new = (set(data["assignee_ids"]) - before_explicit) if data["assign_mode"] == "users" else set()
+    await notify.add((after - before) | (explicit_new & after), "lesson", user["user_id"], lesson_id=lesson_id,
                      data={"title": data["title"]})
     return {"ok": True, "id": lesson_id}
 
@@ -2513,7 +2521,13 @@ async def users_list(user: dict = Depends(require_staff)):
     ekip seçebilsin (ekip YÖNETİMİ uçları yalnızca owner)."""
     users = await db.list_users()
     if user["role"] != "owner":   # e-posta yalnızca owner ekranlarında (ikincil bilgi)
-        users = [{k: v for k, v in u.items() if k != "email"} for u in users]
+        users = [{k: v for k, v in u.items() if k not in ("email", "email_verified")} for u in users]
+    else:
+        # Owner için e-posta teşhisi: bildirim e-postası bu kişiye neden gitmiyor? (doğrulanmamış / kapatmış)
+        prefs = await notify_email.prefs_for([u["id"] for u in users])
+        users = [{**u, "email_notify": {"enabled": mailer.enabled(), "off": prefs[u["id"]]["email_off"],
+                                        "groups_off": [g for g, on in prefs[u["id"]]["instant"].items() if not on]}}
+                 for u in users]
     return {"users": users, "me": user["user_id"], "my_role": user["role"],
             "teams": _team_opts(await db.list_teams())}
 
@@ -3428,6 +3442,24 @@ async def users_set_title(target_id: int, req: TitleIn, user: dict = Depends(req
     t = _clean_title(req.title)
     await db.update_profile(target_id, {"title": t})
     return {"ok": True, "id": target_id, "title": t}
+
+
+@app.post("/api/users/{target_id}/resend-verification")
+async def users_resend_verification(target_id: int, user: dict = Depends(require_owner)):
+    """Owner, e-postasını doğrulamamış bir kişiye doğrulama bağlantısını yeniden gönderir (kişi başına dakikada 1,
+    saatte 3 — kişinin kendi isteğiyle aynı sınır)."""
+    if not mailer.enabled():
+        raise HTTPException(503, "E-posta servisi yapılandırılmamış")
+    u = await db.user_brief(target_id)
+    if not u:
+        raise HTTPException(404, "Kullanıcı bulunamadı")
+    if u.get("email_verified_at"):
+        return {"ok": True, "already": True}
+    if not await _mail_allowed(target_id, "verify_mail"):
+        raise HTTPException(429, "Bu kişiye kısa süre önce gönderildi — birkaç dakika sonra tekrar deneyin")
+    if not await _send_verify_email(target_id):
+        raise HTTPException(502, "E-posta gönderilemedi — biraz sonra tekrar deneyin")
+    return {"ok": True}
 
 
 @app.get("/api/users/titles")
