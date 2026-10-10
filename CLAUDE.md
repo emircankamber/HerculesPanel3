@@ -566,6 +566,11 @@ yüzden backend'e hiç bağlanmamalı, sahte veri olur.
 - **Haftalık özet:** `vercel.json` `crons` → `GET /api/cron/weekly-digest` pazartesi 06:00 UTC; Vercel `Authorization: Bearer
   CRON_SECRET` gönderir (yoksa 401/503). Kişi başına: son 7 günün okunmamış bildirimleri, bültenler, cevap bekleyen sorular
   (görünürlük kuralıyla); boşsa gönderilmez; `digest_sent_at` ile 6 günde bir.
+- **Teşhis (owner):** `/api/users` owner'a kişi başına `email_verified` + `email_notify {enabled, off, groups_off}` döner;
+  Ekip Yönetimi → Üyeler'de "e-posta doğrulanmadı / e-postalar kapalı / kapalı: eğitim…" rozetleri. Doğrulanmamış kişiye
+  owner `POST /api/users/{id}/resend-verification` ile bağlantıyı yeniden gönderir (kişinin kendi sınırıyla aynı).
+  "Owner'a ders e-postası gelmiyor" incelemesinde owner'a özel bir engel YOKTU (kişiler/ekipler/tümü hepsi gönderiyor);
+  nedenler alıcıya özel: doğrulanmamış adres, kapatılmış tercih ya da DÜZENLEMEDE kişinin dersi zaten görüyor olması.
 - Test: `mailer.httpx.AsyncClient`'ı `httpx.MockTransport`'lu istemciyle değiştirip giden gövdeleri doğrula (gerçek Resend'e gitme).
 
 ## Ön öneri kuralı (Uygun / Sınırda / Elenmiş)

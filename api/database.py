@@ -971,7 +971,8 @@ async def owner_count() -> int:
 
 
 async def list_users() -> list[dict]:
-    rows = await fetch_all("SELECT id, email, role, created_at, first_name, last_name, username, title FROM users ORDER BY id")
+    rows = await fetch_all("SELECT id, email, role, created_at, first_name, last_name, username, title, email_verified_at "
+                           "FROM users ORDER BY id")
     teams = await _memberships()
     parent = await _parents()
     return [{"id": r["id"], "email": r["email"], "created_at": r["created_at"],
@@ -982,7 +983,7 @@ async def list_users() -> list[dict]:
              # team_ids = ETKİN üyelik (doğrudan + alt ekip üzerinden ana ekip); direct_team_ids = kayıtlı satırlar
              "team_ids": _effective(teams.get(r["id"], []), parent),
              "direct_team_ids": sorted(teams.get(r["id"], [])),
-             "in_team": bool(teams.get(r["id"]))} for r in rows]
+             "in_team": bool(teams.get(r["id"])), "email_verified": bool(r.get("email_verified_at"))} for r in rows]
 
 
 def display_name(row: dict | None) -> str:

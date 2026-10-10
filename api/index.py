@@ -2513,7 +2513,13 @@ async def users_list(user: dict = Depends(require_staff)):
     ekip seçebilsin (ekip YÖNETİMİ uçları yalnızca owner)."""
     users = await db.list_users()
     if user["role"] != "owner":   # e-posta yalnızca owner ekranlarında (ikincil bilgi)
-        users = [{k: v for k, v in u.items() if k != "email"} for u in users]
+        users = [{k: v for k, v in u.items() if k not in ("email", "email_verified")} for u in users]
+    else:
+        # Owner için e-posta teşhisi: bildirim e-postası bu kişiye neden gitmiyor? (doğrulanmamış / kapatmış)
+        prefs = await notify_email.prefs_for([u["id"] for u in users])
+        users = [{**u, "email_notify": {"enabled": mailer.enabled(), "off": prefs[u["id"]]["email_off"],
+                                        "groups_off": [g for g, on in prefs[u["id"]]["instant"].items() if not on]}}
+                 for u in users]
     return {"users": users, "me": user["user_id"], "my_role": user["role"],
             "teams": _team_opts(await db.list_teams())}
 
@@ -3428,6 +3434,24 @@ async def users_set_title(target_id: int, req: TitleIn, user: dict = Depends(req
     t = _clean_title(req.title)
     await db.update_profile(target_id, {"title": t})
     return {"ok": True, "id": target_id, "title": t}
+
+
+@app.post("/api/users/{target_id}/resend-verification")
+async def users_resend_verification(target_id: int, user: dict = Depends(require_owner)):
+    """Owner, e-postasını doğrulamamış bir kişiye doğrulama bağlantısını yeniden gönderir (kişi başına dakikada 1,
+    saatte 3 — kişinin kendi isteğiyle aynı sınır)."""
+    if not mailer.enabled():
+        raise HTTPException(503, "E-posta servisi yapılandırılmamış")
+    u = await db.user_brief(target_id)
+    if not u:
+        raise HTTPException(404, "Kullanıcı bulunamadı")
+    if u.get("email_verified_at"):
+        return {"ok": True, "already": True}
+    if not await _mail_allowed(target_id, "verify_mail"):
+        raise HTTPException(429, "Bu kişiye kısa süre önce gönderildi — birkaç dakika sonra tekrar deneyin")
+    if not await _send_verify_email(target_id):
+        raise HTTPException(502, "E-posta gönderilemedi — biraz sonra tekrar deneyin")
+    return {"ok": True}
 
 
 @app.get("/api/users/titles")

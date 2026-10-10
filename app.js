@@ -4365,6 +4365,19 @@ function tgBindTeamRow(row, t) {
 }
 
 // --- Üyeler ---
+/** Bildirim e-postası teşhisi (yalnızca owner'a gelir): doğrulanmamış / tüm e-postalar kapalı / kapatılan gruplar */
+const TG_GROUP_LABEL = { direct: "bana yazılanlar", lesson: "eğitim", follow: "takip", bulletin: "bülten", vote: "faydalı", report: "bildirilen içerik" };
+function tgMailStatus(u) {
+  const n = u.email_notify;
+  if (!n || !n.enabled) return "";
+  const parts = [];
+  if (!u.email_verified) parts.push(`<span class="chip bad !text-[10px]" title="Doğrulanmamış adrese bildirim e-postası gönderilmez">e-posta doğrulanmadı</span><button type="button" class="text-[11px] text-primary hover:underline tg-reverify">doğrulama e-postası gönder</button>`);
+  if (n.off) parts.push(`<span class="chip bad !text-[10px]" title="Kişi tüm bildirim e-postalarını kapatmış (panel içi bildirimler sürer)">e-postalar kapalı</span>`);
+  else if (n.groups_off.length) parts.push(`<span class="chip warn !text-[10px]" title="Bu türlerde anlık e-posta gitmez">kapalı: ${esc(n.groups_off.map(g => TG_GROUP_LABEL[g] || g).join(", "))}</span>`);
+  if (!parts.length) parts.push(`<span class="chip ok !text-[10px]" title="Doğrulanmış adres, bildirim e-postaları açık">e-posta bildirimleri açık</span>`);
+  return `<div class="flex flex-wrap gap-1 mt-1">${parts.join("")}</div>`;
+}
+
 /** Owner'ın atadığı unvan (ör. "PPC Uzmanı") — adın yanında küçük rozet */
 const titleChip = (t) => t ? ` <span class="chip ok !text-[10px] max-w-[180px] truncate align-middle" title="${esc(t)}">${esc(t)}</span>` : "";
 
@@ -4398,6 +4411,7 @@ function tgRenderMembers() {
           <div class="min-w-0"><div class="font-medium break-words tg-mem-name">${esc(u.name || "(ad girilmemiş)")}${titleChip(u.title)}</div><div class="text-[11px] text-secondary break-all">${esc(u.email)}${u.username ? ` · @${esc(u.username)}` : ""}</div></div></div>
         <div class="flex flex-wrap gap-1 mt-1">${isMe ? '<span class="chip na !text-[10px]">sen</span>' : ""}${perm ? '<span class="chip ok !text-[10px]"><span class="material-symbols-outlined !text-[12px]" aria-hidden="true">lock</span>kalıcı owner</span>' : ""}${tgIsNew(u) ? '<span class="chip warn !text-[10px] tg-new">yeni</span>' : ""}</div>
         <div class="text-[11px] text-secondary mt-1">Kayıt: ${esc(tgDate(u.created_at))}</div>
+        ${tgMailStatus(u)}
       </div>
       <div class="min-w-0">
         <div class="flex flex-col gap-1.5 tg-teams">${tgTeamChips(u, tById)}</div>
@@ -4456,6 +4470,11 @@ function tgRenderMembers() {
         if (b.self_changed) { await checkAuthStatus(); if (currentUser.role !== "owner") { showView("home"); return; } }
         await tgLoad();
       } catch (err) { sel2.disabled = false; sel2.value = u.role; rmsg.textContent = err.message; rmsg.className = "tg-role-msg text-[11px] mt-1 text-error"; }
+    });
+    row.querySelector(".tg-reverify")?.addEventListener("click", async (e) => {
+      const b = e.currentTarget; b.disabled = true; actMsg.textContent = "";
+      try { const r = await tgApi(`/api/users/${encodeURIComponent(u.id)}/resend-verification`, { method: "POST" }); b.textContent = r.already ? "zaten doğrulanmış" : "gönderildi ✓"; }
+      catch (err) { b.disabled = false; actMsg.textContent = err.message; }
     });
     // unvan (Enter ya da alandan çıkınca kaydedilir)
     const tIn = row.querySelector(".tg-title"), tMsg = row.querySelector(".tg-title-msg");
