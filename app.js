@@ -239,6 +239,9 @@ async function checkAuthStatus() {
     if (teamNav) teamNav.style.display = currentUser.role === "owner" ? "" : "none";
     setTeamBadge(currentUser.role === "owner" ? s.new_outsiders_7d : 0);
     if (currentUser.role !== "owner" && $("#view-team")?.classList.contains("active")) showView("home");
+    const perfNav = document.querySelector('.nav-btn[data-view="perf"]');
+    if (perfNav) perfNav.style.display = currentUser.role === "owner" ? "" : "none";
+    if (currentUser.role !== "owner" && $("#view-perf")?.classList.contains("active")) showView("home");
 
     // Paylaşımlı depolama uyarısı
     const warnEl = document.getElementById("storage-warning");
@@ -434,6 +437,8 @@ function showView(view) {
   if (view === "checklists") loadChecklists();
   if (view === "launch") lrEnsureVars();
   if (view === "team") loadTeamAdmin();
+  if (view === "perf") loadPerf();
+  else tpCloseDrawer();
   if (view === "profile") loadProfile();
   if (view === "forum") loadForum();
   if (view === "trends") { updateTrendsStale(); loadTrendCategories(); }
@@ -5657,4 +5662,416 @@ function fmRenderCatAdmin() {
     const m = location.hash.match(/^#forum\/(\d+)$/);
     if (m) fmOpen(Number(m[1]), false); else { fmShowList(); fmLoadList(); }
   });
+})();
+
+// ===========================================================================
+// EKİP PERFORMANSI (yalnızca owner; sunucu /api/team/performance → require_owner, diğerleri 403)
+// Salt okunur, MCP çağrısı YOK. Tüm sayılar sunucuda (api/team_perf.py) panelin kendi kayıtlarından hesaplanır;
+// burada yalnızca görselleştirme. Kişiye tıklamak yan paneli açar (son kayıtlar /api/team/activity'den).
+// ===========================================================================
+const tpState = { period: "7", data: null, filter: "all", q: "", sort: { key: "analyses", dir: -1 }, chart: null, req: 0 };
+const TP_DECISION_COLORS = { "Uygun": "#0f766e", "Sınırda": "#c98a4b", "Elenmiş": "#ba1a1a" };
+const TP_AVATAR_COLORS = ["#005c55", "#3f6fb0", "#a15600", "#0f9488", "#6b5fb5", "#b0476b", "#4d7c0f", "#565e74"];
+const TP_DAYS = ["Pzt", "Sal", "Çar", "Per", "Cum", "Cmt", "Paz"];
+const TP_DAYS_LONG = ["Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma", "Cumartesi", "Pazar"];
+const TP_STATUS = { active: ["ok", "Aktif"], quiet: ["na", "Sessiz"], attention: ["warn", "İlgi gerekiyor"] };
+
+const tpColor = (id) => TP_AVATAR_COLORS[Math.abs(Number(id) || 0) % TP_AVATAR_COLORS.length];
+const tpAvatar = (p, size = "") => `<span class="tp-av ${size}" style="background:${tpColor(p.user_id)}" aria-hidden="true">${esc(initials(p.name))}</span>`;
+const tpPct = (v, digits = 0) => v == null ? "—" : `%${(v * 100).toLocaleString("tr-TR", { maximumFractionDigits: digits })}`;
+const tpYmd = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+
+/** Seçili dönemin yerel gün sınırları (until = bitiş gününün ertesi 00:00). */
+function tpRange() {
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const end = new Date(today); end.setDate(end.getDate() + 1);
+  let start;
+  if (tpState.period === "month") start = new Date(today.getFullYear(), today.getMonth(), 1);
+  else if (tpState.period === "custom") {
+    const f = $("#tp-from").value, t = $("#tp-to").value;
+    if (!f || !t) return null;
+    const [fy, fm, fd] = f.split("-").map(Number), [ty, tm, td] = t.split("-").map(Number);
+    start = new Date(fy, fm - 1, fd);
+    const e = new Date(ty, tm - 1, td); e.setDate(e.getDate() + 1);
+    if (e <= start) return null;
+    return { since: Math.floor(start / 1000), until: Math.floor(e / 1000) };
+  } else { start = new Date(today); start.setDate(start.getDate() - Number(tpState.period) + 1); }
+  return { since: Math.floor(start / 1000), until: Math.floor(end / 1000) };
+}
+
+function tpStatus(text, cls = "") { const el = $("#tp-status"); el.textContent = text; el.className = `status-line mt-4 ${cls}`.trim(); }
+
+async function loadPerf() {
+  const owner = currentUser.role === "owner";
+  $("#tp-guest").style.display = owner ? "none" : "block";
+  $("#tp-body").style.display = owner && tpState.data ? "block" : "none";
+  if (!owner) { tpStatus(""); return; }
+  const rng = tpRange();
+  if (!rng) { tpStatus("Geçerli bir başlangıç ve bitiş tarihi seçin.", "error"); return; }
+  const params = new URLSearchParams({ since: rng.since, until: rng.until, tz: String(-new Date().getTimezoneOffset()) });
+  const tid = $("#tp-team").value; if (tid) params.set("team_id", tid);
+  const req = ++tpState.req;
+  tpStatus("yükleniyor…", "loading");
+  try {
+    const r = await apiFetch(`${API_BASE}/api/team/performance?${params}`);
+    const b = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(apiErrorText(b, r.status));
+    if (req !== tpState.req) return;   // daha yeni bir istek var
+    tpState.data = b;
+    $("#tp-body").style.display = "block";
+    renderPerf();
+    tpStatus("");
+  } catch (err) { if (req === tpState.req) tpStatus(`Hata: ${err.message}`, "error"); }
+}
+
+/** Önceki döneme göre değişim rozeti. */
+function tpDelta(cur, prev, { invert = false, unit = "" } = {}) {
+  if (!cur && !prev) return `<span class="tp-delta flat">önceki dönemle aynı</span>`;
+  if (!prev) return `<span class="tp-delta up"><span class="material-symbols-outlined">north_east</span>yeni hareket</span>`;
+  const ch = (cur - prev) / prev;
+  if (Math.abs(ch) < 0.005) return `<span class="tp-delta flat"><span class="material-symbols-outlined">east</span>önceki dönemle aynı</span>`;
+  const good = invert ? ch < 0 : ch > 0;
+  const arrow = ch > 0 ? "north_east" : "south_east";
+  return `<span class="tp-delta ${good ? "up" : "down"}"><span class="material-symbols-outlined">${arrow}</span>${ch > 0 ? "+" : "−"}%${Math.abs(Math.round(ch * 100)).toLocaleString("tr-TR")}${unit} önceki döneme göre</span>`;
+}
+function tpDeltaShort(cur, prev) {
+  if (!cur && !prev) return "";
+  if (!prev) return `<span class="tp-delta up">yeni</span>`;
+  const ch = (cur - prev) / prev;
+  if (Math.abs(ch) < 0.005) return `<span class="tp-delta flat">=</span>`;
+  return `<span class="tp-delta ${ch > 0 ? "up" : "down"}">${ch > 0 ? "▲" : "▼"} %${Math.abs(Math.round(ch * 100))}</span>`;
+}
+
+function renderPerf() {
+  const b = tpState.data; if (!b) return;
+  const tsel = $("#tp-team"), tcur = tsel.value;
+  tsel.innerHTML = `<option value="">Tüm ekipler</option>` + (b.teams || []).map(t => `<option value="${esc(t.id)}">${esc(t.name)}</option>`).join("");
+  tsel.value = (b.teams || []).some(t => String(t.id) === tcur) ? tcur : "";
+  const f = new Date(b.range.since * 1000), l = new Date((b.range.until - 1) * 1000);
+  const fmt = (d) => d.toLocaleDateString("tr-TR", { day: "numeric", month: "short" });
+  $("#tp-range-chip").textContent = `${fmt(f)} – ${fmt(l)} · ${b.range.days} gün`;
+  $("#tp-rules").textContent = `"İlgi gerekiyor": son tarihi geçmiş tamamlanmamış ders, ${b.rules.quiet_days}+ gündür hiçbir etkinlik (analiz, karar, kontrol listesi, eğitim, forum) ya da ${b.rules.stale_list_days}+ gündür güncellenmeyen açık kontrol listesi. "Sessiz": bu dönemde etkinliği yok. Eğitim oranı tüm zamanlar (atanan derslere göre); diğer sayılar seçili dönem. Yalnızca şu an en az bir ekipte olan kişiler.`;
+  tpRenderKpis(b); tpRenderDaily(b); tpRenderFunnel(b); tpRenderHeat(b); tpRenderMix(b); tpRenderSpot(b); tpRenderAttention(b); tpRenderTable();
+}
+
+function tpRenderKpis(b) {
+  const t = b.totals, pv = b.prev;
+  const actives = b.people.filter(p => p.active_days).slice(0, 6);
+  const mixTotal = Object.values(b.mix).reduce((a, c) => a + c, 0);
+  const mixBar = mixTotal ? Object.entries(b.mix).map(([k, v]) => `<span style="width:${v / mixTotal * 100}%;background:${TP_DECISION_COLORS[k]}" title="${esc(k)}: ${v}"></span>`).join("") : "";
+  const cards = [
+    { icon: "groups", label: "Aktif üye", accent: "#3f6fb0",
+      val: `${fmtNum(t.active_members)}<small>/ ${fmtNum(t.members)}</small>`,
+      extra: tpDelta(t.active_members, pv.active_members),
+      sub: actives.length ? `<div class="tp-avatars">${actives.map(p => `<span style="background:${tpColor(p.user_id)}" title="${esc(p.name)}">${esc(initials(p.name))}</span>`).join("")}</div>` : "Bu dönem kimse etkinlik göstermedi" },
+    { icon: "query_stats", label: "Analiz", accent: "#005c55",
+      val: fmtNum(t.analyses), extra: tpDelta(t.analyses, pv.analyses),
+      sub: `${fmtNum(t.products)} tekil ürün / keyword` },
+    { icon: "gavel", label: "Pazar kararı", accent: "#a15600",
+      val: fmtNum(t.decisions), extra: tpDelta(t.decisions, pv.decisions),
+      sub: mixBar ? `<div class="tp-kpi-bar">${mixBar}</div>` : "Bu dönem karar yok" },
+    { icon: "conversion_path", label: "Karar dönüşümü", accent: "#0f9488",
+      val: tpPct(t.conversion), extra: "",
+      sub: `Analiz edilen ürünlerin karara bağlanan payı${t.conversion != null ? `<div class="tp-kpi-bar"><span style="width:${t.conversion * 100}%;background:#0f9488"></span></div>` : ""}` },
+    { icon: "task_alt", label: "Onaylanan liste", accent: "#6b5fb5",
+      val: fmtNum(t.lists_approved), extra: "",
+      sub: `${fmtNum(t.lists_started)} yeni liste · ${fmtNum(t.lists_open)} açık${t.lists_stale ? ` · <b class="tp-warn-text">${fmtNum(t.lists_stale)} bekliyor</b>` : ""}` },
+    { icon: "school", label: "Eğitim tamamlama", accent: t.lessons_overdue ? "#a15600" : "#4d7c0f",
+      val: tpPct(t.training_rate), extra: "",
+      sub: `${fmtNum(t.lessons_done)}/${fmtNum(t.lessons_assigned)} ders${t.lessons_overdue ? ` · <b class="tp-warn-text">${fmtNum(t.lessons_overdue)} gecikmiş</b>` : ""} · bu dönem ${fmtNum(t.lessons_done_period)}
+        ${t.training_rate != null ? `<div class="tp-kpi-bar"><span style="width:${t.training_rate * 100}%;background:${t.lessons_overdue ? "#a15600" : "#4d7c0f"}"></span></div>` : ""}` },
+  ];
+  $("#tp-kpis").innerHTML = cards.map(c => `
+    <div class="tp-kpi" style="--tp-accent:${c.accent}">
+      <div class="tp-kpi-top"><span class="eyebrow">${c.label}</span><span class="material-symbols-outlined" aria-hidden="true">${c.icon}</span></div>
+      <div class="tp-kpi-val">${c.val}</div>${c.extra}
+      <div class="tp-kpi-sub">${c.sub}</div>
+    </div>`).join("");
+}
+
+function tpRenderDaily(b) {
+  const canvas = $("#tp-daily-chart");
+  if (tpState.chart) { tpState.chart.destroy(); tpState.chart = null; }
+  const fb = $("#tp-daily-fallback"); if (fb) fb.remove();
+  if (!window.Chart) {
+    canvas.insertAdjacentHTML("afterend", `<div id="tp-daily-fallback" class="text-sm text-secondary py-10 text-center">Grafik kütüphanesi yüklenemedi — sayfayı yenileyin.</div>`);
+    return;
+  }
+  const labels = b.daily.map(d => { const [y, m, dd] = d.date.split("-").map(Number); return new Date(y, m - 1, dd).toLocaleDateString("tr-TR", { day: "numeric", month: "short" }); });
+  const weekdays = b.daily.map(d => { const [y, m, dd] = d.date.split("-").map(Number); return TP_DAYS_LONG[(new Date(y, m - 1, dd).getDay() + 6) % 7]; });
+  tpState.chart = new Chart(canvas, {
+    data: {
+      labels,
+      datasets: [
+        { type: "bar", label: "Analiz", data: b.daily.map(d => d.analyses), backgroundColor: "#005c55", borderRadius: 4, stack: "a", maxBarThickness: 26, order: 2 },
+        { type: "bar", label: "Karar", data: b.daily.map(d => d.decisions), backgroundColor: "#c98a4b", borderRadius: 4, stack: "a", maxBarThickness: 26, order: 2 },
+        { type: "line", label: "Aktif kişi", data: b.daily.map(d => d.active), borderColor: "#3f6fb0", backgroundColor: "rgba(63,111,176,.08)", yAxisID: "y2",
+          tension: .35, pointRadius: b.daily.length > 31 ? 0 : 2.5, pointHoverRadius: 4, borderWidth: 2, fill: true, order: 1 },
+      ],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, interaction: { mode: "index", intersect: false },
+      plugins: { legend: { display: false },
+        tooltip: { callbacks: { title: (items) => `${items[0].label} · ${weekdays[items[0].dataIndex]}`,
+          afterBody: (items) => { const d = b.daily[items[0].dataIndex]; return d.posts ? `Forum katkısı: ${d.posts}` : ""; } } } },
+      scales: {
+        x: { stacked: true, grid: { display: false }, ticks: { color: CHART_TICK, maxRotation: 0, autoSkip: true, maxTicksLimit: 12 } },
+        y: { stacked: true, beginAtZero: true, grid: { color: CHART_GRID }, ticks: { color: CHART_TICK, precision: 0 } },
+        y2: { position: "right", beginAtZero: true, grid: { display: false }, ticks: { color: "#3f6fb0", precision: 0 },
+              suggestedMax: Math.max(2, b.totals.members) },
+      },
+    },
+  });
+}
+
+function tpRenderFunnel(b) {
+  const steps = ["Analiz edilen ürün", "Karar verilen", "Son kararı Uygun", "Kontrol listesi açılan", "Onaylanan liste"];
+  const colors = ["#005c55", "#0f766e", "#0f9488", "#3aa597", "#6b5fb5"];
+  const top = b.funnel[0] || 0;
+  $("#tp-funnel").innerHTML = top ? steps.map((s, i) => {
+    const v = b.funnel[i], w = top ? Math.max(v ? 4 : 0, v / top * 100) : 0;
+    const conv = i ? (b.funnel[i - 1] ? `%${Math.round(v / b.funnel[i - 1] * 100)} önceki adımdan` : "—") : "başlangıç";
+    return `<div class="tp-fstep"><span class="tp-flabel">${s}</span><span class="tp-fconv">${conv}</span>
+      <div class="tp-fbar"><span style="width:${w}%;background:${colors[i]};opacity:${v ? 0.22 + 0.13 * (5 - i) : 0}"></span><b>${fmtNum(v)}</b></div></div>`;
+  }).join("") : `<div class="text-sm text-secondary py-8 text-center">Bu dönemde analiz yok.</div>`;
+}
+
+function tpRenderHeat(b) {
+  const max = Math.max(0, ...b.heatmap.flat());
+  let html = `<span></span>` + Array.from({ length: 24 }, (_, h) => `<span class="hr">${h % 3 === 0 ? h : ""}</span>`).join("");
+  b.heatmap.forEach((row, d) => {
+    html += `<span class="lbl">${TP_DAYS[d]}</span>` + row.map((v, h) => {
+      const lvl = v && max ? Math.max(1, Math.ceil(v / max * 5)) : 0;
+      return `<span class="c ${lvl ? "l" + lvl : ""}" title="${TP_DAYS_LONG[d]} ${String(h).padStart(2, "0")}:00 — ${v} işlem"></span>`;
+    }).join("");
+  });
+  $("#tp-heat").innerHTML = html;
+  let peak = null;
+  b.heatmap.forEach((row, d) => row.forEach((v, h) => { if (v && (!peak || v > peak.v)) peak = { v, d, h }; }));
+  // Gün toplamları: en yoğun gün
+  const dayTot = b.heatmap.map(r => r.reduce((a, c) => a + c, 0));
+  const bestDay = dayTot.indexOf(Math.max(...dayTot));
+  $("#tp-heat-peak").innerHTML = peak
+    ? `En yoğun saat: <b>${TP_DAYS_LONG[peak.d]} ${String(peak.h).padStart(2, "0")}:00</b> · En yoğun gün: <b>${TP_DAYS_LONG[bestDay]}</b>`
+    : "Bu dönemde kayıt yok";
+  const scale = ["", "l1", "l2", "l3", "l4", "l5"].map(c => `<i class="${c}" style="background:${{ "": "#eff4ff", l1: "#cdeee9", l2: "#8fd3c9", l3: "#3aa597", l4: "#0f766e", l5: "#004a44" }[c]}"></i>`).join("");
+  const old = $("#tp-heat-scale"); if (old) old.remove();
+  $("#tp-heat").insertAdjacentHTML("afterend", `<div id="tp-heat-scale" class="tp-heat-scale">az ${scale} çok · analiz + karar + forum (yerel saat)</div>`);
+}
+
+function tpRenderMix(b) {
+  const entries = Object.entries(b.mix), total = entries.reduce((a, [, v]) => a + v, 0);
+  const R = 15.915;   // çevre ≈ 100 → dasharray doğrudan yüzde
+  let off = 0;
+  const arcs = total ? entries.filter(([, v]) => v).map(([k, v]) => {
+    const len = v / total * 100, gap = entries.filter(([, x]) => x).length > 1 ? 0.8 : 0;
+    const s = `<circle r="${R}" cx="21" cy="21" fill="none" stroke="${TP_DECISION_COLORS[k]}" stroke-width="5.5" stroke-dasharray="${Math.max(0, len - gap)} ${100 - Math.max(0, len - gap)}" stroke-dashoffset="${-off}"><title>${k}: ${v}</title></circle>`;
+    off += len; return s;
+  }).join("") : "";
+  const t = b.totals;
+  $("#tp-mix").innerHTML = `
+    <div class="tp-donut"><svg viewBox="0 0 42 42" aria-hidden="true"><circle r="${R}" cx="21" cy="21" fill="none" stroke="#eff4ff" stroke-width="5.5"></circle>${arcs}</svg>
+      <div class="tp-donut-c"><b>${fmtNum(total)}</b><span>karar</span></div></div>
+    <div class="tp-mix-rows">${entries.map(([k, v]) => `<div class="tp-mix-row"><i style="background:${TP_DECISION_COLORS[k]}"></i>${esc(k)}<b>${fmtNum(v)}${total ? ` <span class="text-secondary font-normal">· %${Math.round(v / total * 100)}</span>` : ""}</b></div>`).join("")}</div>
+    <div class="tp-agree">${t.agreement_n
+      ? `<b>${tpPct(t.agreement)}</b> öneriyle uyum — ${fmtNum(t.agreement_n)} kararın kaçı panelin ön önerisiyle aynı çıktı. Düşük uyum kötü değildir: ekibin veriye kendi yorumunu kattığını gösterir.`
+      : "Ön öneriyle karşılaştırılabilecek karar yok."}</div>`;
+}
+
+function tpRenderSpot(b) {
+  const ppl = b.people;
+  const best = (fn, min = 1) => { let top = null; ppl.forEach(p => { const v = fn(p); if (v >= min && (!top || v > top.v)) top = { p, v }; }); return top; };
+  const items = [
+    { t: "Analiz lideri", icon: "query_stats", tint: "#e3f7f4", ink: "#005c55", pick: best(p => p.analyses), unit: "analiz" },
+    { t: "Karar ustası", icon: "gavel", tint: "#ffecdc", ink: "#7d4200", pick: best(p => p.decisions), unit: "karar" },
+    { t: "İstikrar", icon: "local_fire_department", tint: "#ffe9e4", ink: "#b0476b", pick: best(p => p.active_days), unit: `/ ${b.range.days} gün aktif` },
+    { t: "En büyük ivme", icon: "rocket_launch", tint: "#e7edff", ink: "#3f6fb0",
+      pick: best(p => (p.analyses + p.decisions) - (p.prev.analyses + p.prev.decisions)), unit: "işlem artış", plus: true },
+    { t: "Öğrenme", icon: "school", tint: "#ecf6dd", ink: "#4d7c0f", pick: best(p => p.lessons_done_period), unit: "ders bitirdi" },
+    { t: "Topluluk yardımı", icon: "volunteer_activism", tint: "#efeafe", ink: "#6b5fb5", pick: best(p => p.replies + p.solutions * 1000), unit: "",
+      fmt: (p) => `${fmtNum(p.replies)}<small>cevap${p.solutions ? ` · ${p.solutions} çözüm` : ""}</small>` },
+  ].filter(x => x.pick);
+  $("#tp-spot").innerHTML = items.length ? items.map(x => {
+    const p = x.pick.p;
+    return `<button type="button" class="tp-spotc" data-uid="${esc(p.user_id)}" style="--tp-tint:${x.tint};--tp-ink:${x.ink}">
+      <span class="t"><span class="material-symbols-outlined" aria-hidden="true">${x.icon}</span>${x.t}</span>
+      <span class="who">${tpAvatar(p, "sm")}<div><div class="nm">${esc(p.name)}</div><div class="ti">${esc(p.title || p.teams.join(", ") || "—")}</div></div></span>
+      <span class="v">${x.fmt ? x.fmt(p) : `${x.plus ? "+" : ""}${fmtNum(x.pick.v)}<small>${x.unit}</small>`}</span></button>`;
+  }).join("") : `<div class="tp-spot-empty">Bu dönemde öne çıkacak etkinlik yok.</div>`;
+  $$("#tp-spot .tp-spotc").forEach(el => el.addEventListener("click", () => tpOpenDrawer(Number(el.dataset.uid))));
+}
+
+function tpRenderAttention(b) {
+  const list = b.people.filter(p => p.status === "attention");
+  $("#tp-attn-card").style.display = list.length ? "" : "none";
+  $("#tp-attn").innerHTML = list.map(p => `
+    <button type="button" class="tp-attn-item" data-uid="${esc(p.user_id)}">${tpAvatar(p, "sm")}
+      <div class="min-w-0"><div class="nm">${esc(p.name)}</div>
+        <div class="text-[11px] text-secondary">Son etkinlik: ${esc(fmtAgo(p.last_active))}</div>
+        <div class="fl">${p.flags.map(f => `<span class="chip warn !text-[10px]">${esc(f)}</span>`).join("")}</div></div></button>`).join("");
+  $$("#tp-attn .tp-attn-item").forEach(el => el.addEventListener("click", () => tpOpenDrawer(Number(el.dataset.uid))));
+}
+
+/** Küçük çizgi grafik (gün sayısı çoksa ~30 kovaya toplanır). */
+function tpSpark(series, w = 92, h = 26) {
+  let s = series.slice();
+  if (s.length > 30) { const k = Math.ceil(s.length / 30), out = []; for (let i = 0; i < s.length; i += k) out.push(s.slice(i, i + k).reduce((a, c) => a + c, 0)); s = out; }
+  if (s.length < 2) s = [s[0] || 0, s[0] || 0];
+  const max = Math.max(1, ...s), step = w / (s.length - 1);
+  const pts = s.map((v, i) => [i * step, h - 3 - (v / max) * (h - 6)]);
+  const line = pts.map((p, i) => `${i ? "L" : "M"}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join("");
+  const area = `${line}L${w},${h}L0,${h}Z`;
+  const flat = s.every(v => !v);
+  const col = flat ? "#bdc9c6" : "#0f766e";
+  return `<svg class="tp-spark" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" aria-hidden="true"><path d="${area}" fill="${flat ? "none" : "rgba(15,118,110,.10)"}"/><path d="${line}" fill="none" stroke="${col}" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/>${flat ? "" : `<circle cx="${pts[pts.length - 1][0].toFixed(1)}" cy="${pts[pts.length - 1][1].toFixed(1)}" r="2.2" fill="${col}"/>`}</svg>`;
+}
+
+const TP_COLS = [
+  { key: "name", label: "Kişi", l: true },
+  { key: "analyses", label: "Analiz" },
+  { key: "decisions", label: "Karar" },
+  { key: "conversion", label: "Dönüşüm", title: "Dönemde analiz edilen ürünlerin karara bağlanan payı" },
+  { key: "lists_approved", label: "Listeler", title: "Bu dönem onaylanan / şu an açık kontrol listesi" },
+  { key: "training", label: "Eğitim", title: "Tamamlanan / atanan ders (tüm zamanlar)" },
+  { key: "forum", label: "Forum", title: "Bu dönem açılan başlık + cevap" },
+  { key: "active_days", label: "Aktif gün" },
+  { key: "trend", label: "Günlük trend", nosort: true },
+  { key: "last_active", label: "Son etkinlik" },
+  { key: "status", label: "Durum" },
+];
+function tpSortVal(p, key) {
+  if (key === "name") return p.name.toLocaleLowerCase("tr-TR");
+  if (key === "training") return p.lessons_assigned ? p.lessons_done / p.lessons_assigned : -1;
+  if (key === "forum") return p.threads + p.replies;
+  if (key === "status") return { attention: 2, quiet: 1, active: 0 }[p.status];
+  const v = p[key]; return v == null ? -1 : v;
+}
+
+function tpRenderTable() {
+  const b = tpState.data; if (!b) return;
+  const counts = { all: b.people.length, active: 0, quiet: 0, attention: 0 };
+  b.people.forEach(p => counts[p.status]++);
+  const flt = [["all", "Tümü"], ["active", "Aktif"], ["quiet", "Sessiz"], ["attention", "İlgi gerekiyor"]];
+  $("#tp-filter").innerHTML = flt.map(([k, l]) => `<button type="button" data-f="${k}" class="${tpState.filter === k ? "active" : ""}">${l} (${counts[k]})</button>`).join("");
+  $$("#tp-filter button").forEach(btn => btn.addEventListener("click", () => { tpState.filter = btn.dataset.f; tpRenderTable(); }));
+
+  const { key, dir } = tpState.sort;
+  $("#tp-table thead").innerHTML = `<tr>${TP_COLS.map(c => `<th class="${c.l ? "l" : ""} ${c.key === key ? "sorted" : ""}" data-k="${c.key}" ${c.title ? `title="${esc(c.title)}"` : ""} ${c.nosort ? 'style="cursor:default"' : ""}>${c.label}${c.key === key ? `<span class="material-symbols-outlined">${dir > 0 ? "arrow_upward" : "arrow_downward"}</span>` : ""}</th>`).join("")}</tr>`;
+  $$("#tp-table th").forEach(th => {
+    const c = TP_COLS.find(x => x.key === th.dataset.k); if (c.nosort) return;
+    th.addEventListener("click", () => {
+      tpState.sort = tpState.sort.key === c.key ? { key: c.key, dir: -tpState.sort.dir } : { key: c.key, dir: c.key === "name" ? 1 : -1 };
+      tpRenderTable();
+    });
+  });
+
+  const needle = tpState.q.trim().toLocaleLowerCase("tr-TR");
+  const rows = b.people
+    .filter(p => tpState.filter === "all" || p.status === tpState.filter)
+    .filter(p => !needle || [p.name, p.title, ...p.teams].join(" ").toLocaleLowerCase("tr-TR").includes(needle))
+    .sort((a, c) => { const x = tpSortVal(a, key), y = tpSortVal(c, key); return (x < y ? -1 : x > y ? 1 : 0) * dir || a.name.localeCompare(c.name, "tr"); });
+
+  $("#tp-table tbody").innerHTML = rows.length ? rows.map(p => {
+    const mt = p.decisions;
+    const mix = mt ? `<div class="tp-mixbar">${Object.entries(p.mix).map(([k, v]) => v ? `<span style="width:${v / mt * 100}%;background:${TP_DECISION_COLORS[k]}" title="${esc(k)}: ${v}"></span>` : "").join("")}</div>` : "";
+    const tr = p.lessons_assigned ? p.lessons_done / p.lessons_assigned : null;
+    const [scls, slabel] = TP_STATUS[p.status];
+    return `<tr data-uid="${esc(p.user_id)}" tabindex="0">
+      <td class="l"><div class="tp-person">${tpAvatar(p)}<div class="min-w-0"><div class="nm">${esc(p.name)}</div>${p.title ? `<div class="ti">${esc(p.title)}</div>` : ""}<div class="tm" title="${esc(p.teams.join(", "))}">${esc(p.teams.join(" · ") || "—")}</div></div></div></td>
+      <td class="tp-num"><b>${fmtNum(p.analyses)}</b>${tpDeltaShort(p.analyses, p.prev.analyses)}</td>
+      <td class="tp-num"><b>${fmtNum(p.decisions)}</b>${mix}</td>
+      <td>${p.products ? `<b>${tpPct(p.conversion)}</b><div class="text-[10.5px] text-secondary">${p.decided_products}/${p.products} ürün</div>` : "—"}</td>
+      <td><b>${fmtNum(p.lists_approved)}</b> <span class="text-secondary">/ ${fmtNum(p.lists_open)} açık</span>${p.lists_stale ? `<div class="text-[10.5px] tp-warn-text">${p.lists_stale} bekliyor</div>` : ""}</td>
+      <td>${tr == null ? `<span class="text-secondary">atama yok</span>` : `<div class="tp-prog"><div class="tx"><b>${p.lessons_done}/${p.lessons_assigned}</b><span>${p.lessons_overdue.length ? `<span class="tp-warn-text">${p.lessons_overdue.length} gecikmiş</span>` : tpPct(tr)}</span></div><div class="bar"><span class="${p.lessons_overdue.length ? "warn" : ""}" style="width:${tr * 100}%"></span></div></div>`}</td>
+      <td>${fmtNum(p.threads + p.replies)}${p.solutions ? `<div class="text-[10.5px] text-primary">${p.solutions} çözüm</div>` : ""}</td>
+      <td><b>${fmtNum(p.active_days)}</b><span class="text-secondary">/${b.range.days}</span></td>
+      <td>${tpSpark(p.series)}</td>
+      <td class="whitespace-nowrap text-secondary">${esc(fmtAgo(p.last_active))}</td>
+      <td><span class="chip chip-dot ${scls}" ${p.flags.length ? `title="${esc(p.flags.join(" · "))}"` : ""}>${slabel}</span></td>
+    </tr>`;
+  }).join("") : `<tr><td colspan="${TP_COLS.length}" class="tp-empty">Bu filtrede kişi yok.</td></tr>`;
+  $$("#tp-table tbody tr[data-uid]").forEach(tr => {
+    const go = () => tpOpenDrawer(Number(tr.dataset.uid));
+    tr.addEventListener("click", go);
+    tr.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } });
+  });
+}
+
+function tpCloseDrawer() {
+  const d = document.getElementById("tp-drawer");
+  if (!d || !d.classList.contains("open")) return;
+  d.classList.remove("open"); d.setAttribute("aria-hidden", "true");
+}
+
+async function tpOpenDrawer(uid) {
+  const b = tpState.data; if (!b) return;
+  const p = b.people.find(x => x.user_id === uid); if (!p) return;
+  const [scls, slabel] = TP_STATUS[p.status];
+  const max = Math.max(1, ...p.series);
+  const bars = p.series.map((v, i) => `<span class="${v ? "" : "z"}" style="height:${v ? Math.max(6, v / max * 100) : 4}%" title="${esc(b.daily[i]?.date || "")}: ${v}"></span>`).join("");
+  const stat = (k, v, sub = "") => `<div class="tp-d-stat"><div class="k">${k}</div><div class="v">${v}</div>${sub ? `<div class="text-[11px] text-secondary mt-0.5">${sub}</div>` : ""}</div>`;
+  $("#tp-drawer-body").innerHTML = `
+    <div class="tp-d-head">${tpAvatar(p, "lg")}<div class="min-w-0">
+      <div id="tp-d-name" class="font-display text-xl font-semibold leading-tight">${esc(p.name)}</div>
+      ${p.title ? `<div class="text-sm text-primary">${esc(p.title)}</div>` : ""}
+      <div class="flex flex-wrap gap-1 mt-1.5">${p.role ? ROLE_CHIP(p.role) : ""}<span class="chip chip-dot ${scls}">${slabel}</span>${p.teams.map(t => `<span class="chip na">${esc(t)}</span>`).join("")}</div>
+    </div></div>
+    ${p.flags.length ? `<div class="flex flex-wrap gap-1 mt-3">${p.flags.map(f => `<span class="chip warn">${esc(f)}</span>`).join("")}</div>` : ""}
+    <div class="tp-d-grid">
+      ${stat("Analiz", fmtNum(p.analyses), tpDeltaShort(p.analyses, p.prev.analyses) || "&nbsp;")}
+      ${stat("Karar", fmtNum(p.decisions), tpDeltaShort(p.decisions, p.prev.decisions) || "&nbsp;")}
+      ${stat("Dönüşüm", tpPct(p.conversion), p.products ? `${p.decided_products}/${p.products} ürün` : "&nbsp;")}
+      ${stat("Öneriyle uyum", tpPct(p.agreement), p.agreement_n ? `${p.agreement_n} karar` : "&nbsp;")}
+      ${stat("Liste", `${fmtNum(p.lists_approved)}<span class="text-sm text-secondary"> onay</span>`, `${p.lists_started} yeni · ${p.lists_open} açık`)}
+      ${stat("Eğitim", p.lessons_assigned ? `${p.lessons_done}/${p.lessons_assigned}` : "—", p.lessons_done_period ? `bu dönem ${p.lessons_done_period}` : "&nbsp;")}
+      ${stat("Forum", fmtNum(p.threads + p.replies), p.solutions ? `${p.solutions} çözüm` : `${p.threads} başlık · ${p.replies} cevap`)}
+      ${stat("Aktif gün", `${p.active_days}<span class="text-sm text-secondary">/${b.range.days}</span>`, `önceki: ${p.prev.active_days}`)}
+      ${stat("Son etkinlik", `<span class="text-base">${esc(fmtAgo(p.last_active))}</span>`)}
+    </div>
+    <div class="tp-d-sec"><h4>Günlük analiz + karar</h4><div class="tp-d-bars">${bars}</div></div>
+    ${p.lessons_overdue.length ? `<div class="tp-d-sec"><h4>Gecikmiş dersler</h4><div class="tp-d-list">${p.lessons_overdue.map(l => `<div><span class="kw">${esc(l.title)}</span><span class="meta tp-warn-text">son tarih ${esc(l.due_date.split("-").reverse().join("."))}</span></div>`).join("")}</div></div>` : ""}
+    <div class="tp-d-sec"><h4>Bu dönemin son kayıtları</h4><div id="tp-d-recent" class="status-line loading">yükleniyor…</div></div>`;
+  const d = $("#tp-drawer"); d.classList.add("open"); d.setAttribute("aria-hidden", "false");
+  $(".tp-drawer-x", d).focus();
+
+  try {
+    const params = new URLSearchParams({ user_id: uid, since: b.range.since, until: b.range.until });
+    const r = await apiFetch(`${API_BASE}/api/team/activity?${params}`);
+    const a = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(apiErrorText(a, r.status));
+    const el = $("#tp-d-recent"); if (!el) return;
+    const items = [
+      ...(a.queries || []).map(q => ({ at: q.at, kw: q.keyword, mp: q.marketplace, chip: q.verdict ? `<span class="chip ${TM_VERDICT_CLASS[q.verdict] || "na"} !text-[10px]" title="Analizin ön önerisi">Öneri: ${esc(q.verdict)}</span>` : "", kind: "Analiz" })),
+      ...(a.decisions || []).map(q => ({ at: q.at, kw: q.keyword, mp: q.marketplace, chip: `<span class="chip ${TM_VERDICT_CLASS[q.decision] || "na"} !text-[10px]">Karar: ${esc(q.decision)}</span>`, kind: "Karar" })),
+    ].sort((x, y) => y.at - x.at).slice(0, 12);
+    el.className = "";
+    el.innerHTML = items.length ? `<div class="tp-d-list">${items.map(it => `
+      <div class="cursor-pointer tp-d-rec" data-kw="${esc(it.kw)}" data-mp="${esc(it.mp)}" title="Analizi aç">
+        <span class="kw">${tmKeywordHtml(it.kw)} <span class="text-[11px] text-secondary">${esc(it.mp)}</span></span>
+        <span class="flex items-center gap-1.5">${it.chip}<span class="meta">${esc(fmtAgo(it.at))}</span></span></div>`).join("")}</div>
+      <p class="tp-foot">Kayda tıklamak analizi açar (son 72 saatte çekildiyse kayıtlı veri). Tüm kayıtlar Ekip Yönetimi → Aktivite'de.</p>`
+      : `<div class="text-sm text-secondary">Bu dönemde analiz ya da karar kaydı yok.</div>`;
+    $$("#tp-d-recent .tp-d-rec").forEach(row => row.addEventListener("click", () => { tpCloseDrawer(); tmReanalyze(row.dataset.kw, row.dataset.mp); }));
+  } catch (err) {
+    const el = $("#tp-d-recent"); if (el) { el.className = "status-line error"; el.textContent = `Hata: ${err.message}`; }
+  }
+}
+
+(function initPerf() {
+  if (!$("#view-perf")) return;
+  $$("#tp-period button").forEach(btn => btn.addEventListener("click", () => {
+    tpState.period = btn.dataset.p;
+    $$("#tp-period button").forEach(x => x.classList.toggle("active", x === btn));
+    $("#tp-custom").style.display = tpState.period === "custom" ? "" : "none";
+    if (tpState.period === "custom") {
+      if (!$("#tp-from").value) { const s = new Date(); s.setDate(s.getDate() - 13); $("#tp-from").value = tpYmd(s); }
+      if (!$("#tp-to").value) $("#tp-to").value = tpYmd(new Date());
+    }
+    loadPerf();
+  }));
+  ["#tp-from", "#tp-to", "#tp-team"].forEach(sel => $(sel).addEventListener("change", loadPerf));
+  $("#tp-refresh").addEventListener("click", loadPerf);
+  $("#tp-q").addEventListener("input", (e) => { tpState.q = e.target.value; tpRenderTable(); });
+  $$("#tp-drawer [data-close]").forEach(el => el.addEventListener("click", tpCloseDrawer));
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") tpCloseDrawer(); });
 })();

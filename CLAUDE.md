@@ -415,6 +415,25 @@ yüzden backend'e hiç bağlanmamalı, sahte veri olur.
   yeni bir sütun eklersen `EMAIL_REF_COLUMNS` / `ID_REF_COLUMNS` / `USER_ID_TABLES`'a da ekle.** Aynı e-posta sonra
   yeni (ekip dışı, member) hesap olarak kaydolabilir.
 
+## Ekip Performansı (menü "Ekip Performansı", yalnızca owner — `api/team_perf.py` + `GET /api/team/performance`)
+
+- `require_owner` (admin/member 403), SALT OKUNUR, MCP YOK. Parametreler: `since`/`until` (istemcinin yerel gün sınırları,
+  ≤366 gün, aksi 422), `team_id`, `tz` (dakika, `-getTimezoneOffset()`; gün/saat kovaları için). Kişiler = Aktivite ile aynı:
+  ŞU AN en az bir ekipte olanlar (`team_member_ids`). Ham kayıtlar `db.team_performance_raw`, hesap SAF `team_perf.build`.
+- **Yalnızca gerçek kayıtlar:** analiz (`user_query_log`), karar (`market_decision`), kontrol listesi, eğitim tamamlama,
+  forum başlık/cevap/çözüm. Tasarımdaki görev/departman/hedef %/günlük rapor/"Ekip skoru" verisi sistemde YOK → eklenmedi;
+  kompozit performans puanı da YOK (ağırlıklar keyfi olurdu). Her sayı önceki EŞİT uzunluktaki dönemle karşılaştırılır.
+- Tanımlar: **Dönüşüm** = dönemde analiz edilen tekil (kişi × ürün anahtarı × pazar) içinde `until`'den önce karar
+  verilmiş olanların payı (anahtar `team_perf.product_key` = `_analysis_key` + küçük harf). **Öneriyle uyum** = dönem
+  kararlarının, aynı kişinin karar anına kadarki son sorgusunun ön önerisiyle aynı olma oranı. **Ürün hattı** (iç içe):
+  analiz → karar → son kararı Uygun → kontrol listesi açılan → onaylanan (kilitli). **Eğitim** tüm zamanlar, atananlar
+  `/api/training/progress` ile aynı dinamik kural; gecikmiş = tamamlanmamış + `due_date` bugünden (yerel) önce.
+  **Durum:** İlgi gerekiyor (gecikmiş ders | `QUIET_DAYS`=14+ gündür hiç etkinlik | `STALE_LIST_DAYS`=7+ gündür
+  güncellenmeyen açık liste) > Aktif (dönemde etkinlik) > Sessiz. Son etkinlik = tüm tablolardaki en son an.
+- Panel (`app.js::loadPerf`, `tp-` sınıfları styles.css'te): KPI'lar, günlük hareket (Chart.js), ürün hattı, haftalık
+  ritim ısı haritası (gün × saat), karar karışımı, Spot ışığı, İlgi gerekiyor, sıralanabilir kişi tablosu (sparkline) ve
+  kişi yan paneli (son kayıtlar `/api/team/activity?user_id=`; kayda tıklamak `runAnalysis`, 72 saat önbellek kuralı).
+
 ## Ad Soyad, Profil & Yetkinlik Formu
 
 - **Ad soyad zorunlu:** kayıtta `first_name`/`last_name` (boşluk temizlenir, 1–60, yoksa 422). `users`'a
