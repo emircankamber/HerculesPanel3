@@ -69,6 +69,7 @@ import mailer
 import base64
 import binascii
 import excel_export
+import team_perf
 import supplier_scoring as sup
 import launch_control as lc
 
@@ -4227,3 +4228,29 @@ async def team_activity(user_id: int | None = Query(None, ge=0), team_id: int | 
             "totals": {"queries": len(queries), "decisions": len(decisions)},
             "page_size": TEAM_PAGE_SIZE, "pages": {"queries": q_pg, "decisions": d_pg}}
 
+
+
+# ---------------------------------------------------------------------------
+# EKİP PERFORMANSI (yalnızca owner; admin/member 403). SALT OKUNUR, MCP çağrısı YOK.
+# Yalnızca ŞU AN en az bir ekipte olanlar (Aktivite ile aynı kural); hesap team_perf.build'de.
+# ---------------------------------------------------------------------------
+@app.get("/api/team/performance")
+async def team_performance(since: int = Query(..., ge=0), until: int = Query(..., ge=1),
+                           team_id: int | None = Query(None, ge=1), tz: int = Query(0, ge=-840, le=840),
+                           user: dict = Depends(require_owner)):
+    if until <= since or until - since > team_perf.MAX_RANGE_DAYS * 86400:
+        raise HTTPException(422, f"Geçersiz tarih aralığı (en fazla {team_perf.MAX_RANGE_DAYS} gün)")
+    if team_id is not None:
+        await _team_or_404(team_id)
+    members = await db.team_member_ids(team_id)
+    users = [u for u in await db.list_users() if u["id"] in members]
+    teams = await db.list_teams()
+    raw = await db.team_performance_raw(since - (until - since), until)
+    period_keys = [d["keyword"] for d in raw["decisions"] if since <= d["decided_at"] < until and d["user_id"] in members]
+    period_keys += [_analysis_key(k) for k in period_keys]   # eski "B0.. — başlık" kararları "ASIN:B0.." sorgularıyla eşleşsin
+    out = team_perf.build(users, raw, await db.list_lessons_all(), await db.team_verdict_log(period_keys),
+                          {t["id"]: t["label"] for t in teams}, since, until, tz, int(time.time()))
+    out["team_id"] = team_id
+    out["teams"] = _team_opts(teams)
+    out["rules"] = {"quiet_days": team_perf.QUIET_DAYS, "stale_list_days": team_perf.STALE_LIST_DAYS}
+    return out

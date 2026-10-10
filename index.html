@@ -165,6 +165,7 @@
       <button data-view="decisions" class="nav-btn"><span class="material-symbols-outlined">view_kanban</span>Pazar Kararları</button>
       <button data-view="history" class="nav-btn"><span class="material-symbols-outlined">history</span>Geçmiş</button>
       <button data-view="team" class="nav-btn" style="display:none;"><span class="material-symbols-outlined">groups</span>Ekip Yönetimi<span id="nav-team-badge" class="nav-badge" style="display:none;" title="Son 7 günde kaydolan, hiçbir ekipte olmayan hesaplar"></span></button>
+      <button data-view="perf" class="nav-btn" style="display:none;"><span class="material-symbols-outlined">monitoring</span>Ekip Performansı</button>
     </nav>
     <div class="hidden lg:block mt-auto p-4">
       <div class="rounded-xl bg-surface-container-low p-3.5">
@@ -1486,6 +1487,103 @@
           </div>
         </div>
           </div>
+        </div>
+      </section>
+
+      <!-- EKİP PERFORMANSI (yalnızca owner; sunucu /api/team/performance → require_owner). Salt okunur, MCP YOK.
+           Kaynak yalnızca panelin kendi kayıtları: analiz, karar, kontrol listesi, eğitim, forum. -->
+      <section id="view-perf" class="view">
+        <div class="card card-pad hero-bg tp-hero">
+          <div class="max-w-2xl">
+            <div class="flex flex-wrap items-center gap-2"><span class="chip chip-dot ok">Yalnızca owner</span><span id="tp-range-chip" class="chip na"></span></div>
+            <h1 class="font-display text-[26px] sm:text-[32px] font-semibold tracking-tight leading-tight mt-3">Ekip Performansı</h1>
+            <p class="text-sm text-on-surface-variant mt-2 leading-relaxed">Ekibin ritmi, ürün hattı ve gelişimi tek ekranda: analizler, pazar kararları, kontrol listeleri, eğitim ve forum katkıları — her biri bir önceki eşit uzunluktaki dönemle karşılaştırılır. Uydurma hedef ya da puan yok; yalnızca panelde gerçekten olan kayıtlar.</p>
+          </div>
+          <div class="tp-controls">
+            <div class="tp-seg" id="tp-period" role="tablist" aria-label="Dönem">
+              <button type="button" data-p="7" class="active">7 gün</button>
+              <button type="button" data-p="30">30 gün</button>
+              <button type="button" data-p="90">90 gün</button>
+              <button type="button" data-p="month">Bu ay</button>
+              <button type="button" data-p="custom">Özel</button>
+            </div>
+            <div class="tp-custom" id="tp-custom" style="display:none;">
+              <input type="date" id="tp-from" class="field" aria-label="Başlangıç"><span class="text-secondary">–</span><input type="date" id="tp-to" class="field" aria-label="Bitiş">
+            </div>
+            <div class="flex gap-2 items-center">
+              <select id="tp-team" class="field tp-team" aria-label="Ekip"><option value="">Tüm ekipler</option></select>
+              <button type="button" id="tp-refresh" class="btn btn-outline tp-icon-btn" title="Yenile" aria-label="Yenile"><span class="material-symbols-outlined">refresh</span></button>
+            </div>
+          </div>
+        </div>
+        <div id="tp-status" class="status-line mt-4"></div>
+        <div id="tp-guest" class="card card-pad mt-6 text-center py-12" style="display:none;">
+          <span class="material-symbols-outlined text-outline" style="font-size:36px">lock</span>
+          <div class="font-display text-lg font-semibold mt-2">Bu bölüm yalnızca owner'lara açıktır</div>
+        </div>
+
+        <div id="tp-body" style="display:none;">
+          <div id="tp-kpis" class="tp-kpis"></div>
+
+          <div class="tp-grid-2 mt-4">
+            <div class="card card-pad tp-span-2">
+              <div class="tp-card-head">
+                <div><div class="eyebrow">Ekibin nabzı</div><h3 class="tp-h3">Günlük hareket</h3></div>
+                <div class="tp-legend"><span><i style="background:#005c55"></i>Analiz</span><span><i style="background:#a15600"></i>Karar</span><span><i class="tp-line-key"></i>Aktif kişi</span></div>
+              </div>
+              <div class="tp-chart"><canvas id="tp-daily-chart" aria-label="Günlük analiz ve karar sayısı"></canvas></div>
+            </div>
+            <div class="card card-pad">
+              <div class="tp-card-head"><div><div class="eyebrow">Analizden lansmana</div><h3 class="tp-h3">Ürün hattı</h3></div></div>
+              <div id="tp-funnel" class="tp-funnel"></div>
+              <p class="tp-foot">Dönemde analiz edilen tekil ürünler (kişi × ürün × pazar) adım adım: karar verilen → son kararı <b>Uygun</b> → kontrol listesi açılan → onaylanan.</p>
+            </div>
+          </div>
+
+          <div class="tp-grid-2 mt-4">
+            <div class="card card-pad tp-span-2">
+              <div class="tp-card-head">
+                <div><div class="eyebrow">Ne zaman çalışıyoruz?</div><h3 class="tp-h3">Haftalık ritim</h3></div>
+                <div id="tp-heat-peak" class="text-xs text-secondary"></div>
+              </div>
+              <div id="tp-heat" class="tp-heat"></div>
+            </div>
+            <div class="card card-pad">
+              <div class="tp-card-head"><div><div class="eyebrow">Kararların dağılımı</div><h3 class="tp-h3">Karar karışımı</h3></div></div>
+              <div id="tp-mix" class="tp-mix"></div>
+            </div>
+          </div>
+
+          <div class="card card-pad mt-4">
+            <div class="tp-card-head"><div><div class="eyebrow">Bu dönem öne çıkanlar</div><h3 class="tp-h3">Spot ışığı</h3></div></div>
+            <div id="tp-spot" class="tp-spot"></div>
+          </div>
+
+          <div id="tp-attn-card" class="card card-pad mt-4 tp-attn-card" style="display:none;">
+            <div class="tp-card-head"><div><div class="eyebrow tp-warn-text">Takip edilmesi gerekenler</div><h3 class="tp-h3">İlgi gerekiyor</h3></div></div>
+            <div id="tp-attn" class="tp-attn"></div>
+          </div>
+
+          <div class="card mt-4 overflow-hidden">
+            <div class="tp-table-head">
+              <div><div class="eyebrow">Kişi bazında</div><h3 class="tp-h3">Ekip tablosu</h3></div>
+              <div class="tp-table-tools">
+                <div class="tp-chips" id="tp-filter"></div>
+                <input type="search" id="tp-q" class="field" placeholder="Ad, unvan ya da ekip…" aria-label="Kişi ara">
+              </div>
+            </div>
+            <div class="overflow-x-auto"><table class="tp-table" id="tp-table"><thead></thead><tbody></tbody></table></div>
+          </div>
+          <p class="tp-foot mt-3 px-1" id="tp-rules"></p>
+        </div>
+
+        <!-- Kişi detayı (yan panel) -->
+        <div id="tp-drawer" class="tp-drawer" aria-hidden="true">
+          <div class="tp-drawer-back" data-close></div>
+          <aside class="tp-drawer-panel" role="dialog" aria-modal="true" aria-labelledby="tp-d-name">
+            <button type="button" class="tp-drawer-x" data-close aria-label="Kapat"><span class="material-symbols-outlined">close</span></button>
+            <div id="tp-drawer-body"></div>
+          </aside>
         </div>
       </section>
 

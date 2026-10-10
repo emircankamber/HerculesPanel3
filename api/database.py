@@ -711,6 +711,36 @@ async def team_counts(since: int | None = None, until: int | None = None) -> dic
     return {"queries": {r["user_id"]: r["c"] for r in q}, "decisions": {r["user_id"]: r["c"] for r in d}}
 
 
+async def team_performance_raw(since: int, until: int) -> dict:
+    """EKİP PERFORMANSI (yalnızca owner, salt okunur) için ham kayıtlar: [since, until) aralığındaki sorgu, karar,
+    forum ve çözüm kayıtları; kararların/kontrol listelerinin/tamamlamaların TAMAMI (dönüşüm ve eğitim tüm zamanlar)
+    ve kişi başına SON etkinlik anı. Kişi süzmesi ve hesap çağıranda (team_perf.build)."""
+    rng = (since, until)
+    queries = await fetch_all("SELECT user_id, keyword, marketplace, queried_at, verdict FROM user_query_log "
+                              "WHERE queried_at >= ? AND queried_at < ? ORDER BY queried_at", rng)
+    decisions = await fetch_all("SELECT user_id, keyword, marketplace, decision, decided_at FROM market_decision "
+                                "ORDER BY decided_at, id")
+    checklists = await fetch_all("SELECT id, user_id, analysis_key, marketplace, status, created_at, updated_at, "
+                                 "locked_at FROM checklists")
+    threads = await fetch_all("SELECT user_id, created_at FROM forum_threads WHERE created_at >= ? AND created_at < ?", rng)
+    replies = await fetch_all("SELECT user_id, created_at FROM forum_replies WHERE created_at >= ? AND created_at < ?", rng)
+    solutions = await fetch_all("SELECT r.user_id, t.solved_at FROM forum_threads t JOIN forum_replies r "
+                                "ON r.id = t.solution_reply_id WHERE t.solved_at >= ? AND t.solved_at < ?", rng)
+    last: dict[int, int] = {}
+    for sql in ("SELECT user_id, MAX(queried_at) AS t FROM user_query_log GROUP BY user_id",
+                "SELECT user_id, MAX(decided_at) AS t FROM market_decision GROUP BY user_id",
+                "SELECT user_id, MAX(updated_at) AS t FROM checklists GROUP BY user_id",
+                "SELECT user_id, MAX(completed_at) AS t FROM training_completions GROUP BY user_id",
+                "SELECT user_id, MAX(created_at) AS t FROM forum_threads GROUP BY user_id",
+                "SELECT user_id, MAX(created_at) AS t FROM forum_replies GROUP BY user_id"):
+        for r in await fetch_all(sql):
+            if r["user_id"] is not None and r["t"]:
+                last[r["user_id"]] = max(last.get(r["user_id"], 0), int(r["t"]))
+    return {"queries": queries, "decisions": decisions, "checklists": checklists,
+            "completions": await all_completions(), "threads": threads, "replies": replies,
+            "solutions": solutions, "last_active": last}
+
+
 # ---------------------------------------------------------------------------
 # SIGNAL ENGINE / PROOF / SERTİFİKA
 # ---------------------------------------------------------------------------
