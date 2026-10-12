@@ -24,6 +24,8 @@ KINDS = {
     "bulletin": "Yeni bülten",
     "lesson": "Yeni ders",
     "report": "Bildirilen içerik",
+    "new_thread": "Forumda yeni başlık",
+    "new_reply": "Forumda yeni cevap",
 }
 TEMPLATES = {
     "reply": "{actor}, “{title}” başlığına cevap yazdı",
@@ -34,6 +36,8 @@ TEMPLATES = {
     "bulletin": "Yeni bülten: “{title}” ({actor})",
     "lesson": "Sana yeni bir ders atandı: “{title}”",
     "report": "{actor} bir içeriği bildirdi: “{title}”",
+    "new_thread": "{actor} forumda yeni bir {label} paylaştı: “{title}”",
+    "new_reply": "{actor}, “{title}” başlığına yeni bir cevap yazdı",
 }
 
 
@@ -43,7 +47,7 @@ def render(kind: str, actor_name: str, data: dict) -> str:
     return TEMPLATES.get(kind, "{title}").format(
         actor=actor_name or "Biri", title=data.get("title") or "—",
         others=f" ve {cnt - 1} kişi daha" if cnt > 1 else "",
-        what="cevabını" if data.get("target") == "reply" else "başlığını")
+        what="cevabını" if data.get("target") == "reply" else "başlığını", label=data.get("label") or "başlık")
 
 
 LIST_LIMIT = 40
@@ -98,18 +102,18 @@ async def add_vote(owner_id: int, actor_id: int, thread_id: int, reply_id: int |
 
 
 async def broadcast(kind: str, actor_id: int, thread_id: int | None, data: dict, team_only: bool,
-                    exclude: set[int] | None = None) -> int:
+                    exclude: set[int] | None = None, reply_id: int | None = None) -> int:
     """Tüm kullanıcılara (team_only ise yalnızca en az bir ekipte olanlara) TEK sorguyla bildirim."""
     excl = sorted({actor_id, *(exclude or set())})
     marks = ",".join("?" * len(excl))
     team = " AND EXISTS (SELECT 1 FROM team_members tm WHERE tm.user_id = u.id)" if team_only else ""
     await execute(
-        f"INSERT INTO notifications (user_id, kind, actor_id, thread_id, data_json, created_at) "
-        f"SELECT u.id, ?, ?, ?, ?, ? FROM users u WHERE u.id NOT IN ({marks}){team}",
-        (kind, actor_id, thread_id, json.dumps(data, ensure_ascii=False), int(time.time()), *excl))
+        f"INSERT INTO notifications (user_id, kind, actor_id, thread_id, reply_id, data_json, created_at) "
+        f"SELECT u.id, ?, ?, ?, ?, ?, ? FROM users u WHERE u.id NOT IN ({marks}){team}",
+        (kind, actor_id, thread_id, reply_id, json.dumps(data, ensure_ascii=False), int(time.time()), *excl))
     import notify_email
     rows = await fetch_all(f"SELECT u.id FROM users u WHERE u.id NOT IN ({marks}){team}", tuple(excl))
-    await notify_email.dispatch(kind, {r["id"] for r in rows}, actor_id, thread_id, None, None, data)
+    await notify_email.dispatch(kind, {r["id"] for r in rows}, actor_id, thread_id, reply_id, None, data)
     return 1
 
 

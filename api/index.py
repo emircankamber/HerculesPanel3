@@ -2865,6 +2865,11 @@ async def forum_create(req: ThreadIn, user: dict = Depends(require_user)):
     if d["kind"] == "bulletin":
         await notify.broadcast("bulletin", v["id"], tid, {"title": d["title"]}, team_only=d["visibility"] == "team",
                                exclude=mentioned)
+    else:   # her yeni soru/tartışma herkese (kullanıcı isteği; "Sadece ekip" ise yalnızca ekiptekilere)
+        await notify.broadcast("new_thread", v["id"], tid,
+                               {"title": d["title"], "excerpt": _excerpt(d["body"], 140),
+                                "label": "soru" if d["kind"] == "question" else "tartışma"},
+                               team_only=d["visibility"] == "team", exclude=mentioned)
     return {"ok": True, "id": tid}
 
 
@@ -2948,6 +2953,9 @@ async def forum_reply(tid: int, req: ReplyIn, user: dict = Depends(require_user)
     if allowed is not None:
         rest &= allowed
     await notify.add(rest, "follow_reply", v["id"], tid, rid, data=data)
+    # Kalan herkese "forumda yeni cevap" (kullanıcı isteği: her paylaşım herkese); aynı kişiye iki bildirim gitmez
+    await notify.broadcast("new_reply", v["id"], tid, data, team_only=t["visibility"] == "team",
+                           exclude=owner | mentioned | rest, reply_id=rid)
     return {"ok": True, "id": rid}
 
 
