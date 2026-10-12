@@ -83,6 +83,21 @@ async def send_batch(messages: list[dict]) -> int:
                                  headers={"Authorization": f"Bearer {_env('RESEND_API_KEY')}"})
             except httpx.HTTPError as e:
                 raise MailError(f"Resend'e ulaşılamadı: {e}") from e
+            if 400 <= r.status_code < 500 and r.status_code != 429 and len(chunk) > 1:
+                # Resend toplu gönderimde TEK geçersiz adres (ör. yazım hatalı e-posta) TÜM grubu reddeder → bülten
+                # gibi herkese giden bildirimlerde kimseye gitmiyordu. Grubu tek tek gönder; yalnızca hatalı olan düşsün.
+                print(f"[mailer] toplu gönderim reddedildi ({r.status_code}: {r.text[:200]}), tek tek deneniyor", flush=True)
+                for p in chunk:
+                    try:
+                        r1 = await c.post(f"{RESEND_URL}/emails", json=p,
+                                          headers={"Authorization": f"Bearer {_env('RESEND_API_KEY')}"})
+                    except httpx.HTTPError as e:
+                        raise MailError(f"Resend'e ulaşılamadı: {e}") from e
+                    if r1.status_code < 300:
+                        sent += 1
+                    else:
+                        print(f"[mailer] {p['to'][0]} gönderilemedi: Resend {r1.status_code}: {r1.text[:200]}", flush=True)
+                continue
             if r.status_code >= 300:
                 raise MailError(f"Resend {r.status_code}: {r.text[:300]}")
             sent += len(chunk)

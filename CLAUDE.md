@@ -583,7 +583,9 @@ yüzden backend'e hiç bağlanmamalı, sahte veri olur.
   `schema_flags.notif_defaults_all_on`); kişinin kendi değiştirdiği tercihlere dokunulmaz.
   Aynı başlık için 30 dk içinde okunmamış e-posta varsa yenisi gitmez; okunmamış oy bildirimi varken yeni oy sayaca eklenir
   (e-posta yok). Gönderim isteğin içinde tek toplu çağrı; hata isteği düşürmez, loglanır; gidenler `notifications.emailed_at`.
-  Cümleler panelle ortak (`notify.render`). Kullanıcı içeriği şablonlarda `html.escape`. Her e-postada ayarlar bağlantısı
+  **Toplu gönderim:** Resend `/emails/batch` TEK geçersiz adres yüzünden TÜM grubu reddeder (4xx) — bülten gibi herkese
+  giden bildirimde kimseye gitmiyordu. `mailer.send_batch` 4xx'te (429 hariç) grubu tek tek gönderir, yalnızca hatalı
+  adres düşer ve loglanır (`[mailer] … gönderilemedi`). Cümleler panelle ortak (`notify.render`). Kullanıcı içeriği şablonlarda `html.escape`. Her e-postada ayarlar bağlantısı
   (`/#bildirim-ayarlari`) + `List-Unsubscribe` + girişsiz "tüm e-postaları kapat" (`GET /api/notifications/unsubscribe?t=`,
   kişiye özel rastgele `notification_prefs.unsub_token`). Tercihler `GET/PUT /api/notification-prefs` (Profilim → Bildirim Ayarları).
 - **Haftalık özet:** `vercel.json` `crons` → `GET /api/cron/weekly-digest` pazartesi 06:00 UTC; Vercel `Authorization: Bearer
