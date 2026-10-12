@@ -540,7 +540,9 @@ yüzden backend'e hiç bağlanmamalı, sahte veri olur.
   sayısı; `read_at`). Türler: reply (başlığına cevap), follow_reply (takip ettiğin başlık), mention, solution (cevabın
   çözüm seçildi), vote (okunmamış oy bildirimi varsa sayaç artar — 10 oy = 1 bildirim), bulletin (herkese; "Sadece
   ekip" bültende yalnızca ekiptekilere — TEK `INSERT … SELECT`), lesson (ders oluşturulunca görebilenlere,
-  düzenlemede yalnızca YENİ görebilenlere — `db.lesson_audience`), report (owner/admin'e). Olayı yapan kendine
+  düzenlemede yalnızca YENİ görebilenlere — `db.lesson_audience`), report (owner/admin'e), **new_thread / new_reply**
+  (kullanıcı isteği: forumdaki HER yeni soru/tartışma ve HER cevap tüm kullanıcılara — `notify.broadcast`, "Sadece ekip"te
+  yalnızca ekiptekilere; cevapta başlık sahibi/bahsedilen/takipçi zaten kendi bildirimini aldığı için hariç). Olayı yapan kendine
   bildirim almaz; bir cevapta öncelik: başlık sahibi "reply" > bahsedilen "mention" > diğer takipçiler "follow_reply".
 - **Görünürlük ÇIKTIDA da:** başlığı silinmiş ya da kişinin artık göremediği ("Sadece ekip" + ekip dışı) bildirimler
   liste/sayımda görünmez (`index._visible_notifications`). Başlık/cevap/ders silinince bildirimleri de silinir; 90 günden
@@ -581,8 +583,8 @@ yüzden backend'e hiç bağlanmamalı, sahte veri olur.
   `notify_email.GROUPS`/`DEFAULTS` — HEPSİ AÇIK (kullanıcı isteği; isteyen kapatır). İlk sürümün varsayılanında
   (takip/bülten/oy kapalı) KAYITLI satırlar bir kez yeni varsayılana çekildi (`migrate_defaults_once`,
   `schema_flags.notif_defaults_all_on`); kişinin kendi değiştirdiği tercihlere dokunulmaz.
-  Aynı başlık için 30 dk içinde okunmamış e-posta varsa yenisi gitmez; okunmamış oy bildirimi varken yeni oy sayaca eklenir
-  (e-posta yok). Gönderim isteğin içinde tek toplu çağrı; hata isteği düşürmez, loglanır; gidenler `notifications.emailed_at`.
+  Grup `forum` = new_thread + new_reply ("Forumdaki tüm yeni paylaşımlar", varsayılan açık). Eski "aynı başlık için 30 dk'da
+  bir e-posta" sınırı KALDIRILDI (her paylaşım gitsin); okunmamış oy bildirimi varken yeni oy yine sayaca eklenir (e-posta yok). Gönderim isteğin içinde tek toplu çağrı; hata isteği düşürmez, loglanır; gidenler `notifications.emailed_at`.
   **Toplu gönderim:** Resend `/emails/batch` TEK geçersiz adres yüzünden TÜM grubu reddeder (4xx) — bülten gibi herkese
   giden bildirimde kimseye gitmiyordu. `mailer.send_batch` 4xx'te (429 hariç) grubu tek tek gönderir, yalnızca hatalı
   adres düşer ve loglanır (`[mailer] … gönderilemedi`). Cümleler panelle ortak (`notify.render`). Kullanıcı içeriği şablonlarda `html.escape`. Her e-postada ayarlar bağlantısı

@@ -6,8 +6,7 @@ BİLDİRİM E-POSTALARI — kişi bazında tercihler + anlık gönderim (Resend,
   DOĞRULANMIŞ + tercihi o grup için "anlık" + tüm e-postaları kapatmamış.
 - Gruplar (panelde "Bildirim Ayarları"): direct (başlığına cevap, bahsetme, çözüm), follow (takip ettiğin başlık),
   vote (faydalı), bulletin (bülten), lesson (yeni ders), report (içerik bildirimi — owner/admin).
-- Gürültü sınırı: aynı başlık için kişiye son 30 dakikada e-posta gittiyse ve o bildirimi henüz okumadıysa yenisi
-  gitmez (panelde yine görünür, haftalık özete girer).
+- Gürültü sınırı YOK (kullanıcı isteği: forumdaki her paylaşım herkese gider); isteyen grubu kapatır.
 - Gönderim isteğin İÇİNDE tek bir toplu (/emails/batch) çağrıyla yapılır; hata isteği düşürmez, yalnızca loglanır.
 """
 import json
@@ -24,6 +23,7 @@ GROUPS = {
     "bulletin": ("bulletin",),
     "lesson": ("lesson",),
     "report": ("report",),
+    "forum": ("new_thread", "new_reply"),
 }
 GROUP_OF = {k: g for g, kinds in GROUPS.items() for k in kinds}
 GROUP_LABELS = {
@@ -33,15 +33,17 @@ GROUP_LABELS = {
     "bulletin": "Yeni bültenler",
     "vote": "İçeriğimin faydalı bulunması",
     "report": "Bildirilen içerikler (owner/admin)",
+    "forum": "Forumdaki tüm yeni paylaşımlar — her yeni başlık ve cevap",
 }
 # Varsayılan: HEPSİ açık (kullanıcı isteği) — isteyen Profilim → Bildirim Ayarları'ndan kapatır.
-DEFAULTS = {"instant": {"direct": True, "lesson": True, "report": True, "follow": True, "bulletin": True, "vote": True},
+DEFAULTS = {"instant": {"direct": True, "lesson": True, "report": True, "follow": True, "bulletin": True, "vote": True,
+                        "forum": True},
             "weekly": True, "email_off": False}
 # İlk sürümün varsayılanı (takip/bülten/oy kapalı). Bu değerde KAYITLI satırlar (kişi ayarı hiç değiştirmemiş, satır
 # abonelik bağlantısı için oluşmuş) bir kez yeni varsayılana çekilir — migrate_defaults_once.
-_OLD_DEFAULTS = {"instant": {"direct": True, "lesson": True, "report": True, "follow": False, "bulletin": False, "vote": False},
+_OLD_DEFAULTS = {"instant": {"direct": True, "lesson": True, "report": True, "follow": False, "bulletin": False, "vote": False,
+                             "forum": True},   # "forum" sonradan eklendi; kayıtlı satırda yoksa varsayılan (açık) okunur
                  "weekly": True, "email_off": False}
-COALESCE_SECONDS = 30 * 60
 
 SCHEMAS = [
     # Kişi başına tek satır. unsub_token = e-postalardaki "tüm e-postaları kapat" bağlantısı (girişsiz çalışır).
@@ -153,12 +155,7 @@ async def dispatch(kind: str, recipients: set[int], actor_id: int | None, thread
         prefs = await prefs_for([u["id"] for u in users])
         users = [u for u in users if not prefs[u["id"]]["email_off"] and prefs[u["id"]]["instant"][group]]
         now = int(time.time())
-        if thread_id and users:   # gürültü sınırı: aynı başlık için okunmamış yakın tarihli e-posta varsa atla
-            umarks = ",".join("?" * len(users))
-            busy = {r["user_id"] for r in await fetch_all(
-                f"SELECT DISTINCT user_id FROM notifications WHERE thread_id = ? AND emailed_at > ? AND read_at IS NULL "
-                f"AND user_id IN ({umarks})", (thread_id, now - COALESCE_SECONDS, *[u["id"] for u in users]))}
-            users = [u for u in users if u["id"] not in busy]
+        # Eski "aynı başlık için 30 dk'da bir e-posta" sınırı kaldırıldı (kullanıcı isteği: her paylaşım e-postayla gitsin).
         if not users:
             return
         actor = await fetch_one("SELECT first_name, last_name FROM users WHERE id = ?", (actor_id,)) if actor_id else None

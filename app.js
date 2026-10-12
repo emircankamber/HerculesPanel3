@@ -112,7 +112,8 @@ function showNotice(text, kind = "") {
 // Sekme açıkken ~60 sn'de bir yoklanır; ileride e-posta / web push / Slack aynı kayıtlardan beslenecek.
 // ---------------------------------------------------------------------------
 const NT_ICON = { reply: "forum", follow_reply: "bookmark", mention: "alternate_email", solution: "verified",
-                  vote: "thumb_up", bulletin: "campaign", lesson: "school", report: "flag" };
+                  vote: "thumb_up", bulletin: "campaign", lesson: "school", report: "flag",
+                  new_thread: "post_add", new_reply: "chat" };
 const ntState = { timer: null, open: false };
 function ntSetBadge(n) {
   const b = document.getElementById("nt-badge");
@@ -4371,7 +4372,7 @@ function tgBindTeamRow(row, t) {
 
 // --- Üyeler ---
 /** Bildirim e-postası teşhisi (yalnızca owner'a gelir): doğrulanmamış / tüm e-postalar kapalı / kapatılan gruplar */
-const TG_GROUP_LABEL = { direct: "bana yazılanlar", lesson: "eğitim", follow: "takip", bulletin: "bülten", vote: "faydalı", report: "bildirilen içerik" };
+const TG_GROUP_LABEL = { direct: "bana yazılanlar", lesson: "eğitim", follow: "takip", bulletin: "bülten", vote: "faydalı", report: "bildirilen içerik", forum: "tüm forum paylaşımları" };
 function tgMailStatus(u) {
   const n = u.email_notify;
   if (!n || !n.enabled) return "";
