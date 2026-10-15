@@ -14,6 +14,10 @@
     {
       "path": "/api/cron/weekly-digest",
       "schedule": "0 6 * * 1"
+    },
+    {
+      "path": "/api/cron/trello-weekly",
+      "schedule": "10 6 * * 1"
     }
   ]
 }

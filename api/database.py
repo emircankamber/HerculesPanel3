@@ -127,6 +127,12 @@ _SCHEMAS = [
         cache_key TEXT PRIMARY KEY, response_json TEXT NOT NULL, fetched_at INTEGER NOT NULL)""",
     """CREATE TABLE IF NOT EXISTS schema_flags (
         key TEXT PRIMARY KEY, value TEXT, set_at INTEGER NOT NULL)""",
+    # Genel panel ayarları (anahtar → JSON), ör. "trello": pano/liste seçimi.
+    """CREATE TABLE IF NOT EXISTS app_settings (
+        key TEXT PRIMARY KEY, value_json TEXT NOT NULL, updated_at INTEGER NOT NULL)""",
+    # Trello aktarımı: paneldeki kayıt (ref, ör. "perf:<since>:<until>:<ekip>" / "person:<id>") → Trello kart kimliği.
+    """CREATE TABLE IF NOT EXISTS trello_cards (
+        ref TEXT PRIMARY KEY, card_id TEXT NOT NULL, meta_json TEXT, updated_at INTEGER NOT NULL)""",
     """CREATE TABLE IF NOT EXISTS product_signals (
         id INTEGER PRIMARY KEY AUTOINCREMENT, keyword TEXT NOT NULL, marketplace TEXT NOT NULL,
         stage TEXT NOT NULL, market_score REAL, demand_score REAL, truth_score REAL,
@@ -304,10 +310,11 @@ async def _ensure_staff_in_team():
 # ŞEMAYA/MİGRASYONA HER DEĞİŞİKLİKTE (yeni tablo, sütun, indeks, veri düzeltmesi, tohum) BU SAYIYI ARTIR —
 # artırmazsan canlı veritabanında migrasyon hiç çalışmaz.
 # ---------------------------------------------------------------------------
-SCHEMA_VERSION = 7  # v2: banned_categories · v3: training_notes · v4: bildirimler, forum okunma/rapor/görsel, analiz/ders bağı
+SCHEMA_VERSION = 8  # v2: banned_categories · v3: training_notes · v4: bildirimler, forum okunma/rapor/görsel, analiz/ders bağı
                     # v5: e-posta doğrulama/sıfırlama, deneme sınırı, bildirim tercihleri
                     # v6: mcp_cache (Trendler 72 saat), bildirim varsayılanı hepsi açık
                     # v7: doğrulama bağlantısı hiç gönderilmemiş (eski) kullanıcılar doğrulanmış sayılır
+                    # v8: app_settings, trello_cards (Trello aktarımı)
 
 
 def _migration_env_hash() -> str:
@@ -535,6 +542,39 @@ async def get_cached(keyword: str, marketplace: str):
     if not isinstance(payload, dict) or int(payload.get("_v") or 0) < CACHE_MIN_PAYLOAD_VERSION:
         return None
     return payload, row["fetched_at"]
+
+
+# --- Genel ayarlar & Trello kart eşleşmesi ---
+async def get_setting(key: str) -> dict | None:
+    row = await fetch_one("SELECT value_json FROM app_settings WHERE key = ?", (key,))
+    try:
+        return json.loads(row["value_json"]) if row else None
+    except (TypeError, ValueError):
+        return None
+
+
+async def set_setting(key: str, value: dict):
+    await execute("INSERT INTO app_settings (key, value_json, updated_at) VALUES (?, ?, ?) "
+                  "ON CONFLICT (key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at",
+                  (key, json.dumps(value, ensure_ascii=False), int(time.time())))
+
+
+async def trello_card(ref: str) -> dict | None:
+    row = await fetch_one("SELECT card_id, meta_json FROM trello_cards WHERE ref = ?", (ref,))
+    if not row:
+        return None
+    try:
+        meta = json.loads(row["meta_json"] or "{}")
+    except (TypeError, ValueError):
+        meta = {}
+    return {"card_id": row["card_id"], "meta": meta}
+
+
+async def set_trello_card(ref: str, card_id: str, meta: dict | None = None):
+    await execute("INSERT INTO trello_cards (ref, card_id, meta_json, updated_at) VALUES (?, ?, ?, ?) "
+                  "ON CONFLICT (ref) DO UPDATE SET card_id = excluded.card_id, meta_json = excluded.meta_json, "
+                  "updated_at = excluded.updated_at",
+                  (ref, card_id, json.dumps(meta or {}, ensure_ascii=False), int(time.time())))
 
 
 # --- Ham MCP yanıt önbelleği (Trendler: aba_research_* listeleri ve keyword hacim geçmişi) ---

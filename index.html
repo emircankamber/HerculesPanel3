@@ -98,6 +98,18 @@
   </div>
 </div>
 
+<div id="tr-modal" class="login-overlay !items-start overflow-y-auto" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="tr-title">
+  <div class="bg-surface-container-lowest rounded-2xl w-full max-w-xl my-6 shadow-xl">
+    <div class="flex items-start justify-between gap-3 p-5 border-b border-hairline">
+      <div class="flex items-center gap-3 min-w-0"><span class="material-symbols-outlined text-primary">view_kanban</span>
+        <div class="min-w-0"><div class="font-display font-semibold text-lg" id="tr-title">Trello'ya aktarım</div>
+          <div class="text-xs text-secondary">Panelden Trello'ya tek yönlü — Trello'daki değişiklikler panele gelmez.</div></div></div>
+      <button type="button" id="tr-close" class="icon-btn shrink-0" aria-label="Kapat"><span class="material-symbols-outlined">close</span></button>
+    </div>
+    <div id="tr-body" class="p-5 flex flex-col gap-4"></div>
+  </div>
+</div>
+
 <div id="fm-editor" class="login-overlay !items-start overflow-y-auto" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="fm-ed-title">
   <form id="fm-ed-form" class="bg-surface-container-lowest rounded-2xl w-full max-w-2xl my-6 shadow-xl p-5 sm:p-6 flex flex-col gap-4" novalidate>
     <div class="flex items-start justify-between gap-3"><h2 id="fm-ed-title" class="font-display text-lg font-semibold">Yeni başlık</h2>
@@ -1513,6 +1525,7 @@
             <div class="flex gap-2 items-center">
               <select id="tp-team" class="field tp-team" aria-label="Ekip"><option value="">Tüm ekipler</option></select>
               <button type="button" id="tp-refresh" class="btn btn-outline tp-icon-btn" title="Yenile" aria-label="Yenile"><span class="material-symbols-outlined">refresh</span></button>
+              <button type="button" id="tp-trello" class="btn btn-outline" title="Ekip performansını Trello'ya aktar"><span class="material-symbols-outlined">view_kanban</span>Trello</button>
             </div>
           </div>
         </div>

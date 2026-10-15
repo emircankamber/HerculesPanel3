@@ -434,6 +434,22 @@ yüzden backend'e hiç bağlanmamalı, sahte veri olur.
   ritim ısı haritası (gün × saat), karar karışımı, Spot ışığı, İlgi gerekiyor, sıralanabilir kişi tablosu (sparkline) ve
   kişi yan paneli (son kayıtlar `/api/team/activity?user_id=`; kayda tıklamak `runAnalysis`, 72 saat önbellek kuralı).
 
+## Trello aktarımı (`api/trello.py` + `/api/trello/*`, yalnızca owner — TEK YÖNLÜ: panel → Trello)
+
+- **Ortam değişkenleri (istek anında):** `TRELLO_API_KEY`, `TRELLO_TOKEN` (trello.com/power-ups/admin → entegrasyon → API key +
+  Token, read/write). Yoksa entegrasyon kapalı; panel kurulum adımlarını gösterir. Kimlik bilgisi URL'ye DEĞİL
+  `Authorization: OAuth oauth_consumer_key=…, oauth_token=…` başlığına yazılır. Kartlar token sahibinin adına açılır.
+- **Ayar** `app_settings.trello` (owner panelden: pano, özet listesi, isteğe bağlı kişi listesi, haftalık otomatik aktarım,
+  ekip, saat dilimi). `PUT /api/trello/settings` pano/listeleri Trello'dan çekip SUNUCUDA doğrular (başka panonun listesi 422).
+- **Ne gider (şu an yalnızca Ekip Performansı):** `_perf_data` (panelle AYNI hesap). Dönem özeti kartı (KPI + önceki döneme
+  göre değişim, ürün hattı, ilgi gerektirenler, kişi satırları) — aynı dönem+ekip yeniden gönderilirse aynı kart GÜNCELLENİR.
+  Kişi kartları: kişi başına TEK kalıcı kart, açıklama son dönemle güncellenir, her YENİ dönem için karta bir satır yorum
+  (`trello_cards.meta_json.last_period`). Eşleşme `trello_cards (ref → card_id)`; Trello'da silinen kart (404) yeniden açılır.
+- **Tetik:** Ekip Performansı → "Trello" → "Seçili dönemi şimdi gönder" (`POST /api/trello/sync/performance`) ve Vercel cron
+  `GET /api/cron/trello-weekly` (pazartesi 06:10 UTC, `CRON_SECRET`; kayıtlı saat diliminde GEÇEN pazartesi–pazar).
+  Kart bağlantısı `APP_BASE_URL/#perf` (owner'da Ekip Performansı'nı açar). 401/403 → okunur 502 ("anahtar/izin geçersiz").
+- Test: `trello.httpx.AsyncClient`'ı `httpx.MockTransport`'lu istemciyle değiştir (gerçek Trello'ya gitme).
+
 ## Ad Soyad, Profil & Yetkinlik Formu
 
 - **Ad soyad zorunlu:** kayıtta `first_name`/`last_name` (boşluk temizlenir, 1–60, yoksa 422). `users`'a
