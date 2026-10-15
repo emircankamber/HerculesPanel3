@@ -3488,7 +3488,8 @@ async def _trello_sync_perf(cfg: dict, since: int, until: int, team_id: int | No
     if not card["created"]:
         await best_effort("Özet etiketi", trello.sync_labels(
             card, {labels[n] for n in (trello.LABEL_SUMMARY, trello.LABEL_MONTH) if n in labels}, want))
-    png = trello.team_dashboard(data, det, member_ids, until, tz, f"{kind} · {team_label}", name_period or period)
+    png = await asyncio.to_thread(trello.team_dashboard, data, det, member_ids, until, tz, f"{kind} · {team_label}",
+                                  name_period or period)   # çizim ayrı iş parçacığında — ağ istekleri beklemesin
     ok, att = await best_effort("Özet görseli", trello.set_cover_image(card["id"], png, "ekip-performansi.png",
                                                                       meta.get("cover")))
     if ok:
@@ -3532,9 +3533,9 @@ async def _trello_sync_perf(cfg: dict, since: int, until: int, team_id: int | No
                                 f"{x['name']} {fname} alanı", trello.set_number_field(c["id"], fields[fname], v)))[0]:
                             cf[fname] = v
                     pm["cf"] = cf
+                png = await asyncio.to_thread(trello.person_dashboard, x, det, until, tz, name_period or period)
                 ok, att = await best_effort(f"{x['name']} görseli", trello.set_cover_image(
-                    c["id"], trello.person_dashboard(x, det, until, tz, name_period or period), "performans.png",
-                    pm.get("cover")))
+                    c["id"], png, "performans.png", pm.get("cover")))
                 if ok:
                     pm["cover"] = att
                 if day:   # günlük: o günün ayrıntısı (etkinlik yoksa yorum yok); başarısızsa ertesi çalışmada yeniden

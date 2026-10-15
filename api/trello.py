@@ -356,8 +356,24 @@ def _pct_txt(v) -> str:
     return f"%{round(v * 100)}" if v is not None else "-"
 
 
+def _modern():
+    """Modern çizim (Pillow + Inter). Yüklenemezse None → bit eşlem çizime düşülür."""
+    try:
+        import dash_render
+        dash_render.font("Regular", 12)   # yazı tipi dosyası gerçekten açılıyor mu
+        return dash_render
+    except Exception as e:   # Pillow yok / yazı tipi paketlenmemiş — aktarım durmasın
+        print(f"[trello] modern görsel kullanılamıyor, sade çizime geçildi: {e}", flush=True)
+        return None
+
+
 def person_dashboard(x: dict, det: dict, until: int, tz_min: int, period: str) -> bytes:
     """Kişi kartı kapağı: KPI kutuları (önceki döneme göre), son 30 gün, karar dağılımı, eğitim ve uyum."""
+    dr = _modern()
+    if dr:
+        labels, b = daily_buckets(det, {x["user_id"]}, until, tz_min)
+        return dr.person(x, labels, b, period, (STATUS_TR.get(x["status"], x["status"]),
+                                                STATUS_RGB.get(x["status"], pc.MUTED)), CHART_DAYS)
     W, H, P, G = 1000, 640, 32, 12
     c = pc.Canvas(W, H)
     sub = " · ".join(s for s in (period, x.get("title") or "", ", ".join(x.get("teams") or [])) if s)
@@ -392,6 +408,10 @@ def person_dashboard(x: dict, det: dict, until: int, tz_min: int, period: str) -
 
 def team_dashboard(data: dict, det: dict, member_ids: set[int], until: int, tz_min: int, title: str, period: str) -> bytes:
     """Özet kartı kapağı: ekip KPI'ları, son 30 gün, kişi bazında etkinlik, karar dağılımı, ürün hattı."""
+    dr = _modern()
+    if dr:
+        labels, b = daily_buckets(det, member_ids, until, tz_min)
+        return dr.team(data, labels, b, title, period, CHART_DAYS)
     W, H, P, G = 1000, 760, 32, 12
     t, pv = data["totals"], data["prev"]
     c = pc.Canvas(W, H)

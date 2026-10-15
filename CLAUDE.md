@@ -458,9 +458,14 @@ yüzden backend'e hiç bağlanmamalı, sahte veri olur.
   sayısal özel alanlar (Analiz, Karar, Aktif gün — kartın yüzünde; yalnızca DEĞİŞEN değer yazılır, `meta.cf`); eşleşen
   Trello üyesi karta atanır (`ensure_member`; eşleşme değişirse eskisi çıkarılır, diğer üyelere dokunulmaz) → günlük
   yorumlar ona Trello bildirimi olarak gider.
-- **Görseller** `png_chart.py`: saf Python PNG (Pillow YOK — Vercel paket boyutu), 5×7 bit eşlem yazı tipi (BÜYÜK harf,
-  Türkçe Ç Ğ İ Ö Ş Ü, `up()` Türkçe büyütme; bilinmeyen harf aksansız/"?"). Yeni görsel ek olarak yüklenip kapak yapılır,
-  öncekisi silinir (`meta.cover`). Görseli değiştirince `scratchpad`ta örnek veriyle çizip GÖZLE kontrol et.
+- **Görseller — MODERN çizim `api/dash_render.py`** (Pillow + Inter): gerçek kenar yumuşatmalı yazı (Inter TTF'leri
+  `api/fonts/`, SIL OFL lisansı `Inter-LICENSE.txt`), yuvarlak kartlar, hap rozetler, üstü yuvarlak çubuklar; 1000 birimlik
+  düzen `SS`=3 kat çizilip `OUT`=2× (2000 px) çıktıya küçültülür → pürüzsüz ve Retina'da net. `vercel.json` →
+  `functions["api/index.py"].includeFiles = "api/fonts/**"` (yazı tipi dosyaları sunucuya paketlensin — KALDIRMA).
+  `pillow==11.3.0` sabit. Çizim `asyncio.to_thread` ile ayrı iş parçacığında (~0,4 sn/kişi; ağ istekleri beklemesin).
+  **Yedek:** Pillow ya da yazı tipi yüklenemezse `trello._modern()` None → eski bit eşlem çizim `png_chart.py` (saf Python,
+  5×7 piksel yazı tipi) — aktarım görsel yüzünden asla durmaz. Yeni görsel ek olarak yüklenip kapak yapılır, öncekisi
+  silinir (`meta.cover`). Görseli değiştirince örnek veriyle çizip GÖZLE kontrol et (boş veri durumu dahil).
 - **Dayanıklılık:** ad + açıklama ZORUNLU adım (başarısızsa kişi hatası); etiket/özel alan/üye/görsel/kontrol listesi/yorum
   `best_effort` — Trello hatası ya da beklenmeyen yanıt (KeyError/TypeError/ValueError) aktarımı DÜŞÜRMEZ, `warnings` ve
   `last_sync.error_samples`'a yazılır (panelde "N uyarı" açılır listesi). İstekler arası en az `MIN_INTERVAL`=0,12 sn
