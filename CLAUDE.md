@@ -441,13 +441,22 @@ yüzden backend'e hiç bağlanmamalı, sahte veri olur.
   `Authorization: OAuth oauth_consumer_key=…, oauth_token=…` başlığına yazılır. Kartlar token sahibinin adına açılır.
 - **Ayar** `app_settings.trello` (owner panelden: pano, özet listesi, isteğe bağlı kişi listesi, haftalık otomatik aktarım,
   ekip, saat dilimi). `PUT /api/trello/settings` pano/listeleri Trello'dan çekip SUNUCUDA doğrular (başka panonun listesi 422).
-- **Ne gider (şu an yalnızca Ekip Performansı):** `_perf_data` (panelle AYNI hesap). Dönem özeti kartı (KPI + önceki döneme
-  göre değişim, ürün hattı, ilgi gerektirenler, kişi satırları) — aynı dönem+ekip yeniden gönderilirse aynı kart GÜNCELLENİR.
-  Kişi kartları: kişi başına TEK kalıcı kart, açıklama son dönemle güncellenir, her YENİ dönem için karta bir satır yorum
-  (`trello_cards.meta_json.last_period`). Eşleşme `trello_cards (ref → card_id)`; Trello'da silinen kart (404) yeniden açılır.
-- **Tetik:** Ekip Performansı → "Trello" → "Seçili dönemi şimdi gönder" (`POST /api/trello/sync/performance`) ve Vercel cron
-  `GET /api/cron/trello-weekly` (pazartesi 06:10 UTC, `CRON_SECRET`; kayıtlı saat diliminde GEÇEN pazartesi–pazar).
+- **Ne gider (şu an yalnızca Ekip Performansı):** `_perf_data` (panelle AYNI hesap) + `db.activity_detail` (KİM NE YAPTI:
+  analiz edilen keyword'ler + ön öneri, kararlar, başlatılan/onaylanan kontrol listeleri, tamamlanan dersler, forum
+  başlık/cevapları — `trello.activity_lines`, aynı öğe ×N ile toplanır, kategori başına ≤12). Özet kartı: KPI + önceki
+  döneme göre değişim, ürün hattı, ilgi gerektirenler, kişi satırları ve "Kim ne yaptı". Kişi kartları: kişi başına TEK
+  kalıcı kart (açıklama = dönem sayıları + "Bu dönemde neler yaptı"). Eşleşme `trello_cards (ref → card_id, meta_json)`;
+  Trello'da silinen kart (404) yeniden açılır. Kullanıcı metni `trello.md()` ile Markdown'dan kaçırılır.
+- **Grafik:** her kartın KAPAĞI son 30 günün günlük analiz/karar/forum yığılmış çubuk grafiği (`png_chart.py` — saf
+  Python PNG, Pillow YOK; grafikte yalnızca rakam/tarih, renk açıklaması kart metninde). Yeni grafik ek olarak yüklenip
+  kapak yapılır, öncekisi silinir (`meta.cover`). Grafik yüklenemezse metin yine gider (hata loglanır).
+- **Tetik:** (1) Vercel cron `GET /api/cron/trello-daily` HER GÜN 06:10 UTC (`CRON_SECRET`, ayar `auto`; eski kayıtlarda
+  `auto_weekly` okunur): kayıtlı saat diliminde DÜNÜN haftası için TEK özet kartı (`perf:week:<pazartesi>:<ekip>`, hafta
+  boyunca her gün güncellenir, pazartesi o haftanın son hali) + kişi kartlarına DÜNÜN ayrıntısı yorum olarak (etkinlik
+  yoksa yorum yok; aynı gün ikinci çalışmada tekrar yok — `meta.last_day`). (2) Ekip Performansı → "Trello" → "Seçili dönemi
+  şimdi gönder" (`POST /api/trello/sync/performance`): seçili dönem kartı + kişi kartına dönem özeti yorumu (`meta.last_period`).
   Kart bağlantısı `APP_BASE_URL/#perf` (owner'da Ekip Performansı'nı açar). 401/403 → okunur 502 ("anahtar/izin geçersiz").
+  Trello 429'da bir kez 2 sn bekleyip yeniden dener; kişi kartları 3 eşzamanlı.
 - Test: `trello.httpx.AsyncClient`'ı `httpx.MockTransport`'lu istemciyle değiştir (gerçek Trello'ya gitme).
 
 ## Ad Soyad, Profil & Yetkinlik Formu

@@ -6122,8 +6122,8 @@ async function trRenderForm() {
     <label class="flex flex-col gap-1 text-sm">Pano<select id="tr-board" class="field">${boards.map(b => `<option value="${esc(b.id)}" ${b.id === boardId ? "selected" : ""}>${esc(b.name)}</option>`).join("")}</select></label>
     <label class="flex flex-col gap-1 text-sm">Dönem özeti kartları hangi listeye?<select id="tr-summary" class="field"></select></label>
     <label class="flex flex-col gap-1 text-sm">Kişi kartları hangi listeye? <span class="text-xs text-secondary">Her kişiye tek kart; her yeni dönemde güncellenir ve karta bir satırlık geçmiş eklenir.</span><select id="tr-people" class="field"></select></label>
-    <label class="flex flex-col gap-1 text-sm">Haftalık otomatik aktarımda ekip<select id="tr-team" class="field">${$("#tp-team").innerHTML}</select></label>
-    <label class="flex items-start gap-2 text-sm"><input type="checkbox" id="tr-auto" class="mt-1" ${cfg.auto_weekly === false ? "" : "checked"}><span>Her pazartesi geçen haftayı (pazartesi–pazar) otomatik aktar</span></label>
+    <label class="flex flex-col gap-1 text-sm">Otomatik aktarımda ekip<select id="tr-team" class="field">${$("#tp-team").innerHTML}</select></label>
+    <label class="flex items-start gap-2 text-sm"><input type="checkbox" id="tr-auto" class="mt-1" ${(cfg.auto ?? cfg.auto_weekly) === false ? "" : "checked"}><span>Her sabah otomatik aktar — haftanın özet kartı güncellenir, kişi kartlarına dünün ayrıntısı yorum olarak eklenir</span></label>
     <div class="flex flex-wrap gap-2"><button type="button" id="tr-save" class="btn btn-primary">Kaydet</button>
       <button type="button" id="tr-send" class="btn btn-outline" ${cfg.summary_list_id ? "" : "disabled"}><span class="material-symbols-outlined">send</span>Seçili dönemi şimdi gönder</button></div>
     <div id="tr-msg" class="text-xs"></div>
@@ -6146,7 +6146,7 @@ async function trSave() {
     const team = $("#tr-team").value;
     const r = await pfApi("/api/trello/settings", { method: "PUT", body: JSON.stringify({
       board_id: $("#tr-board").value, summary_list_id: $("#tr-summary").value, people_list_id: $("#tr-people").value || null,
-      auto_weekly: $("#tr-auto").checked, team_id: team ? Number(team) : null, tz: -new Date().getTimezoneOffset() }) });
+      auto: $("#tr-auto").checked, team_id: team ? Number(team) : null, tz: -new Date().getTimezoneOffset() }) });
     trState.status.settings = r.settings;
     msg.className = "text-xs text-primary"; msg.textContent = "Kaydedildi.";
     $("#tr-send").disabled = false;
