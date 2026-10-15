@@ -6152,7 +6152,9 @@ async function trRenderForm() {
       const d = await pfApi(`/api/trello/boards/${encodeURIComponent(bid)}/members`);
       const saved = bid === cfg.board_id ? (cfg.members || {}) : {};
       if (!d.people.length) { box.innerHTML = `<div class="text-xs text-secondary">Ekipte kişi yok.</div>`; return; }
-      box.innerHTML = d.people.map(p => {
+      const few = d.members.length < d.people.length;
+      const hint = `<div class="text-xs rounded-lg p-2.5 ${few ? "bg-amber-50 text-amber-900" : "text-secondary"}">Listede yalnızca bu Trello panosunun üyeleri çıkar — şu an <b>${esc(d.members.length)}</b> üye: ${d.members.map(m => esc(m.name)).join(", ") || "—"}.${few ? " Diğer ekip arkadaşlarını eşleştirmek için önce Trello'da panoya davet edin (pano → Paylaş → e-posta ile davet), sonra bu pencereyi yeniden açın. Trello hesabı olmayan kişiyi \"eşleştirme yok\" bırakın — kartı yine açılır, yalnızca karta atanmaz." : ""}</div>`;
+      box.innerHTML = hint + d.people.map(p => {
         const cur = saved[String(p.id)] ?? d.suggested[String(p.id)] ?? "";
         const sug = !saved[String(p.id)] && d.suggested[String(p.id)];
         return `<div class="flex items-center gap-2 text-sm"><span class="flex-1 min-w-0 truncate">${esc(p.name)}${p.title ? ` <span class="text-xs text-secondary">${esc(p.title)}</span>` : ""}</span>
