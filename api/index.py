@@ -3330,7 +3330,7 @@ async def cron_weekly_digest(authorization: str | None = Header(default=None)):
 # TRELLO — panelden Trello'ya tek yönlü aktarım (yalnızca owner). Ayrıntı: api/trello.py
 # ---------------------------------------------------------------------------
 TRELLO_ID_RE = re.compile(r"^[0-9a-fA-F]{24}$")
-TRELLO_SYNC_CONCURRENCY = 4   # Trello sınırı: belirteç başına 10 sn'de 100 istek
+TRELLO_SYNC_CONCURRENCY = 3   # Trello sınırı: belirteç başına 10 sn'de 100 istek
 
 
 def _trello_http(e: "trello.TrelloError") -> HTTPException:
@@ -3376,7 +3376,7 @@ class TrelloSettingsIn(BaseModel):
     board_id: str = Field(..., max_length=40)
     summary_list_id: str = Field(..., max_length=40)
     people_list_id: str | None = Field(None, max_length=40)
-    auto_weekly: bool = True
+    auto: bool = True
     team_id: int | None = Field(None, ge=1)
     tz: int = Field(180, ge=-840, le=840)
 
@@ -3401,25 +3401,44 @@ async def trello_settings(req: TrelloSettingsIn, user: dict = Depends(require_ow
     cfg = {"board_id": board_id, "board_name": board["name"], "board_url": board.get("url"),
            "summary_list_id": summary, "summary_list_name": lists[summary],
            "people_list_id": people, "people_list_name": lists.get(people) if people else None,
-           "auto_weekly": req.auto_weekly, "team_id": req.team_id, "tz": req.tz,
+           "auto": req.auto, "team_id": req.team_id, "tz": req.tz,
            "updated_by": user["user_id"], "last_sync": old.get("last_sync")}
     await db.set_setting("trello", cfg)
     return {"ok": True, "settings": cfg}
 
 
-async def _trello_sync_perf(cfg: dict, since: int, until: int, team_id: int | None, tz: int) -> dict:
+async def _trello_sync_perf(cfg: dict, since: int, until: int, team_id: int | None, tz: int, *,
+                            summary_ref: str | None = None, name_period: str | None = None, note: str | None = None,
+                            day: tuple[int, int, str] | None = None) -> dict:
+    """Ekip Performansı → Trello. Özet kartı + (seçildiyse) kişi kartları; her kartın kapağı son 30 günün grafiği.
+    day=(başlangıç, bitiş, etiket) verilirse (günlük otomatik aktarım) kişi kartına o günün ayrıntılı etkinliği yorum
+    olarak eklenir; verilmezse (elle gönderim) dönem özeti yorumu — ikisi de aynı gün/dönem için bir kez."""
     data = await _perf_data(since, until, team_id, tz)
     team_label = "Tüm ekipler"
     if team_id is not None:
         team_label = next((t["label"] for t in await db.list_teams() if t["id"] == team_id), team_label)
     period = trello.period_label(since, until, tz)
     panel_url = mailer.link("/#perf") if mailer.base_url() else "Panel → Ekip Performansı"
-    ref = f"perf:{since}:{until}:{team_id or 0}"
+    det = await db.activity_detail(min(since, until - trello.CHART_DAYS * 86400), until)
+    member_ids = {x["user_id"] for x in data["people"]}
+    acts = {uid: trello.person_activity(det, uid, since, until) for uid in member_ids}
+    errors: list[str] = []
+
+    async def cover(card: dict, prev_meta: dict, uids: set[int], label: str) -> dict:
+        meta = {} if card["created"] else dict(prev_meta)
+        try:
+            meta["cover"] = await trello.set_cover_image(card["id"], trello.daily_chart(det, uids, until, tz),
+                                                         "son-30-gun.png", meta.get("cover"))
+        except trello.TrelloError as e:   # grafik olmasa da metin gitti — aktarımı düşürme
+            errors.append(f"{label} grafiği: {e}")
+        return meta
+
+    ref = summary_ref or f"perf:{since}:{until}:{team_id or 0}"
     prev = await db.trello_card(ref)
-    name, desc = trello.render_summary(data, team_label, period, panel_url)
+    name, desc = trello.render_summary(data, team_label, period, panel_url, name_period, acts, note)
     card = await trello.upsert_card(prev["card_id"] if prev else None, cfg["summary_list_id"], name, desc)
-    await db.set_trello_card(ref, card["id"])
-    people_done, errors = 0, []
+    await db.set_trello_card(ref, card["id"], await cover(card, prev["meta"] if prev else {}, member_ids, "Özet"))
+    people_done = 0
     if cfg.get("people_list_id"):
         sem = asyncio.Semaphore(TRELLO_SYNC_CONCURRENCY)
         period_key = f"{since}:{until}"
@@ -3429,12 +3448,18 @@ async def _trello_sync_perf(cfg: dict, since: int, until: int, team_id: int | No
             async with sem:
                 pref = f"person:{x['user_id']}"
                 ex = await db.trello_card(pref)
-                pname, pdesc, note = trello.render_person(x, period, panel_url)
+                pname, pdesc, pnote = trello.render_person(x, period, panel_url, acts.get(x["user_id"]))
                 try:
                     c = await trello.upsert_card(ex["card_id"] if ex else None, cfg["people_list_id"], pname, pdesc)
-                    meta = {} if (not ex or c["created"]) else dict(ex["meta"])
-                    if meta.get("last_period") != period_key:   # her YENİ dönem için karta bir satır geçmiş
-                        await trello.comment(c["id"], note)
+                    meta = await cover(c, ex["meta"] if ex else {}, {x["user_id"]}, x["name"])
+                    if day:   # günlük: o günün ayrıntısı (etkinlik yoksa yorum yok)
+                        if meta.get("last_day") != day[0]:
+                            text = trello.day_log(trello.person_activity(det, x["user_id"], day[0], day[1]), day[2])
+                            if text:
+                                await trello.comment(c["id"], text)
+                            meta["last_day"] = day[0]
+                    elif meta.get("last_period") != period_key:
+                        await trello.comment(c["id"], pnote)
                         meta["last_period"] = period_key
                     await db.set_trello_card(pref, c["id"], meta)
                     people_done += 1
@@ -3443,10 +3468,10 @@ async def _trello_sync_perf(cfg: dict, since: int, until: int, team_id: int | No
 
         await asyncio.gather(*(one(x) for x in data["people"]))
     cfg = {**cfg, "last_sync": {"at": int(time.time()), "period": period, "team": team_label, "card_url": card["url"],
-                                "people": people_done, "errors": len(errors)}}
+                                "people": people_done, "errors": len(errors), "auto": bool(day)}}
     await db.set_setting("trello", cfg)
     if errors:
-        print(f"[trello] kişi kartı hataları: {errors[:5]}", flush=True)
+        print(f"[trello] aktarım hataları: {errors[:5]}", flush=True)
     return {"ok": True, "card_url": card["url"], "card_created": card["created"], "people": people_done,
             "people_errors": errors[:5], "period": period, "team": team_label}
 
@@ -3473,31 +3498,39 @@ async def trello_sync_performance(req: TrelloSyncIn, user: dict = Depends(requir
         raise _trello_http(e)
 
 
-def _last_week_bounds(now: int, tz_min: int) -> tuple[int, int]:
-    """Kaydedilen saat diliminde GEÇEN haftanın pazartesi 00:00 – bu pazartesi 00:00 aralığı."""
+def _daily_bounds(now: int, tz_min: int) -> dict:
+    """Kayıtlı saat diliminde: dün [y0, today0) ve dünün haftası (pazartesi 00:00) — hafta kartı bugüne kadar (today0)."""
     tzinfo = timezone(timedelta(minutes=tz_min))
-    local = datetime.fromtimestamp(now, tzinfo)
-    this_monday = (local - timedelta(days=local.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
-    return int((this_monday - timedelta(days=7)).timestamp()), int(this_monday.timestamp())
+    today = datetime.fromtimestamp(now, tzinfo).replace(hour=0, minute=0, second=0, microsecond=0)
+    yday = today - timedelta(days=1)
+    monday = yday - timedelta(days=yday.weekday())
+    return {"today0": int(today.timestamp()), "y0": int(yday.timestamp()), "week0": int(monday.timestamp()),
+            "week_end": int((monday + timedelta(days=7)).timestamp()), "y_label": yday.strftime("%d.%m.%Y")}
 
 
-@app.get("/api/cron/trello-weekly")
-async def cron_trello_weekly(authorization: str | None = Header(default=None)):
+@app.get("/api/cron/trello-daily")
+async def cron_trello_daily(authorization: str | None = Header(default=None)):
+    """Her gün (Vercel cron): dünün haftası için TEK özet kartı (hafta boyunca her gün güncellenir; pazartesi o haftanın
+    son hali) + kişi kartlarına dünün ayrıntılı etkinliği."""
     secret = (os.environ.get("CRON_SECRET") or "").strip()
     if not secret:
         raise HTTPException(503, "CRON_SECRET tanımlı değil")
     if (authorization or "") != f"Bearer {secret}":
         raise HTTPException(401, "Yetkisiz")
     cfg = await db.get_setting("trello")
-    if not trello.enabled() or not cfg or not cfg.get("summary_list_id") or not cfg.get("auto_weekly"):
-        return {"ok": True, "skipped": "Trello bağlı değil ya da haftalık aktarım kapalı"}
+    if not trello.enabled() or not cfg or not cfg.get("summary_list_id") or not cfg.get("auto", cfg.get("auto_weekly", True)):
+        return {"ok": True, "skipped": "Trello bağlı değil ya da otomatik aktarım kapalı"}
     team_id = cfg.get("team_id")
     if team_id is not None and not any(t["id"] == team_id for t in await db.list_teams()):
         team_id = None   # seçilen ekip sonradan silinmiş → tüm ekipler
     tz = int(cfg.get("tz") or 0)
-    since, until = _last_week_bounds(int(time.time()), tz)
+    b = _daily_bounds(int(time.time()), tz)
     try:
-        return await _trello_sync_perf(cfg, since, until, team_id, tz)
+        return await _trello_sync_perf(
+            cfg, b["week0"], b["today0"], team_id, tz, summary_ref=f"perf:week:{b['week0']}:{team_id or 0}",
+            name_period="Hafta " + trello.period_label(b["week0"], b["week_end"], tz),
+            note=f"**Durum:** {b['y_label']} sonu itibarıyla — hafta boyunca her sabah güncellenir.",
+            day=(b["y0"], b["today0"], b["y_label"]))
     except trello.TrelloError as e:
         raise _trello_http(e)
 

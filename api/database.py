@@ -781,6 +781,30 @@ async def team_performance_raw(since: int, until: int) -> dict:
             "solutions": solutions, "last_active": last}
 
 
+async def activity_detail(since: int, until: int) -> dict:
+    """Trello aktarımı (yalnızca owner): [since, until) aralığında KİMİN NE YAPTIĞI — keyword/karar/liste/ders/başlık
+    adlarıyla. Her satırda user_id + zaman (ts); kişi süzmesi çağıranda."""
+    rng = (since, until)
+    return {
+        "analyses": await fetch_all("SELECT user_id, keyword, marketplace, verdict, queried_at AS ts FROM user_query_log "
+                                    "WHERE queried_at >= ? AND queried_at < ? ORDER BY queried_at", rng),
+        "decisions": await fetch_all("SELECT user_id, keyword, marketplace, decision, decided_at AS ts FROM market_decision "
+                                     "WHERE decided_at >= ? AND decided_at < ? ORDER BY decided_at", rng),
+        "lists_started": await fetch_all("SELECT user_id, analysis_key, marketplace, created_at AS ts FROM checklists "
+                                         "WHERE created_at >= ? AND created_at < ? ORDER BY created_at", rng),
+        "lists_approved": await fetch_all("SELECT user_id, analysis_key, marketplace, locked_at AS ts FROM checklists "
+                                          "WHERE status = 'locked' AND locked_at >= ? AND locked_at < ? ORDER BY locked_at", rng),
+        "lessons": await fetch_all("SELECT c.user_id, l.title, c.completed_at AS ts FROM training_completions c "
+                                   "JOIN training_lessons l ON l.id = c.lesson_id "
+                                   "WHERE c.completed_at >= ? AND c.completed_at < ? ORDER BY c.completed_at", rng),
+        "threads": await fetch_all("SELECT user_id, id AS thread_id, title, kind, created_at AS ts FROM forum_threads "
+                                   "WHERE created_at >= ? AND created_at < ? ORDER BY created_at", rng),
+        "replies": await fetch_all("SELECT r.user_id, t.id AS thread_id, t.title, r.created_at AS ts FROM forum_replies r "
+                                   "JOIN forum_threads t ON t.id = r.thread_id "
+                                   "WHERE r.created_at >= ? AND r.created_at < ? ORDER BY r.created_at", rng),
+    }
+
+
 # ---------------------------------------------------------------------------
 # SIGNAL ENGINE / PROOF / SERTİFİKA
 # ---------------------------------------------------------------------------
