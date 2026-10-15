@@ -19,7 +19,7 @@ import time
 import json
 import hashlib
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
 # Vercel'in Python runtime'ı bu dosyayı importlib ile dosya-yolu üzerinden
@@ -70,6 +70,7 @@ import base64
 import binascii
 import excel_export
 import team_perf
+import trello
 import supplier_scoring as sup
 import launch_control as lc
 
@@ -3325,6 +3326,182 @@ async def cron_weekly_digest(authorization: str | None = Header(default=None)):
     return {"ok": True, "sent": len(msgs)}
 
 
+# ---------------------------------------------------------------------------
+# TRELLO — panelden Trello'ya tek yönlü aktarım (yalnızca owner). Ayrıntı: api/trello.py
+# ---------------------------------------------------------------------------
+TRELLO_ID_RE = re.compile(r"^[0-9a-fA-F]{24}$")
+TRELLO_SYNC_CONCURRENCY = 4   # Trello sınırı: belirteç başına 10 sn'de 100 istek
+
+
+def _trello_http(e: "trello.TrelloError") -> HTTPException:
+    if e.status in (401, 403):
+        return HTTPException(502, "Trello anahtarı ya da izin kodu geçersiz/yetkisiz — Vercel'deki TRELLO_API_KEY ve "
+                                  "TRELLO_TOKEN değerlerini kontrol edin")
+    if e.status == 503:
+        return HTTPException(503, str(e))
+    return HTTPException(502, f"Trello hatası: {e}")
+
+
+def _trello_id(v: str | None, what: str) -> str | None:
+    if v in (None, ""):
+        return None
+    if not TRELLO_ID_RE.match(v):
+        raise HTTPException(422, f"Geçersiz Trello {what}")
+    return v
+
+
+@app.get("/api/trello/status")
+async def trello_status(user: dict = Depends(require_owner)):
+    return {"enabled": trello.enabled(), "settings": await db.get_setting("trello") or {}}
+
+
+@app.get("/api/trello/boards")
+async def trello_boards(user: dict = Depends(require_owner)):
+    try:
+        return {"boards": await trello.boards()}
+    except trello.TrelloError as e:
+        raise _trello_http(e)
+
+
+@app.get("/api/trello/boards/{board_id}/lists")
+async def trello_lists(board_id: str, user: dict = Depends(require_owner)):
+    _trello_id(board_id, "pano kimliği")
+    try:
+        return {"lists": await trello.lists(board_id)}
+    except trello.TrelloError as e:
+        raise _trello_http(e)
+
+
+class TrelloSettingsIn(BaseModel):
+    board_id: str = Field(..., max_length=40)
+    summary_list_id: str = Field(..., max_length=40)
+    people_list_id: str | None = Field(None, max_length=40)
+    auto_weekly: bool = True
+    team_id: int | None = Field(None, ge=1)
+    tz: int = Field(180, ge=-840, le=840)
+
+
+@app.put("/api/trello/settings")
+async def trello_settings(req: TrelloSettingsIn, user: dict = Depends(require_owner)):
+    board_id = _trello_id(req.board_id, "pano kimliği")
+    summary = _trello_id(req.summary_list_id, "liste kimliği")
+    people = _trello_id(req.people_list_id, "liste kimliği")
+    if req.team_id is not None:
+        await _team_or_404(req.team_id)
+    try:   # pano erişilebilir mi, listeler bu panonun mu — sunucuda doğrula
+        board = next((b for b in await trello.boards() if b["id"] == board_id), None)
+        if not board:
+            raise HTTPException(422, "Bu pano bağlı Trello hesabında bulunamadı")
+        lists = {l["id"]: l["name"] for l in await trello.lists(board_id)}
+    except trello.TrelloError as e:
+        raise _trello_http(e)
+    if summary not in lists or (people and people not in lists):
+        raise HTTPException(422, "Seçilen liste bu panoda bulunamadı")
+    old = await db.get_setting("trello") or {}
+    cfg = {"board_id": board_id, "board_name": board["name"], "board_url": board.get("url"),
+           "summary_list_id": summary, "summary_list_name": lists[summary],
+           "people_list_id": people, "people_list_name": lists.get(people) if people else None,
+           "auto_weekly": req.auto_weekly, "team_id": req.team_id, "tz": req.tz,
+           "updated_by": user["user_id"], "last_sync": old.get("last_sync")}
+    await db.set_setting("trello", cfg)
+    return {"ok": True, "settings": cfg}
+
+
+async def _trello_sync_perf(cfg: dict, since: int, until: int, team_id: int | None, tz: int) -> dict:
+    data = await _perf_data(since, until, team_id, tz)
+    team_label = "Tüm ekipler"
+    if team_id is not None:
+        team_label = next((t["label"] for t in await db.list_teams() if t["id"] == team_id), team_label)
+    period = trello.period_label(since, until, tz)
+    panel_url = mailer.link("/#perf") if mailer.base_url() else "Panel → Ekip Performansı"
+    ref = f"perf:{since}:{until}:{team_id or 0}"
+    prev = await db.trello_card(ref)
+    name, desc = trello.render_summary(data, team_label, period, panel_url)
+    card = await trello.upsert_card(prev["card_id"] if prev else None, cfg["summary_list_id"], name, desc)
+    await db.set_trello_card(ref, card["id"])
+    people_done, errors = 0, []
+    if cfg.get("people_list_id"):
+        sem = asyncio.Semaphore(TRELLO_SYNC_CONCURRENCY)
+        period_key = f"{since}:{until}"
+
+        async def one(x):
+            nonlocal people_done
+            async with sem:
+                pref = f"person:{x['user_id']}"
+                ex = await db.trello_card(pref)
+                pname, pdesc, note = trello.render_person(x, period, panel_url)
+                try:
+                    c = await trello.upsert_card(ex["card_id"] if ex else None, cfg["people_list_id"], pname, pdesc)
+                    meta = {} if (not ex or c["created"]) else dict(ex["meta"])
+                    if meta.get("last_period") != period_key:   # her YENİ dönem için karta bir satır geçmiş
+                        await trello.comment(c["id"], note)
+                        meta["last_period"] = period_key
+                    await db.set_trello_card(pref, c["id"], meta)
+                    people_done += 1
+                except trello.TrelloError as e:
+                    errors.append(f"{x['name']}: {e}")
+
+        await asyncio.gather(*(one(x) for x in data["people"]))
+    cfg = {**cfg, "last_sync": {"at": int(time.time()), "period": period, "team": team_label, "card_url": card["url"],
+                                "people": people_done, "errors": len(errors)}}
+    await db.set_setting("trello", cfg)
+    if errors:
+        print(f"[trello] kişi kartı hataları: {errors[:5]}", flush=True)
+    return {"ok": True, "card_url": card["url"], "card_created": card["created"], "people": people_done,
+            "people_errors": errors[:5], "period": period, "team": team_label}
+
+
+class TrelloSyncIn(BaseModel):
+    since: int = Field(..., ge=0)
+    until: int = Field(..., ge=1)
+    team_id: int | None = Field(None, ge=1)
+    tz: int = Field(0, ge=-840, le=840)
+
+
+@app.post("/api/trello/sync/performance")
+async def trello_sync_performance(req: TrelloSyncIn, user: dict = Depends(require_owner)):
+    cfg = await db.get_setting("trello")
+    if not cfg or not cfg.get("summary_list_id"):
+        raise HTTPException(409, "Önce Trello panosu ve listesi seçilmeli")
+    if req.until <= req.since or req.until - req.since > team_perf.MAX_RANGE_DAYS * 86400:
+        raise HTTPException(422, f"Geçersiz tarih aralığı (en fazla {team_perf.MAX_RANGE_DAYS} gün)")
+    if req.team_id is not None:
+        await _team_or_404(req.team_id)
+    try:
+        return await _trello_sync_perf(cfg, req.since, req.until, req.team_id, req.tz)
+    except trello.TrelloError as e:
+        raise _trello_http(e)
+
+
+def _last_week_bounds(now: int, tz_min: int) -> tuple[int, int]:
+    """Kaydedilen saat diliminde GEÇEN haftanın pazartesi 00:00 – bu pazartesi 00:00 aralığı."""
+    tzinfo = timezone(timedelta(minutes=tz_min))
+    local = datetime.fromtimestamp(now, tzinfo)
+    this_monday = (local - timedelta(days=local.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+    return int((this_monday - timedelta(days=7)).timestamp()), int(this_monday.timestamp())
+
+
+@app.get("/api/cron/trello-weekly")
+async def cron_trello_weekly(authorization: str | None = Header(default=None)):
+    secret = (os.environ.get("CRON_SECRET") or "").strip()
+    if not secret:
+        raise HTTPException(503, "CRON_SECRET tanımlı değil")
+    if (authorization or "") != f"Bearer {secret}":
+        raise HTTPException(401, "Yetkisiz")
+    cfg = await db.get_setting("trello")
+    if not trello.enabled() or not cfg or not cfg.get("summary_list_id") or not cfg.get("auto_weekly"):
+        return {"ok": True, "skipped": "Trello bağlı değil ya da haftalık aktarım kapalı"}
+    team_id = cfg.get("team_id")
+    if team_id is not None and not any(t["id"] == team_id for t in await db.list_teams()):
+        team_id = None   # seçilen ekip sonradan silinmiş → tüm ekipler
+    tz = int(cfg.get("tz") or 0)
+    since, until = _last_week_bounds(int(time.time()), tz)
+    try:
+        return await _trello_sync_perf(cfg, since, until, team_id, tz)
+    except trello.TrelloError as e:
+        raise _trello_http(e)
+
+
 class CategoryIn(BaseModel):
     name: str | None = Field(None, max_length=200)
     sort_order: int | None = Field(None, ge=0, le=100000)
@@ -4250,6 +4427,11 @@ async def team_performance(since: int = Query(..., ge=0), until: int = Query(...
         raise HTTPException(422, f"Geçersiz tarih aralığı (en fazla {team_perf.MAX_RANGE_DAYS} gün)")
     if team_id is not None:
         await _team_or_404(team_id)
+    return await _perf_data(since, until, team_id, tz)
+
+
+async def _perf_data(since: int, until: int, team_id: int | None, tz: int) -> dict:
+    """Ekip Performansı verisi — panel ve Trello aktarımı AYNI hesabı kullanır."""
     members = await db.team_member_ids(team_id)
     users = [u for u in await db.list_users() if u["id"] in members]
     teams = await db.list_teams()
