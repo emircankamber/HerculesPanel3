@@ -434,30 +434,45 @@ yüzden backend'e hiç bağlanmamalı, sahte veri olur.
   ritim ısı haritası (gün × saat), karar karışımı, Spot ışığı, İlgi gerekiyor, sıralanabilir kişi tablosu (sparkline) ve
   kişi yan paneli (son kayıtlar `/api/team/activity?user_id=`; kayda tıklamak `runAnalysis`, 72 saat önbellek kuralı).
 
-## Trello aktarımı (`api/trello.py` + `/api/trello/*`, yalnızca owner — TEK YÖNLÜ: panel → Trello)
+## Trello aktarımı (`api/trello.py` + `api/png_chart.py` + `/api/trello/*`, yalnızca owner — TEK YÖNLÜ: panel → Trello)
 
-- **Ortam değişkenleri (istek anında):** `TRELLO_API_KEY`, `TRELLO_TOKEN` (trello.com/power-ups/admin → entegrasyon → API key +
-  Token, read/write). Yoksa entegrasyon kapalı; panel kurulum adımlarını gösterir. Kimlik bilgisi URL'ye DEĞİL
-  `Authorization: OAuth oauth_consumer_key=…, oauth_token=…` başlığına yazılır. Kartlar token sahibinin adına açılır.
-- **Ayar** `app_settings.trello` (owner panelden: pano, özet listesi, isteğe bağlı kişi listesi, haftalık otomatik aktarım,
-  ekip, saat dilimi). `PUT /api/trello/settings` pano/listeleri Trello'dan çekip SUNUCUDA doğrular (başka panonun listesi 422).
-- **Ne gider (şu an yalnızca Ekip Performansı):** `_perf_data` (panelle AYNI hesap) + `db.activity_detail` (KİM NE YAPTI:
-  analiz edilen keyword'ler + ön öneri, kararlar, başlatılan/onaylanan kontrol listeleri, tamamlanan dersler, forum
-  başlık/cevapları — `trello.activity_lines`, aynı öğe ×N ile toplanır, kategori başına ≤12). Özet kartı: KPI + önceki
-  döneme göre değişim, ürün hattı, ilgi gerektirenler, kişi satırları ve "Kim ne yaptı". Kişi kartları: kişi başına TEK
-  kalıcı kart (açıklama = dönem sayıları + "Bu dönemde neler yaptı"). Eşleşme `trello_cards (ref → card_id, meta_json)`;
-  Trello'da silinen kart (404) yeniden açılır. Kullanıcı metni `trello.md()` ile Markdown'dan kaçırılır.
-- **Grafik:** her kartın KAPAĞI son 30 günün günlük analiz/karar/forum yığılmış çubuk grafiği (`png_chart.py` — saf
-  Python PNG, Pillow YOK; grafikte yalnızca rakam/tarih, renk açıklaması kart metninde). Yeni grafik ek olarak yüklenip
-  kapak yapılır, öncekisi silinir (`meta.cover`). Grafik yüklenemezse metin yine gider (hata loglanır).
-- **Tetik:** (1) Vercel cron `GET /api/cron/trello-daily` HER GÜN 06:10 UTC (`CRON_SECRET`, ayar `auto`; eski kayıtlarda
-  `auto_weekly` okunur): kayıtlı saat diliminde DÜNÜN haftası için TEK özet kartı (`perf:week:<pazartesi>:<ekip>`, hafta
-  boyunca her gün güncellenir, pazartesi o haftanın son hali) + kişi kartlarına DÜNÜN ayrıntısı yorum olarak (etkinlik
-  yoksa yorum yok; aynı gün ikinci çalışmada tekrar yok — `meta.last_day`). (2) Ekip Performansı → "Trello" → "Seçili dönemi
-  şimdi gönder" (`POST /api/trello/sync/performance`): seçili dönem kartı + kişi kartına dönem özeti yorumu (`meta.last_period`).
-  Kart bağlantısı `APP_BASE_URL/#perf` (owner'da Ekip Performansı'nı açar). 401/403 → okunur 502 ("anahtar/izin geçersiz").
-  Trello 429'da bir kez 2 sn bekleyip yeniden dener; kişi kartları 3 eşzamanlı.
-- Test: `trello.httpx.AsyncClient`'ı `httpx.MockTransport`'lu istemciyle değiştir (gerçek Trello'ya gitme).
+- **Ortam değişkenleri (istek anında):** `TRELLO_API_KEY`, `TRELLO_TOKEN` (trello.com/power-ups/admin → entegrasyon →
+  **Trello Auth** → API key + "Token" bağlantısı; OAuth 2.0 bölümü KULLANILMAZ). Yoksa entegrasyon kapalı; panel kurulum
+  adımlarını gösterir. Kimlik bilgisi URL'ye DEĞİL `Authorization: OAuth oauth_consumer_key=…, oauth_token=…` başlığına.
+  Kartlar token sahibinin adına açılır.
+- **Ayar** `app_settings.trello` (Ekip Performansı → "Trello"): pano, özet listesi, kişi listesi (isteğe bağlı), `auto`
+  (her sabah; eski kayıtlarda `auto_weekly` okunur), `monthly`, `custom_fields`, otomatik aktarım ekibi, saat dilimi,
+  `members` {panel kullanıcı id → Trello üye id}. `PUT /api/trello/settings` pano/listeleri/üyeleri Trello'dan çekip
+  SUNUCUDA doğrular (başka panonun listesi/üyesi 422). `GET /api/trello/boards/{id}/members` = pano üyeleri + ekipteki
+  kişiler + ada göre öneri (`trello.suggest_members`: aksansız, harf duyarsız TAM eşleşme, yalnızca tek aday).
+- **Veri:** `_perf_data` (panelle AYNI hesap) + `db.activity_detail` (KİM NE YAPTI: keyword'ler + ön öneri, kararlar,
+  başlatılan/onaylanan kontrol listeleri, tamamlanan dersler, forum başlık/cevapları — `trello.activity_lines`, aynı öğe ×N,
+  kategori başına ≤12). Kullanıcı metni `trello.md()` ile Markdown'dan kaçırılır. Uydurma puan/hedef YOK.
+- **Özet kartı** (haftalık `perf:week:<pazartesi>:<ekip>` / aylık `perf:month:<ay başı>:<ekip>` / elle `perf:<since>:<until>:<ekip>`):
+  kapak = `trello.team_dashboard` (KPI kutuları + önceki döneme göre ▲▼, son 30 gün yığılmış çubuk, kişi bazında etkinlik,
+  karar dağılımı, ürün hattı); açıklama = özet, **Öne çıkanlar** (`trello.highlights` — gerçek sayılar, eşitlikte "+N kişi"),
+  ilgi gerekiyor, kişi satırları, kim ne yaptı; etiket "Ekip özeti" (+ "Aylık rapor"); **"Aksiyon listesi"** kontrol listesi
+  (`trello.action_items`, yalnızca EKSİK madde eklenir — Trello'da işaretlenenler korunur).
+- **Kişi kartı** (`person:<id>`, kişi başına TEK kalıcı): kapak = `trello.person_dashboard`; durum etiketi Aktif (yeşil) /
+  Sessiz (sarı) / İlgi gerekiyor (kırmızı) — `sync_labels` yalnızca BİZİM etiketlerimizi değiştirir, elle eklenen kalır;
+  sayısal özel alanlar (Analiz, Karar, Aktif gün — kartın yüzünde; yalnızca DEĞİŞEN değer yazılır, `meta.cf`); eşleşen
+  Trello üyesi karta atanır (`ensure_member`; eşleşme değişirse eskisi çıkarılır, diğer üyelere dokunulmaz) → günlük
+  yorumlar ona Trello bildirimi olarak gider.
+- **Görseller** `png_chart.py`: saf Python PNG (Pillow YOK — Vercel paket boyutu), 5×7 bit eşlem yazı tipi (BÜYÜK harf,
+  Türkçe Ç Ğ İ Ö Ş Ü, `up()` Türkçe büyütme; bilinmeyen harf aksansız/"?"). Yeni görsel ek olarak yüklenip kapak yapılır,
+  öncekisi silinir (`meta.cover`). Görseli değiştirince `scratchpad`ta örnek veriyle çizip GÖZLE kontrol et.
+- **Dayanıklılık:** ad + açıklama ZORUNLU adım (başarısızsa kişi hatası); etiket/özel alan/üye/görsel/kontrol listesi/yorum
+  `best_effort` — Trello hatası ya da beklenmeyen yanıt (KeyError/TypeError/ValueError) aktarımı DÜŞÜRMEZ, `warnings` ve
+  `last_sync.error_samples`'a yazılır (panelde "N uyarı" açılır listesi). İstekler arası en az `MIN_INTERVAL`=0,12 sn
+  (≈8/sn; Trello sınırı 10 sn'de 100), 429'da artan beklemeyle 2 kez daha denenir; kişi kartları 3 eşzamanlı.
+- **Tetik:** (1) Vercel cron `GET /api/cron/trello-daily` HER GÜN 06:10 UTC (`CRON_SECRET`): kayıtlı saat diliminde DÜNÜN
+  haftası için tek özet kartı (hafta boyunca güncellenir, pazartesi son hali) + kişi kartlarına DÜNÜN ayrıntısı yorum
+  (etkinlik yoksa yok; aynı gün tekrar yok — `meta.last_day`; yorum başarısızsa ertesi çalışmada yeniden). Ayın 1'inde
+  (`monthly`) ayrıca geçen ayın "Aylık Rapor" özet kartı (kişi kartlarına dokunmaz). (2) "Seçili dönemi şimdi gönder"
+  (`POST /api/trello/sync/performance`): seçili dönem kartı + kişi kartına dönem özeti yorumu (`meta.last_period`).
+  Kart bağlantısı `APP_BASE_URL/#perf`. 401/403 → okunur 502 ("anahtar/izin geçersiz").
+- Test: `trello.httpx.AsyncClient`'ı `httpx.MockTransport`'lu istemciyle değiştir, `trello.MIN_INTERVAL = 0` (gerçek
+  Trello'ya gitme). Sahte Trello etiket/özel alan/kontrol listesi/üye uçlarını da taklit etmeli.
 
 ## Ad Soyad, Profil & Yetkinlik Formu
 

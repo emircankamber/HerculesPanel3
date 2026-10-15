@@ -6117,17 +6117,27 @@ async function trRenderForm() {
   const boards = trState.boards || [];
   const boardId = cfg.board_id && boards.some(b => b.id === cfg.board_id) ? cfg.board_id : (boards[0] || {}).id || "";
   const ls = cfg.last_sync;
+  const chk = (id, on, text, hint = "") => `<label class="flex items-start gap-2 text-sm"><input type="checkbox" id="${id}" class="mt-1" ${on ? "checked" : ""}><span>${text}${hint ? `<span class="block text-xs text-secondary">${hint}</span>` : ""}</span></label>`;
   $("#tr-body").innerHTML = `
     ${boards.length ? "" : `<div class="status-line error">Bağlı Trello hesabında açık pano yok — önce Trello'da bir pano oluşturun.</div>`}
+    <div class="text-xs font-semibold uppercase tracking-wide text-secondary">Nereye</div>
     <label class="flex flex-col gap-1 text-sm">Pano<select id="tr-board" class="field">${boards.map(b => `<option value="${esc(b.id)}" ${b.id === boardId ? "selected" : ""}>${esc(b.name)}</option>`).join("")}</select></label>
-    <label class="flex flex-col gap-1 text-sm">Dönem özeti kartları hangi listeye?<select id="tr-summary" class="field"></select></label>
-    <label class="flex flex-col gap-1 text-sm">Kişi kartları hangi listeye? <span class="text-xs text-secondary">Her kişiye tek kart; her yeni dönemde güncellenir ve karta bir satırlık geçmiş eklenir.</span><select id="tr-people" class="field"></select></label>
+    <label class="flex flex-col gap-1 text-sm">Özet kartları (haftalık / aylık / elle) hangi listeye?<select id="tr-summary" class="field"></select></label>
+    <label class="flex flex-col gap-1 text-sm">Kişi kartları hangi listeye?<span class="text-xs text-secondary">Her kişiye tek kalıcı kart: kapakta kişisel performans panosu, durum etiketi, kartın yüzünde sayılar, günlük ayrıntı yorumları.</span><select id="tr-people" class="field"></select></label>
+    <div class="text-xs font-semibold uppercase tracking-wide text-secondary mt-1">Ne zaman</div>
+    ${chk("tr-auto", (cfg.auto ?? cfg.auto_weekly) !== false, "Her sabah otomatik aktar", "Haftanın özet kartı güncellenir; kişi kartlarına dünün ayrıntısı yorum olarak eklenir.")}
+    ${chk("tr-monthly", cfg.monthly !== false, "Her ayın 1'inde aylık rapor kartı", "Geçen ayın tamamı için ayrı bir özet kartı (\"Aylık rapor\" etiketiyle).")}
     <label class="flex flex-col gap-1 text-sm">Otomatik aktarımda ekip<select id="tr-team" class="field">${$("#tp-team").innerHTML}</select></label>
-    <label class="flex items-start gap-2 text-sm"><input type="checkbox" id="tr-auto" class="mt-1" ${(cfg.auto ?? cfg.auto_weekly) === false ? "" : "checked"}><span>Her sabah otomatik aktar — haftanın özet kartı güncellenir, kişi kartlarına dünün ayrıntısı yorum olarak eklenir</span></label>
-    <div class="flex flex-wrap gap-2"><button type="button" id="tr-save" class="btn btn-primary">Kaydet</button>
+    <div class="text-xs font-semibold uppercase tracking-wide text-secondary mt-1">Kişi kartları</div>
+    ${chk("tr-cf", cfg.custom_fields !== false, "Kartın yüzünde sayılar (Analiz · Karar · Aktif gün)", "Trello özel alanları olarak eklenir; pano görünümünde kartı açmadan okunur.")}
+    <div class="flex flex-col gap-2">
+      <div class="text-sm">Kişi ↔ Trello üyesi <span class="text-xs text-secondary block">Eşleşen üye kendi kartına atanır; günlük yorumlar ona Trello bildirimi olarak da gider. Ad birebir tutanlar önerildi — kontrol edip kaydedin.</span></div>
+      <div id="tr-members" class="flex flex-col gap-1.5 max-h-64 overflow-y-auto pr-1"><div class="status-line loading">yükleniyor…</div></div>
+    </div>
+    <div class="flex flex-wrap gap-2 border-t border-hairline pt-4"><button type="button" id="tr-save" class="btn btn-primary">Kaydet</button>
       <button type="button" id="tr-send" class="btn btn-outline" ${cfg.summary_list_id ? "" : "disabled"}><span class="material-symbols-outlined">send</span>Seçili dönemi şimdi gönder</button></div>
     <div id="tr-msg" class="text-xs"></div>
-    ${ls ? `<div class="text-xs text-secondary border-t border-hairline pt-3">Son aktarım: ${esc(new Date(ls.at * 1000).toLocaleString("tr-TR"))} · ${esc(ls.period)} · ${esc(ls.team)} · ${esc(ls.people)} kişi kartı${ls.errors ? ` · <span class="text-error">${esc(ls.errors)} kişi kartı gönderilemedi</span>` : ""}${ls.card_url && /^https:\/\/trello\.com\//.test(ls.card_url) ? ` · <a class="text-primary underline" href="${esc(ls.card_url)}" target="_blank" rel="noopener noreferrer">kartı aç</a>` : ""}</div>` : ""}`;
+    ${ls ? `<div class="text-xs text-secondary border-t border-hairline pt-3">Son aktarım${ls.auto ? " (otomatik)" : ""}${ls.monthly ? " — aylık rapor" : ""}: ${esc(new Date(ls.at * 1000).toLocaleString("tr-TR"))} · ${esc(ls.period)} · ${esc(ls.team)} · ${esc(ls.people)} kişi kartı${ls.card_url && /^https:\/\/trello\.com\//.test(ls.card_url) ? ` · <a class="text-primary underline" href="${esc(ls.card_url)}" target="_blank" rel="noopener noreferrer">kartı aç</a>` : ""}${ls.errors ? `<details class="mt-1"><summary class="text-error cursor-pointer">${esc(ls.errors)} uyarı (kartlar gitti, bazı ekler/ayrıntılar eksik)</summary><ul class="list-disc pl-5 mt-1">${(ls.error_samples || []).map(e => `<li>${esc(e)}</li>`).join("")}</ul></details>` : ""}</div>` : ""}`;
   $("#tr-team").value = cfg.team_id ? String(cfg.team_id) : "";
   const fillLists = async () => {
     const lists = await trLoadLists($("#tr-board").value).catch(err => { $("#tr-msg").textContent = `Hata: ${err.message}`; return []; });
@@ -6135,8 +6145,25 @@ async function trRenderForm() {
     $("#tr-summary").innerHTML = opt(cfg.summary_list_id);
     $("#tr-people").innerHTML = `<option value="">Kişi kartı açma</option>` + opt(cfg.people_list_id);
   };
-  $("#tr-board").addEventListener("change", fillLists);
+  const fillMembers = async () => {
+    const box = $("#tr-members"), bid = $("#tr-board").value;
+    if (!bid) { box.innerHTML = ""; return; }
+    try {
+      const d = await pfApi(`/api/trello/boards/${encodeURIComponent(bid)}/members`);
+      const saved = bid === cfg.board_id ? (cfg.members || {}) : {};
+      if (!d.people.length) { box.innerHTML = `<div class="text-xs text-secondary">Ekipte kişi yok.</div>`; return; }
+      box.innerHTML = d.people.map(p => {
+        const cur = saved[String(p.id)] ?? d.suggested[String(p.id)] ?? "";
+        const sug = !saved[String(p.id)] && d.suggested[String(p.id)];
+        return `<div class="flex items-center gap-2 text-sm"><span class="flex-1 min-w-0 truncate">${esc(p.name)}${p.title ? ` <span class="text-xs text-secondary">${esc(p.title)}</span>` : ""}</span>
+          <select class="field !py-1 text-sm max-w-[55%]" data-uid="${esc(p.id)}"><option value="">— eşleştirme yok —</option>${d.members.map(m => `<option value="${esc(m.id)}" ${m.id === cur ? "selected" : ""}>${esc(m.name)}${m.username ? ` (@${esc(m.username)})` : ""}</option>`).join("")}</select>
+          ${sug ? `<span class="chip ok" title="Ada göre önerildi">öneri</span>` : ""}</div>`;
+      }).join("");
+    } catch (err) { box.innerHTML = `<div class="text-xs text-error">Üyeler alınamadı: ${esc(err.message)}</div>`; }
+  };
+  $("#tr-board").addEventListener("change", () => { fillLists(); fillMembers(); });
   await fillLists();
+  fillMembers();
   $("#tr-save").addEventListener("click", trSave);
   $("#tr-send").addEventListener("click", trSend);
 }
@@ -6144,11 +6171,14 @@ async function trSave() {
   const msg = $("#tr-msg"); msg.className = "text-xs"; msg.textContent = "kaydediliyor…";
   try {
     const team = $("#tr-team").value;
+    const members = {};
+    $$("#tr-members select[data-uid]").forEach(s => { if (s.value) members[s.dataset.uid] = s.value; });
     const r = await pfApi("/api/trello/settings", { method: "PUT", body: JSON.stringify({
       board_id: $("#tr-board").value, summary_list_id: $("#tr-summary").value, people_list_id: $("#tr-people").value || null,
-      auto: $("#tr-auto").checked, team_id: team ? Number(team) : null, tz: -new Date().getTimezoneOffset() }) });
+      auto: $("#tr-auto").checked, monthly: $("#tr-monthly").checked, custom_fields: $("#tr-cf").checked,
+      team_id: team ? Number(team) : null, tz: -new Date().getTimezoneOffset(), members }) });
     trState.status.settings = r.settings;
-    msg.className = "text-xs text-primary"; msg.textContent = "Kaydedildi.";
+    msg.className = "text-xs text-primary"; msg.textContent = `Kaydedildi${Object.keys(members).length ? ` · ${Object.keys(members).length} kişi Trello üyesiyle eşleşti` : ""}.`;
     $("#tr-send").disabled = false;
   } catch (err) { msg.className = "text-xs text-error"; msg.textContent = `Hata: ${err.message}`; }
 }
@@ -6163,9 +6193,12 @@ async function trSend() {
       since: rng.since, until: rng.until, team_id: team ? Number(team) : null, tz: -new Date().getTimezoneOffset() }) });
     msg.className = "text-xs text-primary";
     msg.innerHTML = `${r.card_created ? "Kart oluşturuldu" : "Kart güncellendi"} (${esc(r.period)} · ${esc(r.team)})${r.people ? ` · ${esc(r.people)} kişi kartı` : ""}` +
-      (r.people_errors && r.people_errors.length ? ` · <span class="text-error">${esc(r.people_errors.length)} kişi kartı gönderilemedi</span>` : "") +
+      (r.warnings ? ` · <span class="text-error">${esc(r.warnings)} uyarı — ayrıntı aşağıda</span>` : "") +
       (/^https:\/\/trello\.com\//.test(r.card_url || "") ? ` · <a class="text-primary underline" href="${esc(r.card_url)}" target="_blank" rel="noopener noreferrer">Trello'da aç</a>` : "");
     trState.status = await pfApi("/api/trello/status");
+    const keep = msg.innerHTML;
+    await trRenderForm();
+    $("#tr-msg").className = "text-xs text-primary"; $("#tr-msg").innerHTML = keep;
   } catch (err) { msg.className = "text-xs text-error"; msg.textContent = `Hata: ${err.message}`; }
-  finally { btn.disabled = false; }
+  finally { const b = $("#tr-send"); if (b) b.disabled = false; }
 }

@@ -3372,13 +3372,31 @@ async def trello_lists(board_id: str, user: dict = Depends(require_owner)):
         raise _trello_http(e)
 
 
+@app.get("/api/trello/boards/{board_id}/members")
+async def trello_members(board_id: str, user: dict = Depends(require_owner)):
+    """Panodaki Trello üyeleri + ekipteki panel kişileri + ada göre öneri (kişi ↔ Trello üyesi eşleştirmesi için)."""
+    _trello_id(board_id, "pano kimliği")
+    try:
+        members = await trello.members(board_id)
+    except trello.TrelloError as e:
+        raise _trello_http(e)
+    in_team = await db.team_member_ids(None)
+    people = [{"id": u["id"], "name": db.display_name(u), "title": u.get("title") or ""}
+              for u in await db.list_users() if u["id"] in in_team]
+    people.sort(key=lambda p: p["name"].lower())
+    return {"members": members, "people": people, "suggested": trello.suggest_members(people, members)}
+
+
 class TrelloSettingsIn(BaseModel):
     board_id: str = Field(..., max_length=40)
     summary_list_id: str = Field(..., max_length=40)
     people_list_id: str | None = Field(None, max_length=40)
     auto: bool = True
+    monthly: bool = True
+    custom_fields: bool = True
     team_id: int | None = Field(None, ge=1)
     tz: int = Field(180, ge=-840, le=840)
+    members: dict[str, str] = Field(default_factory=dict)   # panel kullanıcı id → Trello üye id
 
 
 @app.put("/api/trello/settings")
@@ -3397,11 +3415,26 @@ async def trello_settings(req: TrelloSettingsIn, user: dict = Depends(require_ow
         raise _trello_http(e)
     if summary not in lists or (people and people not in lists):
         raise HTTPException(422, "Seçilen liste bu panoda bulunamadı")
+    member_map = {}
+    if req.members:
+        if len(req.members) > 500:
+            raise HTTPException(422, "Çok fazla eşleştirme")
+        try:
+            board_members = {m["id"] for m in await trello.members(board_id)}
+        except trello.TrelloError as e:
+            raise _trello_http(e)
+        for uid, mid in req.members.items():
+            if not mid:
+                continue
+            if not str(uid).isdigit() or mid not in board_members:
+                raise HTTPException(422, "Eşleştirilen Trello üyesi bu panoda değil")
+            member_map[str(int(uid))] = mid
     old = await db.get_setting("trello") or {}
     cfg = {"board_id": board_id, "board_name": board["name"], "board_url": board.get("url"),
            "summary_list_id": summary, "summary_list_name": lists[summary],
            "people_list_id": people, "people_list_name": lists.get(people) if people else None,
-           "auto": req.auto, "team_id": req.team_id, "tz": req.tz,
+           "auto": req.auto, "monthly": req.monthly, "custom_fields": req.custom_fields,
+           "team_id": req.team_id, "tz": req.tz, "members": member_map,
            "updated_by": user["user_id"], "last_sync": old.get("last_sync")}
     await db.set_setting("trello", cfg)
     return {"ok": True, "settings": cfg}
@@ -3409,10 +3442,12 @@ async def trello_settings(req: TrelloSettingsIn, user: dict = Depends(require_ow
 
 async def _trello_sync_perf(cfg: dict, since: int, until: int, team_id: int | None, tz: int, *,
                             summary_ref: str | None = None, name_period: str | None = None, note: str | None = None,
-                            day: tuple[int, int, str] | None = None) -> dict:
-    """Ekip Performansı → Trello. Özet kartı + (seçildiyse) kişi kartları; her kartın kapağı son 30 günün grafiği.
-    day=(başlangıç, bitiş, etiket) verilirse (günlük otomatik aktarım) kişi kartına o günün ayrıntılı etkinliği yorum
-    olarak eklenir; verilmezse (elle gönderim) dönem özeti yorumu — ikisi de aynı gün/dönem için bir kez."""
+                            day: tuple[int, int, str] | None = None, people: bool = True,
+                            monthly: bool = False) -> dict:
+    """Ekip Performansı → Trello (ayrıntı: api/trello.py başı).
+    day=(başlangıç, bitiş, etiket): günlük otomatik aktarım — kişi kartına o günün ayrıntısı yorum olarak.
+    day yoksa (elle gönderim): kişi kartına dönem özeti yorumu. people=False: yalnızca özet kartı (aylık rapor).
+    Ad + açıklama ZORUNLU adım; görsel/etiket/üye/alan/kontrol listesi en iyi çaba (hata → errors, aktarım sürer)."""
     data = await _perf_data(since, until, team_id, tz)
     team_label = "Tüm ekipler"
     if team_id is not None:
@@ -3423,57 +3458,106 @@ async def _trello_sync_perf(cfg: dict, since: int, until: int, team_id: int | No
     member_ids = {x["user_id"] for x in data["people"]}
     acts = {uid: trello.person_activity(det, uid, since, until) for uid in member_ids}
     errors: list[str] = []
+    board_id = cfg["board_id"]
 
-    async def cover(card: dict, prev_meta: dict, uids: set[int], label: str) -> dict:
-        meta = {} if card["created"] else dict(prev_meta)
+    async def best_effort(label: str, coro) -> tuple[bool, object]:
         try:
-            meta["cover"] = await trello.set_cover_image(card["id"], trello.daily_chart(det, uids, until, tz),
-                                                         "son-30-gun.png", meta.get("cover"))
-        except trello.TrelloError as e:   # grafik olmasa da metin gitti — aktarımı düşürme
-            errors.append(f"{label} grafiği: {e}")
-        return meta
+            return True, await coro
+        except trello.TrelloError as e:
+            errors.append(f"{label}: {e}")
+        except (KeyError, TypeError, ValueError) as e:   # Trello beklenmedik biçimde yanıt verdi — aktarımı düşürme
+            errors.append(f"{label}: beklenmeyen Trello yanıtı ({type(e).__name__})")
+        return False, None
 
+    wanted = {trello.STATUS_TR[k]: trello.STATUS_COLOR[k] for k in trello.STATUS_TR}
+    wanted.update({trello.LABEL_SUMMARY: "blue", trello.LABEL_MONTH: "purple"})
+    labels = (await best_effort("Etiketler", trello.ensure_labels(board_id, wanted)))[1] or {}
+    status_label_ids = {labels[trello.STATUS_TR[k]] for k in trello.STATUS_TR if trello.STATUS_TR[k] in labels}
+    fields = {}
+    if people and cfg.get("people_list_id") and cfg.get("custom_fields", True):
+        fields = (await best_effort("Özel alanlar", trello.ensure_custom_fields(board_id, trello.CUSTOM_FIELDS)))[1] or {}
+
+    # --- Özet kartı
+    kind = "Aylık Rapor" if monthly else "Ekip Performansı"
     ref = summary_ref or f"perf:{since}:{until}:{team_id or 0}"
     prev = await db.trello_card(ref)
-    name, desc = trello.render_summary(data, team_label, period, panel_url, name_period, acts, note)
-    card = await trello.upsert_card(prev["card_id"] if prev else None, cfg["summary_list_id"], name, desc)
-    await db.set_trello_card(ref, card["id"], await cover(card, prev["meta"] if prev else {}, member_ids, "Özet"))
+    name, desc = trello.render_summary(data, team_label, period, panel_url, name_period, acts, note, kind)
+    want = {labels[n] for n in ([trello.LABEL_SUMMARY] + ([trello.LABEL_MONTH] if monthly else [])) if n in labels}
+    card = await trello.upsert_card(prev["card_id"] if prev else None, cfg["summary_list_id"], name, desc, sorted(want))
+    meta = {} if (card["created"] or not prev) else dict(prev["meta"])
+    if not card["created"]:
+        await best_effort("Özet etiketi", trello.sync_labels(
+            card, {labels[n] for n in (trello.LABEL_SUMMARY, trello.LABEL_MONTH) if n in labels}, want))
+    png = trello.team_dashboard(data, det, member_ids, until, tz, f"{kind} · {team_label}", name_period or period)
+    ok, att = await best_effort("Özet görseli", trello.set_cover_image(card["id"], png, "ekip-performansi.png",
+                                                                      meta.get("cover")))
+    if ok:
+        meta["cover"] = att
+    await best_effort("Aksiyon listesi", trello.ensure_checklist(card["id"], trello.CHECKLIST_NAME,
+                                                                 trello.action_items(data["people"])))
+    await db.set_trello_card(ref, card["id"], meta)
+
+    # --- Kişi kartları
     people_done = 0
-    if cfg.get("people_list_id"):
+    if people and cfg.get("people_list_id"):
         sem = asyncio.Semaphore(TRELLO_SYNC_CONCURRENCY)
         period_key = f"{since}:{until}"
+        member_map = cfg.get("members") or {}
 
         async def one(x):
             nonlocal people_done
             async with sem:
-                pref = f"person:{x['user_id']}"
+                uid = x["user_id"]
+                pref = f"person:{uid}"
                 ex = await db.trello_card(pref)
-                pname, pdesc, pnote = trello.render_person(x, period, panel_url, acts.get(x["user_id"]))
+                pname, pdesc, pnote = trello.render_person(x, period, panel_url, acts.get(uid))
+                st = labels.get(trello.STATUS_TR.get(x["status"], ""))
                 try:
-                    c = await trello.upsert_card(ex["card_id"] if ex else None, cfg["people_list_id"], pname, pdesc)
-                    meta = await cover(c, ex["meta"] if ex else {}, {x["user_id"]}, x["name"])
-                    if day:   # günlük: o günün ayrıntısı (etkinlik yoksa yorum yok)
-                        if meta.get("last_day") != day[0]:
-                            text = trello.day_log(trello.person_activity(det, x["user_id"], day[0], day[1]), day[2])
-                            if text:
-                                await trello.comment(c["id"], text)
-                            meta["last_day"] = day[0]
-                    elif meta.get("last_period") != period_key:
-                        await trello.comment(c["id"], pnote)
-                        meta["last_period"] = period_key
-                    await db.set_trello_card(pref, c["id"], meta)
-                    people_done += 1
+                    c = await trello.upsert_card(ex["card_id"] if ex else None, cfg["people_list_id"], pname, pdesc,
+                                                 [st] if st else None)
                 except trello.TrelloError as e:
                     errors.append(f"{x['name']}: {e}")
+                    return
+                pm = {} if (c["created"] or not ex) else dict(ex["meta"])
+                if not c["created"] and st:
+                    await best_effort(f"{x['name']} etiketi", trello.sync_labels(c, status_label_ids, {st}))
+                mid = member_map.get(str(uid))
+                if (mid or pm.get("member")) and (await best_effort(
+                        f"{x['name']} üye ataması", trello.ensure_member(c, mid, pm.get("member"))))[0]:
+                    pm["member"] = mid
+                if fields:   # yalnızca DEĞİŞEN değerler yazılır (istek tasarrufu)
+                    cf = dict(pm.get("cf") or {})
+                    for fname, v in (("Analiz", x["analyses"]), ("Karar", x["decisions"]), ("Aktif gün", x["active_days"])):
+                        if fname in fields and cf.get(fname) != v and (await best_effort(
+                                f"{x['name']} {fname} alanı", trello.set_number_field(c["id"], fields[fname], v)))[0]:
+                            cf[fname] = v
+                    pm["cf"] = cf
+                ok, att = await best_effort(f"{x['name']} görseli", trello.set_cover_image(
+                    c["id"], trello.person_dashboard(x, det, until, tz, name_period or period), "performans.png",
+                    pm.get("cover")))
+                if ok:
+                    pm["cover"] = att
+                if day:   # günlük: o günün ayrıntısı (etkinlik yoksa yorum yok); başarısızsa ertesi çalışmada yeniden
+                    if pm.get("last_day") != day[0]:
+                        text = trello.day_log(trello.person_activity(det, uid, day[0], day[1]), day[2])
+                        if not text or (await best_effort(f"{x['name']} yorumu", trello.comment(c["id"], text)))[0]:
+                            pm["last_day"] = day[0]
+                elif pm.get("last_period") != period_key and \
+                        (await best_effort(f"{x['name']} yorumu", trello.comment(c["id"], pnote)))[0]:
+                    pm["last_period"] = period_key
+                await db.set_trello_card(pref, c["id"], pm)
+                people_done += 1
 
         await asyncio.gather(*(one(x) for x in data["people"]))
-    cfg = {**cfg, "last_sync": {"at": int(time.time()), "period": period, "team": team_label, "card_url": card["url"],
-                                "people": people_done, "errors": len(errors), "auto": bool(day)}}
+    cfg = {**(await db.get_setting("trello") or cfg),
+           "last_sync": {"at": int(time.time()), "period": period, "team": team_label, "card_url": card["url"],
+                         "people": people_done, "errors": len(errors), "error_samples": errors[:5],
+                         "auto": bool(day), "monthly": monthly}}
     await db.set_setting("trello", cfg)
     if errors:
-        print(f"[trello] aktarım hataları: {errors[:5]}", flush=True)
+        print(f"[trello] aktarım uyarıları ({len(errors)}): {errors[:8]}", flush=True)
     return {"ok": True, "card_url": card["url"], "card_created": card["created"], "people": people_done,
-            "people_errors": errors[:5], "period": period, "team": team_label}
+            "people_errors": errors[:5], "warnings": len(errors), "period": period, "team": team_label}
 
 
 class TrelloSyncIn(BaseModel):
@@ -3504,8 +3588,10 @@ def _daily_bounds(now: int, tz_min: int) -> dict:
     today = datetime.fromtimestamp(now, tzinfo).replace(hour=0, minute=0, second=0, microsecond=0)
     yday = today - timedelta(days=1)
     monday = yday - timedelta(days=yday.weekday())
+    month0 = yday.replace(day=1)   # dünün ayının ilk günü (bugün ayın 1'iyse = geçen ay)
     return {"today0": int(today.timestamp()), "y0": int(yday.timestamp()), "week0": int(monday.timestamp()),
-            "week_end": int((monday + timedelta(days=7)).timestamp()), "y_label": yday.strftime("%d.%m.%Y")}
+            "week_end": int((monday + timedelta(days=7)).timestamp()), "y_label": yday.strftime("%d.%m.%Y"),
+            "month0": int(month0.timestamp()), "is_month_start": today.day == 1}
 
 
 @app.get("/api/cron/trello-daily")
@@ -3525,12 +3611,22 @@ async def cron_trello_daily(authorization: str | None = Header(default=None)):
         team_id = None   # seçilen ekip sonradan silinmiş → tüm ekipler
     tz = int(cfg.get("tz") or 0)
     b = _daily_bounds(int(time.time()), tz)
+    monthly = None
+    if cfg.get("monthly", True) and b["is_month_start"]:   # ayın 1'i: geçen ayın raporu (yalnızca özet kartı)
+        try:
+            await _trello_sync_perf(cfg, b["month0"], b["today0"], team_id, tz,
+                                    summary_ref=f"perf:month:{b['month0']}:{team_id or 0}",
+                                    name_period=trello.month_label(b["month0"], tz), people=False, monthly=True)
+            monthly = "ok"
+        except trello.TrelloError as e:
+            monthly = f"hata: {e}"
+            print(f"[trello] aylık rapor gönderilemedi: {e}", flush=True)
     try:
-        return await _trello_sync_perf(
+        return {"monthly_report": monthly, **await _trello_sync_perf(
             cfg, b["week0"], b["today0"], team_id, tz, summary_ref=f"perf:week:{b['week0']}:{team_id or 0}",
             name_period="Hafta " + trello.period_label(b["week0"], b["week_end"], tz),
             note=f"**Durum:** {b['y_label']} sonu itibarıyla — hafta boyunca her sabah güncellenir.",
-            day=(b["y0"], b["today0"], b["y_label"]))
+            day=(b["y0"], b["today0"], b["y_label"]))}
     except trello.TrelloError as e:
         raise _trello_http(e)
 
