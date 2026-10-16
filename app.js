@@ -705,9 +705,11 @@ function renderPanel(data) {
       ? `${fmtCrit(c.value, unit)}${ctx.suffix ? `<small>${ctx.suffix}</small>` : ""}`
       : `<span class="text-outline">—</span>`;
     const vizHtml = typeof ctx.viz === "function" ? ctx.viz(c) : (ctx.viz || "");
-    // Kriter 03 kâr hesaplayıcısındaki ACOS'la değerlendiriliyorsa bunu açıkça söyle (hesaplanan değer de görünsün)
-    const subHtml = c.label === "ACOS" && c.manual
-      ? `<span class="text-tertiary font-semibold">Kâr hesaplayıcısında girilen ACOS</span> · hesaplanan: ${c.market_value == null ? "—" : fmtCrit(c.market_value, unit)}`
+    // Kriter 01/03 kâr hesaplayıcısındaki fiyat/ACOS'la değerlendiriliyorsa bunu açıkça söyle (pazar/hesaplanan değer de görünsün)
+    const MANUAL_SUB = { "ACOS": ["Kâr hesaplayıcısında girilen ACOS", "hesaplanan"],
+                         "Ort. Satış Fiyatı": ["Kâr hesaplayıcısında girilen satış fiyatı", "pazar ortalaması"] };
+    const subHtml = c.manual && MANUAL_SUB[c.label]
+      ? `<span class="text-tertiary font-semibold">${MANUAL_SUB[c.label][0]}</span> · ${MANUAL_SUB[c.label][1]}: ${c.market_value == null ? "—" : fmtCrit(c.market_value, unit)}`
       : (ctx.sub || "");
 
     div.className = "crit card";
@@ -769,14 +771,18 @@ function renderPanel(data) {
     if (wasOpen) card.classList.add("open");
   }
   const flagOf = (v, c) => (c.direction === ">=" ? v >= c.threshold : v <= c.threshold) ? "OK" : "OLUMSUZ";
-  function applyLiveCriteria({ margin, acosPct }) {
-    const ai = criteria.findIndex(c => c.label === "ACOS");
-    if (ai >= 0 && acosPct !== undefined) {
-      const base = baseCriteria[ai];
-      criteria[ai] = acosPct == null ? { ...base }
-        : { ...base, value: acosPct / 100, flag: flagOf(acosPct / 100, base), manual: true, market_value: base.value };
-      rerenderCriterion(ai);
-    }
+  // value === undefined → dokunma, null → sunucunun kriterine dön, sayı → o değerle değerlendir (manual)
+  function overrideCriterion(label, value) {
+    const i = criteria.findIndex(c => c.label === label);
+    if (i < 0 || value === undefined) return;
+    const base = baseCriteria[i];
+    criteria[i] = value == null ? { ...base }
+      : { ...base, value, flag: flagOf(value, base), manual: true, market_value: base.value };
+    rerenderCriterion(i);
+  }
+  function applyLiveCriteria({ margin, acosPct, salePrice }) {
+    overrideCriterion("ACOS", acosPct == null ? acosPct : acosPct / 100);
+    overrideCriterion("Ort. Satış Fiyatı", salePrice);
     const mi = criteria.findIndex(c => c.label === "Net Kar Marjı (kar analizi)");
     if (mi >= 0 && margin != null) {
       criteria[mi] = { ...criteria[mi], value: margin, flag: flagOf(margin, criteria[mi]) };
@@ -793,7 +799,7 @@ function renderPanel(data) {
     if (savedNote) {
       const differs = data.profit_inputs && pa.verdict && newVerdict !== pa.verdict;
       savedNote.textContent = differs
-        ? `Kâr hesaplayıcısında değiştirdiğiniz değerlerle (ACOS / maliyetler) yeniden hesaplandı. Pazar kararı kaydedilirken bu güncel değerler ve öneri saklanır. Geçmiş ve Ana Sayfa'daki ilk ön öneri: ${pa.verdict} (başlangıç değerleriyle).`
+        ? `Kâr hesaplayıcısında değiştirdiğiniz değerlerle (satış fiyatı / ACOS / maliyetler) yeniden hesaplandı. Pazar kararı kaydedilirken bu güncel değerler ve öneri saklanır. Geçmiş ve Ana Sayfa'daki ilk ön öneri: ${pa.verdict} (başlangıç değerleriyle).`
         : "";
       savedNote.style.display = differs ? "" : "none";
     }
@@ -977,6 +983,9 @@ function renderPanel(data) {
   let lastProfitResult = null;  // Excel export'ta kullanılacak
   // ACOS alanının başlangıç değeri (= hesaplanan ağırlıklı ACOS ya da varsayılan) — değişirse Kriter 03 onunla değerlendirilir
   const acosInitial = parseFloat(root.querySelector(".p-acos").value) || 0;
+  // Satış fiyatı da aynı kural: başlangıçtan (pazar ortalaması) farklıysa Kriter 01 o fiyatla değerlendirilir
+  const saleInitial = parseFloat(root.querySelector(".p-sale").value) || 0;
+  const differs = (v, init) => Math.abs(v - init) > 1e-9 ? v : null;
   const currentProfitInputs = () => {
     const [cogs, sale, fba, ref_rate, acos, ret, gen] = profitInputs.map(i => parseFloat(i.value) || 0);
     return { cogs, sale, fba, ref_rate, acos, ret, gen };
@@ -984,8 +993,8 @@ function renderPanel(data) {
   const refUsdEl = root.querySelector(".p-ref-usd");
   const recalcProfit = async () => {
     const [cogs, sale, fba, refRate, acos, ret, gen] = profitInputs.map(i => parseFloat(i.value) || 0);
-    // Kriter 03 hemen (sunucu yanıtını beklemeden) güncellenir
-    applyLiveCriteria({ acosPct: Math.abs(acos - acosInitial) > 1e-9 ? acos : null });
+    // Kriter 01 ve 03 hemen (sunucu yanıtını beklemeden) güncellenir
+    applyLiveCriteria({ acosPct: differs(acos, acosInitial), salePrice: differs(sale, saleInitial) });
     // Referral ORAN olarak tutulur; dolar karşılığı = oran × satış fiyatı (fiyat değişince yeniden hesaplanır)
     const ref = refRate / 100 * sale;   // Excel'deki =oran×fiyat formülüyle aynı (yuvarlamasız)
     if (refUsdEl) refUsdEl.textContent = `= $${ref.toFixed(2)}`;
@@ -1784,15 +1793,19 @@ function decisionSnapshotHtml(snap) {
     const flag = c.flag === "OK" ? ["ok", "Olumlu"] : c.flag === "OLUMSUZ" ? ["bad", "Olumsuz"] : ["na", "Veri yok"];
     const unit = c.unit || "percent";
     let extra = "";
-    if (c.label === "ACOS") extra = c.manual ? ` <span class="chip warn !text-[10px]" title="Hesaplanan: ${esc(snapCritVal(c.market_value, unit))}">elle</span>` : ` <span class="text-secondary">(hesaplanan)</span>`;
+    const marketLbl = { "ACOS": "Hesaplanan", "Ort. Satış Fiyatı": "Pazar ortalaması" }[c.label];
+    if (marketLbl && c.manual) extra = ` <span class="chip warn !text-[10px]" title="${marketLbl}: ${esc(snapCritVal(c.market_value, unit))}">elle</span>`;
+    else if (c.label === "ACOS") extra = ` <span class="text-secondary">(hesaplanan)</span>`;
     return `<tr><td class="l">${esc(SNAP_LABEL[c.label] || c.label)}${extra}</td><td class="font-semibold">${esc(snapCritVal(c.value, unit))}</td>
       <td class="text-secondary">${c.direction === ">=" ? "≥" : "≤"} ${esc(snapCritVal(c.threshold, unit))}</td><td><span class="chip ${flag[0]}">${flag[1]}</span></td></tr>`;
   }).join("");
   const pi = snap.profit_inputs || {};
   const pr = snap.profit;
   const acosCrit = snap.criteria.find(c => c.label === "ACOS");
+  const priceCrit = snap.criteria.find(c => c.label === "Ort. Satış Fiyatı");
   const inputs = [
-    ["Satış fiyatı", fmtUsd(pi.sale)], ["COGS", fmtUsd(pi.cogs)], ["FBA", fmtUsd(pi.fba)],
+    ["Satış fiyatı", `${fmtUsd(pi.sale)}${snap.price_manual ? ` (elle; pazar ort. ${priceCrit && priceCrit.market_value != null ? fmtUsd(priceCrit.market_value) : "—"})` : ""}`],
+    ["COGS", fmtUsd(pi.cogs)], ["FBA", fmtUsd(pi.fba)],
     ["Referral", pi.ref_rate == null ? "—" : `%${pi.ref_rate}`],
     ["ACOS", pi.acos == null ? "—" : `%${pi.acos}${snap.acos_manual ? ` (elle; hesaplanan ${acosCrit && acosCrit.market_value != null ? fmtPct(acosCrit.market_value) : "—"})` : ""}`],
     ["İade", pi.ret == null ? "—" : `%${pi.ret}`], ["Genel gider", pi.gen == null ? "—" : `%${pi.gen}`],
