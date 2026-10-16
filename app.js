@@ -3326,19 +3326,123 @@ function lessonVideoHtml(l) {
   return "";
 }
 
-function embedYouTube(slot, id) {
+// ---------------------------------------------------------------------------
+// VİDEO İZLEME TAKİBİ (YouTube IFrame API) — sunucu kuralı api/watch.py, koşullar TRAINING_REQUIREMENTS.
+// Oynatıcı OYNARKEN ve sekme görünürken her saniye konum okunur; ardışık iki okuma arasındaki ilerleme
+// (en fazla 2× hız + pay) "izlendi" sayılır, ileri sarma sayılmaz. Aralıklar ~10 sn'de bir sunucuya gider;
+// sunucu birleştirir ve zaman kuralıyla (2×) sınırlar. Oran ≥ %80 → "Tamamladım" açılır (sunucu da denetler).
+// ---------------------------------------------------------------------------
+let ytApiPromise = null;
+function loadYtApi() {
+  if (window.YT && window.YT.Player) return Promise.resolve(window.YT);
+  if (!ytApiPromise) {
+    ytApiPromise = new Promise((resolve, reject) => {
+      const prev = window.onYouTubeIframeAPIReady;
+      window.onYouTubeIframeAPIReady = () => { try { prev && prev(); } catch {} resolve(window.YT); };
+      const sc = document.createElement("script");
+      sc.src = "https://www.youtube.com/iframe_api";
+      sc.onerror = () => { ytApiPromise = null; reject(new Error("YouTube oynatıcısı yüklenemedi")); };
+      document.head.appendChild(sc);
+      setTimeout(() => reject(new Error("YouTube oynatıcısı yüklenemedi")), 15000);
+    });
+  }
+  return ytApiPromise;
+}
+function mergeSegs(segs) {
+  const out = [];
+  segs.filter(x => x[1] > x[0]).map(x => [x[0], x[1]]).sort((a, b) => a[0] - b[0]).forEach(([a, b]) => {
+    if (out.length && a <= out[out.length - 1][1] + 0.5) out[out.length - 1][1] = Math.max(out[out.length - 1][1], b);
+    else out.push([a, b]);
+  });
+  return out;
+}
+const segsTotal = (segs) => segs.reduce((t, [a, b]) => t + (b - a), 0);
+const trnTrackers = new Set();
+function trnStopTrackers() { trnTrackers.forEach(t => t.stop()); trnTrackers.clear(); }
+
+/** Oynatıcıyı kurar ve izlemeyi takip eder; onChange(oran) her ilerlemede çağrılır. */
+function embedYouTube(slot, l, onChange) {
+  const id = l.youtube_id;
   if (!YT_ID_RE.test(id)) return;
+  const req = trnState.data?.requirements || {};
+  const maxSpeed = req.max_speed || 2;
+  const w = l.watch || (l.watch = { segments: [], duration: null, watched: 0, ratio: 0 });
   const wrap = document.createElement("div");
   wrap.className = "trn-video";
-  const f = document.createElement("iframe");
-  f.src = `https://www.youtube-nocookie.com/embed/${encodeURIComponent(id)}?rel=0&autoplay=1`;
-  f.title = "Ders videosu";
-  f.loading = "lazy";
-  f.referrerPolicy = "strict-origin-when-cross-origin";
-  f.allow = "accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture; fullscreen";
-  f.allowFullscreen = true;
-  wrap.appendChild(f);
+  const host = document.createElement("div");
+  wrap.appendChild(host);
   slot.replaceChildren(wrap);
+  let player = null, lastT = null, lastWall = 0, pending = [], tickTimer = null, beatTimer = null, busy = false, started = false;
+  const ratioNow = () => {
+    const d = w.duration || (player && player.getDuration ? player.getDuration() : 0) || 0;
+    return d ? Math.min(1, segsTotal(mergeSegs([...(w.segments || []), ...pending])) / d) : 0;
+  };
+  const emit = () => onChange(ratioNow());
+  const playing = () => player && player.getPlayerState && player.getPlayerState() === window.YT.PlayerState.PLAYING;
+  // force: duraklatma/bitiş anında son konumu da say (oynatıcı artık PLAYING değil)
+  const tick = (force = false) => {
+    if (!(force || playing()) || document.visibilityState !== "visible" || !wrap.isConnected || wrap.offsetParent === null) { lastT = null; return; }
+    const t = player.getCurrentTime(), now = performance.now();
+    if (lastT != null) {
+      const dt = t - lastT, dw = (now - lastWall) / 1000;
+      if (dt > 0 && dt <= maxSpeed * dw + 0.5) { pending = mergeSegs([...pending, [lastT, t]]); emit(); }
+    }
+    lastT = t; lastWall = now;
+  };
+  const beat = async () => {
+    if (busy) return;
+    busy = true;
+    const send = pending; pending = [];
+    try {
+      const r = await apiFetch(`${API_BASE}/api/training/lessons/${encodeURIComponent(l.id)}/watch`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ duration: (player && player.getDuration && player.getDuration()) || w.duration || null, segments: send }),
+      });
+      const b = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(apiErrorText(b, r.status));
+      Object.assign(w, b);
+      emit();
+    } catch { pending = mergeSegs([...send, ...pending]); }   // ağ hatası: bir sonraki bildirimde yeniden
+    finally { busy = false; }
+  };
+  const stopTimers = () => { clearInterval(tickTimer); clearInterval(beatTimer); tickTimer = beatTimer = null; };
+  const onVis = () => { if (document.visibilityState !== "visible") { lastT = null; if (pending.length) beat(); } };
+  document.addEventListener("visibilitychange", onVis);
+  const tracker = { stop() {
+    tick(playing()); stopTimers(); document.removeEventListener("visibilitychange", onVis);
+    if (pending.length) beat();
+    try { player && player.destroy && player.destroy(); } catch {}
+  } };
+  trnTrackers.add(tracker);
+  loadYtApi().then((YT) => {
+    if (!wrap.isConnected) return;
+    player = new YT.Player(host, {
+      host: "https://www.youtube-nocookie.com", videoId: id,
+      playerVars: { rel: 0, autoplay: 1, playsinline: 1 },
+      events: {
+        onStateChange: (e) => {
+          if (e.data === YT.PlayerState.PLAYING) {
+            if (!started) { started = true; beat(); }   // sunucu zaman ölçümünü başlatır
+            // Başlangıç noktası hemen alınır (ilk saniye kaybolmasın; atlamadan sonra da yeni konumdan başlar)
+            lastT = player.getCurrentTime(); lastWall = performance.now();
+            if (!tickTimer) { tickTimer = setInterval(tick, 1000); beatTimer = setInterval(beat, 10000); }
+          } else if (e.data === YT.PlayerState.PAUSED || e.data === YT.PlayerState.ENDED) {
+            tick(true); lastT = null; stopTimers(); beat();
+          }
+        },
+      },
+    });
+  }).catch(() => {
+    // API yüklenemedi (ör. engelleyici): video yine izlenebilir ama takip edilemez → tamamlama açılmaz
+    const f = document.createElement("iframe");
+    f.src = `https://www.youtube-nocookie.com/embed/${encodeURIComponent(id)}?rel=0&autoplay=1`;
+    f.title = "Ders videosu"; f.allow = "autoplay; encrypted-media; picture-in-picture; fullscreen"; f.allowFullscreen = true;
+    wrap.replaceChildren(f);
+    const warn = document.createElement("p");
+    warn.className = "text-xs text-error mt-1";
+    warn.textContent = "İzleme takip edilemiyor: YouTube oynatıcı arayüzü yüklenemedi (reklam/içerik engelleyiciyi kapatıp sayfayı yenileyin). Tamamlamak için izlemenin kaydedilmesi gerekir.";
+    slot.appendChild(warn);
+  });
 }
 
 async function loadTraining() {
@@ -3380,6 +3484,8 @@ function renderTraining() {
   $("#trn-mine-count").textContent = prog.total ? `${prog.completed}/${prog.total} tamamlandı` : "";
 
   // --- Derslerim ---
+  trnStopTrackers();   // önceki kartların oynatıcıları (bekleyen izleme bildirimi gönderilir)
+  const req = d.requirements || { watch_min_ratio: 0.8, note_min_chars: 100 };
   const list = $("#trn-mine-list");
   list.innerHTML = d.my_lessons.length ? "" : `<div class="card card-pad text-sm text-secondary xl:col-span-2">Sana atanmış ders yok.</div>`;
   d.my_lessons.forEach((l, i) => {
@@ -3408,17 +3514,41 @@ function renderTraining() {
       </div>
       <div class="flex flex-wrap items-center justify-between gap-2 mt-auto pt-2 border-t border-hairline">
         <span class="text-xs text-secondary">${l.completed ? `Tamamlanma: ${esc(fmtStamp(l.completed_at))}` : "Henüz tamamlanmadı"}</span>
+        ${l.completed ? "" : `<ul class="trn-reqs w-full text-[12px] flex flex-col gap-0.5">
+          ${l.youtube_id ? `<li class="trn-req-watch"></li>` : safeHttpsUrl(l.video_url) ? `<li class="text-secondary">• Video izlemesi takip edilemiyor (YouTube dışı bağlantı)</li>` : ""}
+          <li class="trn-req-note"></li></ul>`}
         <button type="button" class="trn-qa btn btn-outline btn-sm ml-auto" title="Bu dersin forumdaki soru-cevap başlığı"><span class="material-symbols-outlined">forum</span>Soru-Cevap${l.discussion ? ` · ${fmtNum(l.discussion.replies)}` : ""}</button>
         <button type="button" class="trn-toggle btn ${l.completed ? "btn-outline" : "btn-primary"} btn-sm">
           <span class="material-symbols-outlined">${l.completed ? "undo" : "task_alt"}</span>${l.completed ? "Geri al" : "Tamamladım"}</button>
       </div>`;
+    const toggle = card.querySelector(".trn-toggle");
+    const pctTxt = (r) => `%${Math.floor((r || 0) * 100)}`;
+    let watchRatio = l.watch ? l.watch.ratio || 0 : 0;
+    // Tamamlama koşulları (sunucu da denetler): YouTube'da %80 izleme + kayıtlı ≥100 karakter kazanım notu
+    const refreshReqs = () => {
+      if (l.completed) return;
+      const watchOk = !l.youtube_id || watchRatio >= req.watch_min_ratio;
+      const n = noteCtl.length();
+      const noteOk = n >= req.note_min_chars;
+      const wEl = card.querySelector(".trn-req-watch"), nEl = card.querySelector(".trn-req-note");
+      if (wEl) {
+        wEl.className = `trn-req-watch ${watchOk ? "text-primary" : "text-secondary"}`;
+        wEl.textContent = `${watchOk ? "✓" : "•"} Videonun en az ${pctTxt(req.watch_min_ratio)}'ini izle — izlenen: ${pctTxt(watchRatio)}${watchOk ? "" : " (2× hız sayılır; ileri sarılan kısım sayılmaz)"}`;
+      }
+      nEl.className = `trn-req-note ${noteOk ? "text-primary" : "text-secondary"}`;
+      nEl.textContent = `${noteOk ? "✓" : "•"} Kazanım notu en az ${req.note_min_chars} karakter — şu an ${n}`;
+      toggle.disabled = !(watchOk && noteOk);
+      toggle.title = toggle.disabled ? "Önce koşulları tamamla" : "";
+    };
     const play = card.querySelector(".trn-play");
-    if (play) play.addEventListener("click", () => embedYouTube(play.parentElement, play.dataset.yt));
-    bindLessonNote(card, l);
+    if (play) play.addEventListener("click", () => embedYouTube(play.parentElement, l, (r) => { watchRatio = r; refreshReqs(); }));
+    const noteCtl = bindLessonNote(card, l, refreshReqs);
+    refreshReqs();
     card.querySelector(".trn-qa").addEventListener("click", (e) => openLessonDiscussion(l, e.currentTarget));
-    card.querySelector(".trn-toggle").addEventListener("click", async (e) => {
+    toggle.addEventListener("click", async (e) => {
       const btn = e.currentTarget; btn.disabled = true;
       try {
+        if (!l.completed && noteCtl.isDirty()) await noteCtl.save();   // not yazılıp kaydedilmediyse önce kaydet
         const r = await apiFetch(`${API_BASE}/api/training/lessons/${encodeURIComponent(l.id)}/complete`, {
           method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ completed: !l.completed }),
         });
@@ -3571,21 +3701,25 @@ async function openLessonDiscussion(l, btn, shareText = "") {
 
 // --- Kazanım notu (kişinin KENDİ notu; PUT /api/training/lessons/{id}/note) ---
 const TRN_NOTE_MAX = 4000;
-function bindLessonNote(card, l) {
+/** Kazanım notu: kaydet düğmesi + karakter sayacı. Dönüş: { save, isDirty, length } (tamamlama koşulu için). */
+function bindLessonNote(card, l, onChange = () => {}) {
   const ta = card.querySelector(".trn-note-input"), btn = card.querySelector(".trn-note-save");
   const st = card.querySelector(".trn-note-status");
   const share = card.querySelector(".trn-note-share");
   let saved = l.my_note || "";
+  const length = () => ta.value.split(/\s+/).filter(Boolean).join(" ").length;   // sunucu watch.normalized_len ile aynı
+  const isDirty = () => ta.value.trim() !== saved;
   share.addEventListener("click", () => {
     if (!saved) return;
     if (confirm("Kazanım notun dersin soru-cevap başlığına cevap olarak eklensin mi? Başlığı ekibindekiler görebilir.")) openLessonDiscussion(l, share, saved);
   });
   ta.addEventListener("input", () => {
-    const dirty = ta.value.trim() !== saved;
+    const dirty = isDirty();
     btn.disabled = !dirty;
     if (dirty) { st.textContent = "Kaydedilmemiş değişiklik"; st.className = "trn-note-status text-[11px] text-tertiary"; }
+    onChange();
   });
-  btn.addEventListener("click", async () => {
+  const save = async () => {
     btn.disabled = true;
     st.textContent = "kaydediliyor…"; st.className = "trn-note-status text-[11px] text-secondary";
     try {
@@ -3599,11 +3733,15 @@ function bindLessonNote(card, l) {
       ta.value = saved;
       st.textContent = saved ? `Kaydedildi · ${fmtStamp(b.updated_at)}` : "Not silindi.";
       st.className = "trn-note-status text-[11px] text-primary";
+      onChange();
     } catch (err) {
       btn.disabled = false;
       st.textContent = `Hata: ${err.message}`; st.className = "trn-note-status text-[11px] text-error";
+      throw err;
     }
-  });
+  };
+  btn.addEventListener("click", () => save().catch(() => {}));
+  return { save, isDirty, length };
 }
 
 /** Owner/admin: ilerleme verisindeki kazanım notları (ekip filtresi sunucuda, ders filtresi burada). */
@@ -3644,6 +3782,7 @@ function renderMatrix() {
   if (!pg || !pg.lessons.length) { table.innerHTML = `<tbody><tr><td class="muted !py-6">Henüz ders yok.</td></tr></tbody>`; return; }
   const done = new Map(pg.completions.map(c => [`${c.lesson_id}:${c.user_id}`, c.completed_at]));
   const noted = new Set((pg.notes || []).map(n => `${n.lesson_id}:${n.user_id}`));
+  const watched = new Map((pg.watch || []).map(w => [`${w.lesson_id}:${w.user_id}`, w.ratio]));
   const t = todayISO();
   const head = `<thead><tr><th>Kişi</th><th>İlerleme</th>${pg.lessons.map(l => `<th class="lesson" title="${esc(l.title)}">${esc(l.title.length > 40 ? l.title.slice(0, 40) + "…" : l.title)}</th>`).join("")}</tr></thead>`;
   const rows = pg.users.map(u => {
@@ -3653,9 +3792,12 @@ function renderMatrix() {
       if (!l.assignee_ids.includes(u.id)) return `<td><span class="trn-cell na" title="Atanmadı">·</span></td>`;
       const at = done.get(`${l.id}:${u.id}`);
       const note = noted.has(`${l.id}:${u.id}`) ? " has-note" : "", noteTip = note ? " · kazanım notu var" : "";
-      if (at) return `<td><span class="trn-cell done${note}" title="Tamamlandı: ${esc(fmtStamp(at))}${noteTip}">✓</span></td>`;
+      const wr = watched.get(`${l.id}:${u.id}`);
+      const watchTip = wr != null ? ` · video %${Math.floor(wr * 100)} izlendi` : "";
+      if (at) return `<td><span class="trn-cell done${note}" title="Tamamlandı: ${esc(fmtStamp(at))}${noteTip}${watchTip}">✓</span></td>`;
       const late = l.due_date && l.due_date < t;
-      return `<td><span class="trn-cell ${late ? "late" : "todo"}${note}" title="${late ? "Son tarih geçti" : "Atandı, tamamlanmadı"}${noteTip}">—</span></td>`;
+      const part = wr ? ` part` : "";
+      return `<td><span class="trn-cell ${late ? "late" : "todo"}${note}${part}" title="${late ? "Son tarih geçti" : "Atandı, tamamlanmadı"}${noteTip}${watchTip}">${wr ? `%${Math.floor(wr * 100)}` : "—"}</span></td>`;
     }).join("");
     return `<tr><td><div class="font-medium truncate max-w-[200px]" title="${esc(u.name || "")}">${esc(u.name || "(ad girilmemiş)")}</div><div class="text-[11px] text-secondary truncate max-w-[200px]">${u.title ? `<span class="text-primary">${esc(u.title)}</span> · ` : ""}${esc(ROLE_LABEL[u.role] || u.role)}${u.email ? ` · ${esc(u.email)}` : ""}</div></td>
       <td class="tabular">${n}/${assigned.length}</td>${cells}</tr>`;

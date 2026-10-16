@@ -112,6 +112,11 @@ _SCHEMAS = [
     """CREATE TABLE IF NOT EXISTS training_notes (
         lesson_id INTEGER NOT NULL, user_id INTEGER NOT NULL, note TEXT NOT NULL, updated_at INTEGER NOT NULL,
         PRIMARY KEY (lesson_id, user_id))""",
+    # EĞİTİM VİDEOSU İZLEME (kişi × ders): gerçekten oynatılan aralıklar (watch.py). Tamamlama için %80.
+    """CREATE TABLE IF NOT EXISTS training_watch (
+        lesson_id INTEGER NOT NULL, user_id INTEGER NOT NULL, duration DOUBLE PRECISION, segments_json TEXT NOT NULL,
+        watched DOUBLE PRECISION NOT NULL DEFAULT 0, last_at DOUBLE PRECISION, updated_at INTEGER NOT NULL,
+        PRIMARY KEY (lesson_id, user_id))""",
     # E-POSTA BAĞLANTILARI (doğrulama / şifre sıfırlama): bağlantıdaki kod YALNIZCA sha256 olarak saklanır,
     # tek kullanımlık (used_at), süreli (expires_at). Hesap silinince silinir (USER_ID_TABLES).
     """CREATE TABLE IF NOT EXISTS email_tokens (
@@ -312,12 +317,13 @@ async def _ensure_staff_in_team():
 # ŞEMAYA/MİGRASYONA HER DEĞİŞİKLİKTE (yeni tablo, sütun, indeks, veri düzeltmesi, tohum) BU SAYIYI ARTIR —
 # artırmazsan canlı veritabanında migrasyon hiç çalışmaz.
 # ---------------------------------------------------------------------------
-SCHEMA_VERSION = 9  # v2: banned_categories · v3: training_notes · v4: bildirimler, forum okunma/rapor/görsel, analiz/ders bağı
+SCHEMA_VERSION = 10  # v2: banned_categories · v3: training_notes · v4: bildirimler, forum okunma/rapor/görsel, analiz/ders bağı
                     # v5: e-posta doğrulama/sıfırlama, deneme sınırı, bildirim tercihleri
                     # v6: mcp_cache (Trendler 72 saat), bildirim varsayılanı hepsi açık
                     # v7: doğrulama bağlantısı hiç gönderilmemiş (eski) kullanıcılar doğrulanmış sayılır
                     # v8: app_settings, trello_cards (Trello aktarımı)
                     # v9: market_decision.snapshot_json (karar anındaki veriler)
+                    # v10: training_watch (eğitim videosu izleme takibi)
 
 
 def _migration_env_hash() -> str:
@@ -1604,7 +1610,7 @@ EMAIL_REF_COLUMNS = [
 # Kişinin KENDİ satırları (user_id ile) — tamamen silinir.
 USER_ID_TABLES = ["sessions", "user_thresholds", "user_query_log", "market_decision",
                   "training_completions", "training_assignments", "team_members", "competency_forms",
-                  "training_notes", "email_tokens", "notification_prefs"]
+                  "training_notes", "training_watch", "email_tokens", "notification_prefs"]
 # Başkalarına ait kayıtlarda kişiyi id ile anan alanlar: NULL yapılır.
 ID_REF_COLUMNS = [("training_lessons", "created_by"), ("team_invites", "created_by"),
                   ("banned_categories", "banned_by")]
@@ -1784,6 +1790,7 @@ async def update_lesson(lesson_id: int, data: dict):
 async def delete_lesson(lesson_id: int):
     await execute("DELETE FROM training_completions WHERE lesson_id = ?", (lesson_id,))
     await execute("DELETE FROM training_notes WHERE lesson_id = ?", (lesson_id,))
+    await execute("DELETE FROM training_watch WHERE lesson_id = ?", (lesson_id,))
     await forum.unlink_lesson(lesson_id)
     await notify.delete_for(lesson_id=lesson_id)
     await execute("DELETE FROM training_assignments WHERE lesson_id = ?", (lesson_id,))
@@ -1824,6 +1831,47 @@ async def set_training_note(lesson_id: int, user_id: int, note: str):
 async def training_notes_for_user(user_id: int) -> dict[int, dict]:
     rows = await fetch_all("SELECT lesson_id, note, updated_at FROM training_notes WHERE user_id = ?", (user_id,))
     return {r["lesson_id"]: {"note": r["note"], "updated_at": r["updated_at"]} for r in rows}
+
+
+async def get_watch(lesson_id: int, user_id: int) -> dict | None:
+    row = await fetch_one("SELECT duration, segments_json, last_at FROM training_watch WHERE lesson_id = ? AND user_id = ?",
+                          (lesson_id, user_id))
+    if not row:
+        return None
+    try:
+        segs = json.loads(row["segments_json"] or "[]")
+    except (TypeError, ValueError):
+        segs = []
+    return {"duration": row["duration"], "segments": segs if isinstance(segs, list) else [], "last_at": row["last_at"]}
+
+
+async def set_watch(lesson_id: int, user_id: int, state: dict, watched: float):
+    await execute(
+        "INSERT INTO training_watch (lesson_id, user_id, duration, segments_json, watched, last_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (lesson_id, user_id) DO UPDATE SET duration = excluded.duration, "
+        "segments_json = excluded.segments_json, watched = excluded.watched, last_at = excluded.last_at, "
+        "updated_at = excluded.updated_at",
+        (lesson_id, user_id, state.get("duration"), json.dumps(state.get("segments") or []), watched,
+         state.get("last_at"), int(time.time())))
+
+
+async def watch_for_user(user_id: int) -> dict[int, dict]:
+    rows = await fetch_all("SELECT lesson_id, duration, segments_json, last_at FROM training_watch WHERE user_id = ?",
+                           (user_id,))
+    out = {}
+    for r in rows:
+        try:
+            segs = json.loads(r["segments_json"] or "[]")
+        except (TypeError, ValueError):
+            segs = []
+        out[r["lesson_id"]] = {"duration": r["duration"], "segments": segs if isinstance(segs, list) else [],
+                               "last_at": r["last_at"]}
+    return out
+
+
+async def all_watch() -> list[dict]:
+    """İlerleme ekranı için kişi × ders izlenen süre ve video süresi (aralıklar dönmez)."""
+    return await fetch_all("SELECT lesson_id, user_id, duration, watched FROM training_watch")
 
 
 async def all_training_notes() -> list[dict]:

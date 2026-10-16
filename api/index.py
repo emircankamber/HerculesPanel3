@@ -70,6 +70,7 @@ import base64
 import binascii
 import excel_export
 import team_perf
+import watch as trn_watch
 import trello
 import supplier_scoring as sup
 import launch_control as lc
@@ -2384,7 +2385,8 @@ def youtube_video_id(url: str | None) -> str | None:
     return vid if vid and _YT_ID_RE.match(vid) else None
 
 
-def _lesson_out(row: dict, completed_at: int | None = None, staff: bool = False, note: dict | None = None) -> dict:
+def _lesson_out(row: dict, completed_at: int | None = None, staff: bool = False, note: dict | None = None,
+                watch: dict | None = None) -> dict:
     out = {
         "id": row["id"], "title": row["title"], "description": row.get("description") or "",
         "video_url": row.get("video_url"), "youtube_id": youtube_video_id(row.get("video_url")),
@@ -2393,6 +2395,8 @@ def _lesson_out(row: dict, completed_at: int | None = None, staff: bool = False,
         # Kişinin KENDİ kazanım notu (yalnızca my_lessons'ta; başkasınınki burada dönmez)
         "my_note": (note or {}).get("note") or "", "my_note_at": (note or {}).get("updated_at"),
     }
+    if out["youtube_id"]:
+        out["watch"] = trn_watch.summary(watch)   # kişinin KENDİ izleme durumu (yalnızca YouTube derslerinde)
     if staff:
         out["assign_mode"] = row.get("assign_mode") or ("all" if row.get("assign_all") else "users")
         out["assign_all"] = out["assign_mode"] == "all"
@@ -2458,12 +2462,13 @@ async def training_lessons(user: dict = Depends(require_user)):
     """Member: yalnızca kendisine atananlar. Owner/admin: tüm dersler + atama bilgisi. Hepsinde kendi tamamlaması."""
     mine = await db.completions_for_user(user["user_id"])
     notes = await db.training_notes_for_user(user["user_id"])
+    watches = await db.watch_for_user(user["user_id"])
     staff = user["role"] in ("owner", "admin")
     assigned = await db.list_lessons_for_user(user["user_id"])
     disc = await forum.lesson_threads()
-    my_lessons = [{**_lesson_out(r, mine.get(r["id"]), note=notes.get(r["id"])), "discussion": disc.get(r["id"])}
-                  for r in assigned]
-    resp = {"role": user["role"], "my_lessons": my_lessons,
+    my_lessons = [{**_lesson_out(r, mine.get(r["id"]), note=notes.get(r["id"]), watch=watches.get(r["id"])),
+                   "discussion": disc.get(r["id"])} for r in assigned]
+    resp = {"role": user["role"], "my_lessons": my_lessons, "requirements": TRAINING_REQUIREMENTS,
             "my_progress": {"completed": sum(1 for l in my_lessons if l["completed"]), "total": len(my_lessons)}}
     if staff:
         resp["all_lessons"] = [_lesson_out(r, mine.get(r["id"]), staff=True) for r in await db.list_lessons_all()]
@@ -2508,14 +2513,60 @@ class CompletionIn(BaseModel):
     completed: bool
 
 
+# TAMAMLAMA KOŞULLARI (kullanıcı isteği) — TEK kaynak; panel `requirements` ile alır:
+#   - YouTube dersinde video en az %80 izlenmiş olmalı (2× hız sayılır — watch.py zaman kuralı),
+#   - her derste kazanım notu (kayıtlı) en az 100 karakter olmalı (boşluklar tekilleştirilerek sayılır).
+# YouTube dışı bağlantıların izlenmesi takip edilemez → yalnızca not şartı. Geri almak her zaman serbest.
+TRAINING_NOTE_MIN_CHARS = 100
+TRAINING_REQUIREMENTS = {"watch_min_ratio": trn_watch.WATCH_MIN_RATIO, "note_min_chars": TRAINING_NOTE_MIN_CHARS,
+                         "max_speed": trn_watch.MAX_SPEED}
+
+
 @app.post("/api/training/lessons/{lesson_id}/complete")
 async def training_complete(lesson_id: int, req: CompletionIn, user: dict = Depends(require_user)):
-    """Yalnızca kendi tamamlaması: gövdede user_id YOK, oturumdaki kullanıcı kullanılır."""
+    """Yalnızca kendi tamamlaması: gövdede user_id YOK, oturumdaki kullanıcı kullanılır.
+    Tamamlamak (completed=true) için koşullar SUNUCUDA denetlenir (TRAINING_REQUIREMENTS) — değilse 409."""
     if not await db.is_lesson_assigned(lesson_id, user["user_id"]):
         raise HTTPException(404, "Ders bulunamadı ya da size atanmamış")
+    if req.completed:
+        lesson = await db.get_lesson(lesson_id)
+        missing = []
+        if youtube_video_id((lesson or {}).get("video_url")):
+            ratio = trn_watch.summary(await db.get_watch(lesson_id, user["user_id"]))["ratio"]
+            if ratio < trn_watch.WATCH_MIN_RATIO:
+                missing.append(f"videonun en az %{round(trn_watch.WATCH_MIN_RATIO * 100)}'i izlenmeli "
+                               f"(şu an %{int(ratio * 100)})")
+        note = (await db.training_notes_for_user(user["user_id"])).get(lesson_id)
+        n = trn_watch.normalized_len((note or {}).get("note"))
+        if n < TRAINING_NOTE_MIN_CHARS:
+            missing.append(f"kazanım notu en az {TRAINING_NOTE_MIN_CHARS} karakter olmalı (şu an {n})")
+        if missing:
+            raise HTTPException(409, "Ders henüz tamamlanamaz: " + "; ".join(missing) + ".")
     await db.set_completion(lesson_id, user["user_id"], req.completed)
     done = await db.completions_for_user(user["user_id"])
     return {"ok": True, "completed": lesson_id in done, "completed_at": done.get(lesson_id)}
+
+
+class WatchIn(BaseModel):
+    duration: float | None = Field(None, ge=0, le=trn_watch.MAX_DURATION)
+    segments: list[list[float]] = Field(default_factory=list, max_length=trn_watch.MAX_SEGMENTS_IN)
+
+
+@app.post("/api/training/lessons/{lesson_id}/watch")
+async def training_watch(lesson_id: int, req: WatchIn, user: dict = Depends(require_user)):
+    """Videonun oynatılan aralıkları (~10 sn'de bir). Yalnızca KENDİ kaydı ve kendisine atanan YouTube dersi.
+    Birleştirme + zaman kuralı (2× hıza kadar) watch.apply_beat'te; yanıt güncel izleme özeti."""
+    if not await db.is_lesson_assigned(lesson_id, user["user_id"]):
+        raise HTTPException(404, "Ders bulunamadı ya da size atanmamış")
+    lesson = await db.get_lesson(lesson_id)
+    if not youtube_video_id((lesson or {}).get("video_url")):
+        raise HTTPException(409, "Bu dersin videosu izlenemiyor (YouTube değil)")
+    if any(len(seg) != 2 for seg in req.segments):
+        raise HTTPException(422, "Geçersiz aralık")
+    state = trn_watch.apply_beat(await db.get_watch(lesson_id, user["user_id"]), req.segments, req.duration, time.time())
+    out = trn_watch.summary(state)
+    await db.set_watch(lesson_id, user["user_id"], state, out["watched"])
+    return out
 
 
 TRAINING_NOTE_MAX = 4000
@@ -2604,6 +2655,11 @@ async def training_progress(team_id: int | None = Query(None, ge=1), user: dict 
         "completions": [c for c in await db.all_completions() if c["user_id"] in members],
         # Kişilerin kazanım notları (yalnızca owner/admin bu uçta görür)
         "notes": [n for n in await db.all_training_notes() if n["user_id"] in members],
+        # İzlenen oran (YouTube dersleri): kişi × ders
+        "watch": [{"lesson_id": w["lesson_id"], "user_id": w["user_id"],
+                   "ratio": round(min(1.0, (w["watched"] or 0) / w["duration"]), 4) if w["duration"] else 0.0}
+                  for w in await db.all_watch() if w["user_id"] in members],
+        "requirements": TRAINING_REQUIREMENTS,
     }
 
 
