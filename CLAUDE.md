@@ -662,7 +662,9 @@ yüzden backend'e hiç bağlanmamalı, sahte veri olur.
 - **Canlı:** Kâr sekmesinde ACOS alanı başlangıç değerinden (sunucunun `profit_inputs.acos` = hesaplanan ağırlıklı ACOS,
   1 ondalık) FARKLIYSA Kriter 03 o değerle (eşik/yön aynı) değerlendirilir, kartta "Kâr hesaplayıcısında girilen ACOS ·
   hesaplanan: X" yazar; aynı değere dönülünce sunucunun kriteri aynen geri gelir. Kriter 06 (net marj) zaten bu
-  değerlerle. Ön öneri `verdictFor` ile yeniden (`app.js::applyLiveCriteria`).
+  değerlerle. Ön öneri `verdictFor` ile yeniden (`app.js::applyLiveCriteria`). **Satış fiyatı da aynı kural:** alan
+  başlangıçtan (`profit_inputs.sale` = pazar ortalaması, 2 ondalık) farklıysa Kriter 01 (Ort. Satış Fiyatı) o fiyatla
+  ("Kâr hesaplayıcısında girilen satış fiyatı · pazar ortalaması: $X"); snapshot'ta `price_manual`/`market_price`.
 - **Karar kaydı:** `POST /api/decision` panelden `profit_inputs {cogs, sale, fba, ref_rate, acos, ret, gen}` (kâr
   hesaplayıcısının SON değerleri) alır; `index._decision_snapshot` pazar verisini KAYITLI analizden (`db.get_latest_analysis`,
   süre sınırı yok — istemci pazar değeri göndermez), kişinin eşikleriyle, panelle AYNI kuralla (ACOS farklıysa `manual`)

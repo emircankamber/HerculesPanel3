@@ -813,8 +813,11 @@ async def _decision_snapshot(uid: int, key: str, marketplace: str, profit_in: di
         inp.update({k: float(v) for k, v in profit_in.items() if k in inp and v is not None})
     market_acos = ai["acos_detail"].get("value")
     acos_manual = abs(inp["acos"] - base["acos"]) > 1e-9
+    # Satış fiyatı da aynı kural: başlangıçtan (pazar ortalaması) farklıysa Kriter 01 o fiyatla değerlendirilir
+    market_price = ai["avg_price"]
+    price_manual = abs(inp["sale"] - base["sale"]) > 1e-9
     assessment = pre_assessment(
-        avg_price=ai["avg_price"], gross_margin=ai["gross_margin"],
+        avg_price=inp["sale"] if price_manual else market_price, gross_margin=ai["gross_margin"],
         acos=inp["acos"] / 100 if acos_manual else market_acos,
         acos_detail=None if acos_manual else ai["acos_detail"],
         top_brand_share=ai["top_brand_share"], strong_new_brands=ai["strong_new_brands"],
@@ -824,6 +827,9 @@ async def _decision_snapshot(uid: int, key: str, marketplace: str, profit_in: di
         if c["label"] == "ACOS":
             c["manual"] = acos_manual
             c["market_value"] = market_acos
+        elif c["label"] == "Ort. Satış Fiyatı":
+            c["manual"] = price_manual
+            c["market_value"] = market_price
         elif c["label"] == "Net Kar Marjı (kar analizi)":
             c["manual"] = True   # her zaman kâr hesaplayıcısının değerleriyle
     profit = None
@@ -834,6 +840,7 @@ async def _decision_snapshot(uid: int, key: str, marketplace: str, profit_in: di
     return {"v": 1, "verdict": assessment["verdict"], "negative_count": assessment["negative_count"],
             "rule": assessment["rule"], "criteria": criteria, "profit_inputs": inp, "profit": profit,
             "acos_manual": acos_manual, "market_acos": market_acos,
+            "price_manual": price_manual, "market_price": market_price,
             "acos_info": {k: ai["acos_detail"].get(k) for k in _SNAPSHOT_ACOS_INFO},
             "data_fetched_at": int(fetched_at or 0), "analysis_mode": payload.get("analysis_mode") or "keyword",
             "from_panel": bool(profit_in)}
