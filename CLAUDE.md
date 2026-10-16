@@ -352,6 +352,26 @@ yüzden backend'e hiç bağlanmamalı, sahte veri olur.
   `my_lessons[].my_note` ile görür; owner/admin `GET /api/training/progress` → `notes` (ekip filtresiyle) — panelde
   "Kazanım Notları" bölümü + matriste çerçeveli hücre. Kart üzerinde "Owner/admin bu notu görebilir" yazar.
 
+## Eğitim tamamlama koşulları — video izleme takibi + kazanım notu (`api/watch.py`)
+
+- **Kural (kullanıcı isteği, TÜM derslerde):** "Tamamladım" yalnızca (1) YouTube dersinde videonun en az %80'i
+  (`watch.WATCH_MIN_RATIO`) izlendiyse ve (2) KAYITLI kazanım notu en az 100 karakterse (`TRAINING_NOTE_MIN_CHARS`;
+  boşluklar tekilleştirilerek sayılır — `watch.normalized_len`, panelde aynı) açılır. SUNUCUDA denetlenir
+  (`/complete` completed=true → 409 + eksikler); geri almak serbest. Panel koşulları `requirements`'tan alır,
+  kaydedilmemiş notu "Tamamladım"da önce kaydeder. YouTube dışı bağlantılar takip EDİLEMEZ → yalnızca not şartı.
+  Önceden tamamlanmış dersler tamamlanmış kalır (geriye dönük uygulanmaz).
+- **Takip:** panel YouTube IFrame API ile (`app.js::embedYouTube`, `host` youtube-nocookie) oynarken ve sekme
+  görünürken her saniye konumu okur; ardışık iki okuma arası ilerleme (≤ 2× hız + pay) aralık olur, ileri sarma
+  sayılmaz; oynatma başında ve duraklatmada konum hemen alınır. Aralıklar ~10 sn'de bir
+  `POST /api/training/lessons/{id}/watch {duration, segments}` (kendi kaydı, atanmış YouTube dersi; değilse 404/409).
+  Sunucu `watch.apply_beat`: birleştirir (tekrar izleme iki kez sayılmaz), **zaman kuralı** yeni sayılan süre ≤
+  `MAX_SPEED`(2)×geçen gerçek zaman (+5 sn; geçen süre en çok `MAX_GAP`=60 sn sayılır) — 2× izleyen tam sayılır,
+  daha hızlısı/sahtesi kırpılır. İlk bildirilen süre sabitlenir. Tablo `training_watch` (v10; `DOUBLE PRECISION`
+  — Postgres REAL float4 zaman damgasında hassasiyet kaybeder). İlerleme matrisi `watch` oranlarını gösterir.
+- **Sınır:** tarayıcı araçlarıyla sahte bildirim gönderen biri yine de videonun en az yarı süresi kadar beklemek
+  zorunda; videoyu açıp başka iş yapanı ayırt edemeyiz. API yüklenemezse (engelleyici) video düz iframe ile açılır,
+  takip edilmez → tamamlama açılmaz (panel uyarır).
+
 ## Çoklu ekip, Ekip Yönetimi & kalıcı hesap silme (yalnızca owner)
 
 - **Model:** `teams` (ad, created_at) + `team_members` (team_id, user_id, added_at). Bir kişi birden fazla ekipte
