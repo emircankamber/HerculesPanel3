@@ -705,6 +705,10 @@ function renderPanel(data) {
       ? `${fmtCrit(c.value, unit)}${ctx.suffix ? `<small>${ctx.suffix}</small>` : ""}`
       : `<span class="text-outline">—</span>`;
     const vizHtml = typeof ctx.viz === "function" ? ctx.viz(c) : (ctx.viz || "");
+    // Kriter 03 kâr hesaplayıcısındaki ACOS'la değerlendiriliyorsa bunu açıkça söyle (hesaplanan değer de görünsün)
+    const subHtml = c.label === "ACOS" && c.manual
+      ? `<span class="text-tertiary font-semibold">Kâr hesaplayıcısında girilen ACOS</span> · hesaplanan: ${c.market_value == null ? "—" : fmtCrit(c.market_value, unit)}`
+      : (ctx.sub || "");
 
     div.className = "crit card";
     div.dataset.label = c.label;
@@ -723,7 +727,7 @@ function renderPanel(data) {
       <div class="crit-body">
         <div class="min-w-0">
           <div class="crit-val">${valueHtml}</div>
-          <div class="crit-sub">${ctx.sub || ""}</div>
+          <div class="crit-sub">${subHtml}</div>
         </div>
         <div class="crit-viz">${vizHtml}</div>
       </div>
@@ -752,29 +756,44 @@ function renderPanel(data) {
   });
   if (summaryEl) summaryEl.innerHTML = buildPlainSummary(criteria, pa.verdict);
 
-  // --- Ön değerlendirmeyi kar analizindeki net marjla güncelle (canlı) ---
-  function updateNetMarginCriterion(marginValue) {
-    const idx = criteria.findIndex(c => c.label === "Net Kar Marjı (kar analizi)");
-    if (idx < 0) return;
-    const c = criteria[idx];
-    c.value = marginValue;
-    c.flag = marginValue >= c.threshold ? "OK" : "OLUMSUZ";
-    const card = [...critGrid.children].find(el => el.dataset.label === c.label);
+  // --- Ön değerlendirmeyi kâr hesaplayıcısıyla CANLI güncelle ---
+  // Kriter 03 (ACOS): ACOS alanı başlangıç değerinden (hesaplanan ağırlıklı ACOS) farklıysa o değerle değerlendirilir;
+  // aynıysa sunucunun hesapladığı kriter aynen kalır. Kriter 06: hesaplayıcının net marjı. Sunucu kararı kaydederken
+  // AYNI kuralla (index._decision_snapshot) karar anındaki verileri saklar.
+  const baseCriteria = criteria.map(c => ({ ...c }));
+  function rerenderCriterion(idx) {
+    const card = [...critGrid.children].find(el => el.dataset.label === criteria[idx].label);
+    if (!card) return;
     const wasOpen = card.classList.contains("open");
-    renderCriterion(card, c, idx);
+    renderCriterion(card, criteria[idx], idx);
     if (wasOpen) card.classList.add("open");
+  }
+  const flagOf = (v, c) => (c.direction === ">=" ? v >= c.threshold : v <= c.threshold) ? "OK" : "OLUMSUZ";
+  function applyLiveCriteria({ margin, acosPct }) {
+    const ai = criteria.findIndex(c => c.label === "ACOS");
+    if (ai >= 0 && acosPct !== undefined) {
+      const base = baseCriteria[ai];
+      criteria[ai] = acosPct == null ? { ...base }
+        : { ...base, value: acosPct / 100, flag: flagOf(acosPct / 100, base), manual: true, market_value: base.value };
+      rerenderCriterion(ai);
+    }
+    const mi = criteria.findIndex(c => c.label === "Net Kar Marjı (kar analizi)");
+    if (mi >= 0 && margin != null) {
+      criteria[mi] = { ...criteria[mi], value: margin, flag: flagOf(margin, criteria[mi]) };
+      rerenderCriterion(mi);
+    }
 
     // Toplam olumsuz sayısını ve ön öneriyi SUNUCUNUN kuralıyla yeniden hesapla
     const negCount = criteria.filter(x => x.flag === "OLUMSUZ").length;
     const newVerdict = verdictFor(negCount) ?? pa.verdict;
     setVerdict(newVerdict, negCount);
     // Geçmiş / Ana Sayfa sunucunun kaydettiği öneriyi gösterir (kâr hesaplayıcısının başlangıç değerleriyle);
-    // kullanıcı maliyetleri burada değiştirip öneriyi değiştirirse bunu açıkça söyle.
+    // kullanıcı ACOS'u/maliyetleri burada değiştirip öneriyi değiştirirse bunu açıkça söyle.
     const savedNote = root.querySelector(".verdict-saved-note");
     if (savedNote) {
       const differs = data.profit_inputs && pa.verdict && newVerdict !== pa.verdict;
       savedNote.textContent = differs
-        ? `Kâr hesaplayıcısında değiştirdiğiniz değerlerle yeniden hesaplandı. Geçmiş ve Ana Sayfa'da kayıtlı ön öneri: ${pa.verdict} (başlangıç maliyetleriyle).`
+        ? `Kâr hesaplayıcısında değiştirdiğiniz değerlerle (ACOS / maliyetler) yeniden hesaplandı. Pazar kararı kaydedilirken bu güncel değerler ve öneri saklanır. Geçmiş ve Ana Sayfa'daki ilk ön öneri: ${pa.verdict} (başlangıç değerleriyle).`
         : "";
       savedNote.style.display = differs ? "" : "none";
     }
@@ -956,9 +975,17 @@ function renderPanel(data) {
       : "";
   }
   let lastProfitResult = null;  // Excel export'ta kullanılacak
+  // ACOS alanının başlangıç değeri (= hesaplanan ağırlıklı ACOS ya da varsayılan) — değişirse Kriter 03 onunla değerlendirilir
+  const acosInitial = parseFloat(root.querySelector(".p-acos").value) || 0;
+  const currentProfitInputs = () => {
+    const [cogs, sale, fba, ref_rate, acos, ret, gen] = profitInputs.map(i => parseFloat(i.value) || 0);
+    return { cogs, sale, fba, ref_rate, acos, ret, gen };
+  };
   const refUsdEl = root.querySelector(".p-ref-usd");
   const recalcProfit = async () => {
     const [cogs, sale, fba, refRate, acos, ret, gen] = profitInputs.map(i => parseFloat(i.value) || 0);
+    // Kriter 03 hemen (sunucu yanıtını beklemeden) güncellenir
+    applyLiveCriteria({ acosPct: Math.abs(acos - acosInitial) > 1e-9 ? acos : null });
     // Referral ORAN olarak tutulur; dolar karşılığı = oran × satış fiyatı (fiyat değişince yeniden hesaplanır)
     const ref = refRate / 100 * sale;   // Excel'deki =oran×fiyat formülüyle aynı (yuvarlamasız)
     if (refUsdEl) refUsdEl.textContent = `= $${ref.toFixed(2)}`;
@@ -981,7 +1008,7 @@ function renderPanel(data) {
       root.querySelector(".o-roi").textContent = (p.roi * 100).toFixed(1) + "%";
       const profitEl = root.querySelector(".o-profit");
       profitEl.style.color = p.unit_profit < 0 ? "var(--red)" : "var(--text-primary)";
-      if (sale > 0) updateNetMarginCriterion(p.margin);  // ön değerlendirmeyi canlı güncelle
+      if (sale > 0) applyLiveCriteria({ margin: p.margin });  // ön değerlendirmeyi canlı güncelle
     } catch { /* backend geçici erişilemezse sessiz geç */ }
   };
   profitInputs.forEach(i => i.addEventListener("input", recalcProfit));
@@ -1112,17 +1139,50 @@ function renderPanel(data) {
   refreshProofAssets();
 
   // --- Pazar kararı kaydet ---
-  root.querySelector(".decision-save").addEventListener("click", async () => {
+  // Karar, kaydedildiği andaki verilerle saklanır: kâr hesaplayıcısının SON değerleri (ACOS dahil) gönderilir,
+  // sunucu kriterleri + ön öneriyi kayıtlı pazar verisiyle aynı kuralla kurar (index._decision_snapshot).
+  const decisionLast = root.querySelector(".decision-last");
+  const showLastDecision = (d) => {
+    if (!decisionLast) return;
+    if (!d) { decisionLast.style.display = "none"; return; }
+    decisionLast.innerHTML = decisionRecordHtml(d, { open: false });
+    bindSnapToggles(decisionLast);
+    decisionLast.style.display = "";
+  };
+  apiFetch(`${API_BASE}/api/decision/latest?${new URLSearchParams({ keyword: ckAnalysisKey(data), marketplace: data.marketplace })}`)
+    .then(r => r.ok ? r.json() : null)
+    .then(b => {
+      const d = b?.decision;
+      if (!d) return;
+      const sel = root.querySelector(".decision-select");
+      if (sel && !sel.value) sel.value = d.decision;
+      showLastDecision(d);
+    })
+    .catch(() => { /* son karar gösterilemezse panel yine çalışır */ });
+  root.querySelector(".decision-save").addEventListener("click", async (e) => {
     const decision = root.querySelector(".decision-select").value;
     const note = root.querySelector(".decision-note").value;
-    if (!decision) return;
-    await apiFetch(`${API_BASE}/api/decision`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      // ASIN modunda karar da sorgu kaydıyla aynı anahtarla ("ASIN:B0..") — Raporlar'da tek satır olsun
-      body: JSON.stringify({ keyword: ckAnalysisKey(data), marketplace: data.marketplace, decision, note }),
-    });
-    root.querySelector(".decision-saved-msg").textContent = `✓ kaydedildi · ${new Date().toLocaleTimeString("tr-TR")}`;
+    const msg = root.querySelector(".decision-saved-msg");
+    if (!decision) { msg.textContent = "Önce bir karar seçin."; return; }
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    try {
+      const res = await apiFetch(`${API_BASE}/api/decision`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        // ASIN modunda karar da sorgu kaydıyla aynı anahtarla ("ASIN:B0..") — Raporlar'da tek satır olsun
+        body: JSON.stringify({ keyword: ckAnalysisKey(data), marketplace: data.marketplace, decision, note,
+                               profit_inputs: currentProfitInputs() }),
+      });
+      const b = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(apiErrorText(b, res.status));
+      msg.textContent = `✓ kaydedildi · ${new Date().toLocaleTimeString("tr-TR")}`;
+      showLastDecision({ decision, note: note.trim(), decided_at: b.decided_at, snapshot: b.snapshot });
+    } catch (err) {
+      msg.textContent = `Kaydedilemedi: ${err.message}`;
+    } finally {
+      btn.disabled = false;
+    }
   });
 
   // --- Excel export: tam rapor ---
@@ -1618,7 +1678,12 @@ async function loadDecisions() {
           </div>
           <div class="decision-card-meta"><span>${esc(item.marketplace)}</span><span>${date}</span></div>
           ${item.note ? `<div class="decision-card-note">"${esc(item.note)}"</div>` : ""}
+          <div class="snap-host mt-2">
+            <button type="button" class="snap-toggle crit-more !text-xs" aria-expanded="false">Karar anındaki veriler${item.snapshot?.verdict ? ` · öneri ${esc(item.snapshot.verdict)}` : ""} <span class="material-symbols-outlined" style="font-size:15px">expand_more</span></button>
+            <div class="snap-panel mt-2" hidden>${decisionSnapshotHtml(item.snapshot)}</div>
+          </div>
         `;
+        bindSnapToggles(card);
         card.querySelector(".card-delete-btn").addEventListener("click", async (ev) => {
           ev.stopPropagation();  // karta tıklama (analiz açma) tetiklenmesin
           if (!confirm(`"${item.keyword}" kararı silinsin mi?`)) return;
@@ -1695,6 +1760,80 @@ function bindSegment(container, attr, onChange) {
 const ACOS_CLASS = (acos) => acos == null ? "" : acos < 0.2 ? "acos-good" : acos < 0.5 ? "acos-mid" : "acos-bad";
 const fmtPct = (v, d = 1) => v == null || isNaN(v) ? "n/a" : (Number(v) * 100).toFixed(d) + "%";
 const fmtUsd = (v, d = 2) => v == null || isNaN(v) ? "n/a" : "$" + Number(v).toFixed(d);
+
+// ---------------------------------------------------------------------------
+// KARAR ANINDAKİ VERİLER (market_decision.snapshot_json — sunucu index._decision_snapshot kurar):
+// hangi kriter değerleri, ACOS ve maliyetlerle, hangi ön öneriyle karar verildi. Kararlar, Raporlar,
+// Ekip Aktivitesi ve Ürün Analizi'ndeki "Son kararınız" aynı görünümü kullanır.
+// ---------------------------------------------------------------------------
+const SNAP_CHIP = { "Uygun": "ok", "Sınırda": "warn", "Elenmiş": "bad" };
+const SNAP_LABEL = { "ACOS": "ACOS (ağırlıklı)", "Net Kar Marjı (kar analizi)": "Net Kâr Marjı" };
+function snapCritVal(v, unit) {
+  if (v == null || typeof v !== "number") return "—";
+  if (unit === "count") return String(v);
+  if (unit === "usd") return "$" + v.toFixed(2);
+  return (v * 100).toFixed(1) + "%";
+}
+const snapDate = (ts) => ts ? new Date(ts * 1000).toLocaleString("tr-TR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }) : "—";
+
+function decisionSnapshotHtml(snap) {
+  if (!snap || !Array.isArray(snap.criteria)) {
+    return `<div class="snap-body text-xs text-secondary">Bu karar, karar anındaki verilerin saklanmasından önce kaydedilmiş — veri yok.</div>`;
+  }
+  const rows = snap.criteria.map(c => {
+    const flag = c.flag === "OK" ? ["ok", "Olumlu"] : c.flag === "OLUMSUZ" ? ["bad", "Olumsuz"] : ["na", "Veri yok"];
+    const unit = c.unit || "percent";
+    let extra = "";
+    if (c.label === "ACOS") extra = c.manual ? ` <span class="chip warn !text-[10px]" title="Hesaplanan: ${esc(snapCritVal(c.market_value, unit))}">elle</span>` : ` <span class="text-secondary">(hesaplanan)</span>`;
+    return `<tr><td class="l">${esc(SNAP_LABEL[c.label] || c.label)}${extra}</td><td class="font-semibold">${esc(snapCritVal(c.value, unit))}</td>
+      <td class="text-secondary">${c.direction === ">=" ? "≥" : "≤"} ${esc(snapCritVal(c.threshold, unit))}</td><td><span class="chip ${flag[0]}">${flag[1]}</span></td></tr>`;
+  }).join("");
+  const pi = snap.profit_inputs || {};
+  const pr = snap.profit;
+  const acosCrit = snap.criteria.find(c => c.label === "ACOS");
+  const inputs = [
+    ["Satış fiyatı", fmtUsd(pi.sale)], ["COGS", fmtUsd(pi.cogs)], ["FBA", fmtUsd(pi.fba)],
+    ["Referral", pi.ref_rate == null ? "—" : `%${pi.ref_rate}`],
+    ["ACOS", pi.acos == null ? "—" : `%${pi.acos}${snap.acos_manual ? ` (elle; hesaplanan ${acosCrit && acosCrit.market_value != null ? fmtPct(acosCrit.market_value) : "—"})` : ""}`],
+    ["İade", pi.ret == null ? "—" : `%${pi.ret}`], ["Genel gider", pi.gen == null ? "—" : `%${pi.gen}`],
+  ].map(([k, v]) => `<span><span class="text-secondary">${k}:</span> <b>${esc(v)}</b></span>`).join("");
+  const outputs = pr ? `<div class="mt-1"><span class="text-secondary">Sonuç:</span> net marj <b>${fmtPct(pr.margin)}</b> · birim kâr <b>${fmtUsd(pr.unit_profit)}</b> · ROI <b>${fmtPct(pr.roi)}</b></div>` : "";
+  return `<div class="snap-body text-xs">
+    <div class="flex flex-wrap items-center gap-2">
+      <span class="text-secondary">Karar anındaki ön öneri:</span><span class="chip ${SNAP_CHIP[snap.verdict] || "na"}">${esc(snap.verdict || "—")}</span>
+      <span class="text-secondary">${snap.negative_count ?? "—"} olumsuz kriter · pazar verisi ${esc(snapDate(snap.data_fetched_at))}</span>
+    </div>
+    <div class="table-wrap mt-2"><table class="data-table text-[12px]"><thead><tr><th class="l">Kriter</th><th>Değer</th><th>Eşik</th><th>Durum</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div class="mt-2 flex flex-wrap gap-x-3 gap-y-1">${inputs}</div>${outputs}
+    ${snap.from_panel ? "" : `<div class="mt-1 text-secondary">Karar Raporlar'dan verildi: kâr değerleri kayıtlı analizin başlangıç değerleri (+ analiz öncesi maliyet).</div>`}
+  </div>`;
+}
+
+/** Kayıtlı bir karar + "Karar anındaki veriler" aç/kapa düğmesi (bindSnapToggles ile bağlanır). */
+function decisionRecordHtml(d, { open = false } = {}) {
+  const snapVerdict = d.snapshot?.verdict;
+  return `<div class="snap-record rounded-xl bg-surface-container-low p-3 text-xs">
+    <div class="flex flex-wrap items-center gap-2">
+      <span class="text-secondary">Son kararınız:</span><span class="chip ${SNAP_CHIP[d.decision] || "na"}">${esc(d.decision)}</span>
+      <span class="text-secondary">${esc(snapDate(d.decided_at))}</span>
+      ${snapVerdict && snapVerdict !== d.decision ? `<span class="chip warn" title="Karar anındaki ön öneri: ${esc(snapVerdict)}">Öneriyle farklı</span>` : ""}
+      <button type="button" class="snap-toggle crit-more !text-xs" aria-expanded="${open}">Karar anındaki veriler <span class="material-symbols-outlined" style="font-size:15px">expand_more</span></button>
+    </div>
+    ${d.note ? `<div class="italic text-on-surface-variant mt-1 break-words">"${esc(d.note)}"</div>` : ""}
+    <div class="snap-panel mt-2" ${open ? "" : "hidden"}>${decisionSnapshotHtml(d.snapshot)}</div>
+  </div>`;
+}
+
+function bindSnapToggles(scope) {
+  scope.querySelectorAll(".snap-toggle").forEach(btn => btn.addEventListener("click", (e) => {
+    e.stopPropagation();   // karta/satıra tıklama (analizi açma) tetiklenmesin
+    const panel = btn.closest(".snap-record, .snap-host")?.querySelector(".snap-panel");
+    if (!panel) return;
+    panel.hidden = !panel.hidden;
+    btn.setAttribute("aria-expanded", String(!panel.hidden));
+  }));  // Açık paneldeki tıklamalar da karta/satıra geçmesin
+  scope.querySelectorAll(".snap-panel").forEach(p => p.addEventListener("click", (e) => e.stopPropagation()));
+}
 /** Puanı görüntü için 1 haneye yuvarla (değer değişmez, yalnızca biçim) */
 const fmtRating = (v) => v == null || v === "" || isNaN(v) ? "n/a" : Number(v).toFixed(1);
 
@@ -2265,15 +2404,18 @@ function renderReports() {
             </div>
           </div>
         </div>
-        <div class="shrink-0 flex flex-wrap gap-1.5 sm:justify-end">${statusChip}${it.conflict ? `<span class="chip warn" title="Ekip kararı (${esc(it.decision)}) algoritmik ön öneriden (${esc(it.verdict)}) farklı">Öneriyle farklı</span>` : ""}</div>
+        <div class="shrink-0 flex flex-wrap gap-1.5 sm:justify-end">${statusChip}${it.conflict ? `<span class="chip warn" title="Ekip kararı (${esc(it.decision)}) ${it.decision_verdict ? "karar anındaki" : "algoritmik"} ön öneriden (${esc(it.decision_verdict || it.verdict)}) farklı">Öneriyle farklı</span>` : ""}</div>
       </div>
       <div class="grid grid-cols-2 md:grid-cols-4 gap-3 rounded-xl bg-surface-container-low p-3 mt-4 text-xs">
         <div><div class="text-secondary">Pazar kararı</div><div class="font-semibold text-sm mt-0.5">${esc(it.decision || "—")}</div></div>
         <div><div class="text-secondary">Ön öneri (algoritmik)</div><div class="mt-0.5">${verdictHtml}</div></div>
-        <div><div class="text-secondary">Karar tarihi</div><div class="font-medium text-sm mt-0.5">${it.decided_at ? fmtDate(it.decided_at) : "—"}</div></div>
+        <div><div class="text-secondary">Karar tarihi</div><div class="font-medium text-sm mt-0.5">${it.decided_at ? fmtDate(it.decided_at) : "—"}</div>${it.decision_verdict ? `<div class="text-secondary mt-0.5">karar anındaki öneri: <b>${esc(it.decision_verdict)}</b></div>` : ""}</div>
         <div><div class="text-secondary">Son sorgu</div><div class="font-medium text-sm mt-0.5">${it.queried_at ? fmtDate(it.queried_at) : "—"}</div></div>
       </div>
       ${it.note && !editing ? `<div class="text-[13px] text-on-surface-variant italic mt-3 break-words">"${esc(it.note)}"</div>` : ""}
+      ${it.decision ? `<div class="snap-host mt-2">
+        <button type="button" class="snap-toggle crit-more !text-xs" aria-expanded="false">Karar anındaki veriler <span class="material-symbols-outlined" style="font-size:15px">expand_more</span></button>
+        <div class="snap-panel mt-2" hidden>${decisionSnapshotHtml(it.snapshot)}</div></div>` : ""}
       <div class="mt-3 flex flex-wrap items-center gap-2">
         <span class="text-xs text-secondary">${it.decision ? "Kararı değiştir:" : "Karar ver:"}</span>
         <div class="rep-dec">${decBtns}</div>
@@ -2293,6 +2435,7 @@ function renderReports() {
           <button type="button" class="rep-open crit-more !text-[13px]">Yeniden Analiz Et <span class="material-symbols-outlined" style="font-size:16px">arrow_forward</span></button>
         </div>
       </div>`;
+    bindSnapToggles(div);
     const startEdit = (dec) => { repState.editing = repKey(it); repState.pick = dec; repState.note = undefined; renderReports(); };
     div.querySelectorAll(".rep-dec-btn").forEach(btn => btn.addEventListener("click", () => {
       if (editing) { repState.note = div.querySelector(".rep-note").value; repState.pick = btn.dataset.dec; renderReports(); }
@@ -2306,8 +2449,9 @@ function renderReports() {
       try {
         const res = await apiFetch(`${API_BASE}/api/decision`, {
           method: "POST", headers: { "Content-Type": "application/json" },
+          // Kâr hesaplayıcısı burada yok: karar anındaki veriler kayıtlı analizin başlangıç değerleriyle (+ analiz öncesi maliyet)
           body: JSON.stringify({ keyword: it.keyword, marketplace: it.marketplace, decision: repState.pick,
-                                 note: div.querySelector(".rep-note").value.trim() }),
+                                 note: div.querySelector(".rep-note").value.trim(), ...preCostBody() }),
         });
         const body = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(apiErrorText(body, res.status));
@@ -4186,9 +4330,12 @@ function renderTeam() {
     : `<tr><td colspan="5" class="muted !text-center !py-8">Filtreye uyan arama yok.</td></tr>`;
   $("#tm-decisions tbody").innerHTML = b.decisions.length ? b.decisions.map(r => `
     <tr ${rowAttrs(r)}><td class="l"><span class="break-all">${esc(r.user)}</span>${r.title ? `<div class="text-[11px] text-primary">${esc(r.title)}</div>` : ""}</td><td class="l font-medium"><span class="block min-w-[120px] max-w-[280px] whitespace-normal [overflow-wrap:anywhere]">${tmKeywordHtml(r.keyword)}</span></td>
-      <td>${esc(r.marketplace)}</td><td class="whitespace-nowrap">${esc(tmDate(r.at))}</td><td>${vchip(r.verdict)}</td>
-      <td>${vchip(r.decision)}</td><td class="l"><span class="block min-w-[160px] max-w-[320px] whitespace-normal [overflow-wrap:anywhere] text-xs">${esc(r.note || "")}</span></td></tr>`).join("")
+      <td>${esc(r.marketplace)}</td><td class="whitespace-nowrap">${esc(tmDate(r.at))}</td><td>${vchip(r.snapshot?.verdict || r.verdict)}</td>
+      <td>${vchip(r.decision)}</td><td class="l"><span class="block min-w-[160px] max-w-[320px] whitespace-normal [overflow-wrap:anywhere] text-xs">${esc(r.note || "")}</span>
+        <div class="snap-host"><button type="button" class="snap-toggle crit-more !text-xs" aria-expanded="false">Karar anındaki veriler <span class="material-symbols-outlined" style="font-size:15px">expand_more</span></button>
+        <div class="snap-panel mt-2 min-w-[320px]" hidden>${decisionSnapshotHtml(r.snapshot)}</div></div></td></tr>`).join("")
     : `<tr><td colspan="7" class="muted !text-center !py-8">Filtreye uyan karar yok.</td></tr>`;
+  bindSnapToggles($("#tm-decisions"));
   $$("#view-team .tm-row").forEach(tr => {
     const go = () => tmReanalyze(tr.dataset.kw, tr.dataset.mp);
     tr.addEventListener("click", go);
