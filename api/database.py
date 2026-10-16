@@ -40,7 +40,7 @@ _SCHEMAS = [
     """CREATE TABLE IF NOT EXISTS market_decision (
         id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, keyword TEXT NOT NULL,
         marketplace TEXT NOT NULL, decision TEXT NOT NULL, note TEXT, decided_by TEXT,
-        decided_at INTEGER NOT NULL)""",
+        decided_at INTEGER NOT NULL, snapshot_json TEXT)""",
     """CREATE TABLE IF NOT EXISTS user_query_log (
         id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, keyword TEXT NOT NULL,
         marketplace TEXT NOT NULL, queried_at INTEGER NOT NULL, verdict TEXT)""",
@@ -204,6 +204,8 @@ async def _add_column_if_missing(table: str, column: str, coltype: str):
 async def _migrate_schema():
     """Eski dağıtımlardan kalan eksik sütunları tamamlar (bkz. _add_column_if_missing)."""
     await _add_column_if_missing("market_decision", "user_id", "INTEGER")
+    # Karar anındaki veriler (kriterler, ACOS, kâr girdileri, ön öneri) — index._decision_snapshot
+    await _add_column_if_missing("market_decision", "snapshot_json", "TEXT")
     # Roller: canlı Postgres'te users tablosu zaten var -> sütun migrasyonla eklenir.
     # Owner ATANABİLİR bir roldür (birden fazla olabilir); yetki her istekte bu
     # sütundan okunur. Migrasyon idempotent: boş/geçersiz roller member olur;
@@ -310,11 +312,12 @@ async def _ensure_staff_in_team():
 # ŞEMAYA/MİGRASYONA HER DEĞİŞİKLİKTE (yeni tablo, sütun, indeks, veri düzeltmesi, tohum) BU SAYIYI ARTIR —
 # artırmazsan canlı veritabanında migrasyon hiç çalışmaz.
 # ---------------------------------------------------------------------------
-SCHEMA_VERSION = 8  # v2: banned_categories · v3: training_notes · v4: bildirimler, forum okunma/rapor/görsel, analiz/ders bağı
+SCHEMA_VERSION = 9  # v2: banned_categories · v3: training_notes · v4: bildirimler, forum okunma/rapor/görsel, analiz/ders bağı
                     # v5: e-posta doğrulama/sıfırlama, deneme sınırı, bildirim tercihleri
                     # v6: mcp_cache (Trendler 72 saat), bildirim varsayılanı hepsi açık
                     # v7: doğrulama bağlantısı hiç gönderilmemiş (eski) kullanıcılar doğrulanmış sayılır
                     # v8: app_settings, trello_cards (Trello aktarımı)
+                    # v9: market_decision.snapshot_json (karar anındaki veriler)
 
 
 def _migration_env_hash() -> str:
@@ -544,6 +547,20 @@ async def get_cached(keyword: str, marketplace: str):
     return payload, row["fetched_at"]
 
 
+async def get_latest_analysis(keyword: str, marketplace: str):
+    """Kayıtlı en yeni analiz → (payload, fetched_at), SÜRE SINIRI YOK (karar anındaki veriler için). Yoksa None."""
+    row = await fetch_one(
+        "SELECT payload_json, fetched_at FROM keyword_analysis WHERE LOWER(keyword) = LOWER(?) AND marketplace = ? "
+        "ORDER BY fetched_at DESC LIMIT 1", (keyword, marketplace))
+    if not row:
+        return None
+    try:
+        payload = json.loads(row["payload_json"])
+    except (TypeError, ValueError):
+        return None
+    return (payload, row["fetched_at"]) if isinstance(payload, dict) else None
+
+
 # --- Genel ayarlar & Trello kart eşleşmesi ---
 async def get_setting(key: str) -> dict | None:
     row = await fetch_one("SELECT value_json FROM app_settings WHERE key = ?", (key,))
@@ -644,17 +661,28 @@ async def delete_analysis(user_id: int, keyword: str, marketplace: str):
 # ---------------------------------------------------------------------------
 # PAZAR KARARLARI — tamamen kullanıcıya özel
 # ---------------------------------------------------------------------------
-async def save_decision(user_id: int, keyword: str, marketplace: str, decision: str, note: str, decided_by: str):
+async def save_decision(user_id: int, keyword: str, marketplace: str, decision: str, note: str, decided_by: str,
+                        snapshot: dict | None = None):
     await execute(
-        "INSERT INTO market_decision (user_id, keyword, marketplace, decision, note, decided_by, decided_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (user_id, keyword, marketplace, decision, note, decided_by, int(time.time())))
+        "INSERT INTO market_decision (user_id, keyword, marketplace, decision, note, decided_by, decided_at, snapshot_json) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (user_id, keyword, marketplace, decision, note, decided_by, int(time.time()),
+         json.dumps(snapshot, ensure_ascii=False) if snapshot else None))
+
+
+def _parse_snapshot(raw) -> dict | None:
+    try:
+        v = json.loads(raw) if raw else None
+    except (TypeError, ValueError):
+        return None
+    return v if isinstance(v, dict) else None
 
 
 async def list_decisions_grouped(user_id: int):
-    """Yalnızca BU kullanıcının kararlarını, her (keyword, marketplace) için EN SONU alıp gruplar."""
+    """Yalnızca BU kullanıcının kararlarını, her (keyword, marketplace) için EN SONU alıp gruplar.
+    `snapshot` = karar anındaki veriler (kriterler, ACOS, kâr girdileri, ön öneri); eski kararlarda None."""
     rows = await fetch_all("""
-        SELECT md.id, md.keyword, md.marketplace, md.decision, md.note, md.decided_by, md.decided_at
+        SELECT md.id, md.keyword, md.marketplace, md.decision, md.note, md.decided_by, md.decided_at, md.snapshot_json
         FROM market_decision md
         WHERE md.user_id = ? AND md.id = (
             SELECT md2.id FROM market_decision md2
@@ -664,8 +692,23 @@ async def list_decisions_grouped(user_id: int):
     """, (user_id, user_id))
     grouped = {"Uygun": [], "Sınırda": [], "Elenmiş": []}
     for r in rows:
+        r = dict(r)
+        r["snapshot"] = _parse_snapshot(r.pop("snapshot_json", None))
         grouped.setdefault(r["decision"], []).append(r)
     return grouped
+
+
+async def latest_decision(user_id: int, keyword: str, marketplace: str) -> dict | None:
+    """Kişinin bu ürün için son kararı (anahtar harf duyarsız) + karar anındaki veriler."""
+    row = await fetch_one(
+        "SELECT keyword, marketplace, decision, note, decided_at, snapshot_json FROM market_decision "
+        "WHERE user_id = ? AND LOWER(keyword) = LOWER(?) AND marketplace = ? ORDER BY decided_at DESC, id DESC LIMIT 1",
+        (user_id, keyword, marketplace))
+    if not row:
+        return None
+    r = dict(row)
+    r["snapshot"] = _parse_snapshot(r.pop("snapshot_json", None))
+    return r
 
 
 async def delete_decision(user_id: int, keyword: str, marketplace: str):
@@ -722,6 +765,16 @@ async def team_decisions(user_id: int | None = None, since: int | None = None, u
         "SELECT q.id, q.user_id, u.email, q.keyword, q.marketplace, q.decision, q.note, q.decided_at "
         f"FROM market_decision q LEFT JOIN users u ON u.id = q.user_id{where} "
         "ORDER BY q.decided_at DESC, q.id DESC", tuple(args))
+
+
+async def decision_snapshots(ids) -> dict:
+    """{karar id: karar anındaki veriler} — yalnızca verilen (sayfadaki) kararlar için; boş liste → {}."""
+    ids = [int(i) for i in ids or []]
+    if not ids:
+        return {}
+    rows = await fetch_all(f"SELECT id, snapshot_json FROM market_decision WHERE id IN ({','.join('?' for _ in ids)})",
+                           tuple(ids))
+    return {r["id"]: _parse_snapshot(r["snapshot_json"]) for r in rows}
 
 
 async def team_verdict_log(keywords=None) -> list[dict]:

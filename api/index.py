@@ -38,7 +38,7 @@ from pydantic import BaseModel, Field
 
 from mcp_client import call_tool
 from scoring import calc_keyword_ad_metrics, calc_profit, pre_assessment, DEFAULT_THRESHOLDS, verdict_rule, weighted_top_acos, \
-    initial_profit_inputs, net_margin_from_inputs, ACOS_POOL_SIZE, RELEVANCY_BANDS
+    initial_profit_inputs, net_margin_from_inputs, ACOS_POOL_SIZE, RELEVANCY_BANDS, PROFIT_DEFAULTS
 import signal_engine as se
 
 # Bayesian (scipy) ve Portfolio (ortools) opsiyonel — Vercel deploy boyutunu
@@ -752,12 +752,27 @@ async def profit(req: ProfitRequest, user: dict = Depends(require_auth)):
 # ---------------------------------------------------------------------------
 # Pazar kararını kaydet (ekibin manuel Uygun/Sınırda/Elenmiş kararı)
 # ---------------------------------------------------------------------------
+class DecisionProfitInputs(BaseModel):
+    """Kâr hesaplayıcısının karar anındaki değerleri (panel alanlarıyla aynı birimler: $, oranlar YÜZDE sayısı)."""
+    cogs: float = Field(..., ge=0, le=100000)
+    sale: float = Field(..., ge=0, le=100000)
+    fba: float = Field(..., ge=0, le=100000)
+    ref_rate: float = Field(..., ge=0, le=100)
+    acos: float = Field(..., ge=0, le=1000)
+    ret: float = Field(..., ge=0, le=100)
+    gen: float = Field(..., ge=0, le=100)
+
+
 class DecisionRequest(BaseModel):
     keyword: str = Field(..., min_length=1, max_length=500)
     marketplace: str = Field("US", max_length=10)
     decision: str = Field(..., pattern=r"^(Uygun|Sınırda|Elenmiş)$")
     note: str = Field("", max_length=2000)
     decided_by: str = ""
+    # Karar anındaki veriler (bkz. _decision_snapshot): panel kâr hesaplayıcısının SON değerlerini gönderir;
+    # gönderilmezse (Raporlar'dan karar) kayıtlı analizin başlangıç değerleri + analiz öncesi maliyet kullanılır.
+    profit_inputs: DecisionProfitInputs | None = None
+    pre_cost: PreCost | None = None
 
 
 _ASIN_TITLE_RE = re.compile(r"^(B0[A-Z0-9]{8})\s+—\s", re.I)
@@ -775,12 +790,76 @@ def _analysis_key(keyword: str) -> str:
     return kw
 
 
+_SNAPSHOT_ACOS_INFO = ("count", "n", "no_sales", "total_spend", "total_sales", "rank_field")
+
+
+async def _decision_snapshot(uid: int, key: str, marketplace: str, profit_in: dict | None,
+                             pre_cost: dict | None) -> dict | None:
+    """KARAR ANINDAKİ VERİLER — SUNUCUDA kurulur. Pazar verisi kayıtlı analizden (istemci değer göndermez),
+    kişinin eşikleriyle; yalnızca kâr hesaplayıcısının değerleri istemciden gelir (kişinin kendi varsayımı).
+    Panelin canlı hesabıyla aynı kural: ACOS alanı başlangıç değerinden (hesaplanan ağırlıklı ACOS) farklıysa
+    Kriter 03 o değerle değerlendirilir (`manual`); Kriter 06 bu değerlerle hesaplanan net marj. Kayıtlı analiz
+    yoksa None (karar yine kaydedilir)."""
+    hit = await db.get_latest_analysis(key, marketplace)
+    if not hit:
+        return None
+    payload, fetched_at = hit
+    ai = payload.get("_assess_inputs") if isinstance(payload.get("_assess_inputs"), dict) else _assess_inputs_from_payload(payload)
+    if not ai:
+        return None
+    base = initial_profit_inputs(ai["avg_price"], ai["acos_detail"]["value"], ai["return_rate"], pre_cost)
+    inp = {k: base[k] for k in PROFIT_DEFAULTS}
+    if profit_in:
+        inp.update({k: float(v) for k, v in profit_in.items() if k in inp and v is not None})
+    market_acos = ai["acos_detail"].get("value")
+    acos_manual = abs(inp["acos"] - base["acos"]) > 1e-9
+    assessment = pre_assessment(
+        avg_price=ai["avg_price"], gross_margin=ai["gross_margin"],
+        acos=inp["acos"] / 100 if acos_manual else market_acos,
+        acos_detail=None if acos_manual else ai["acos_detail"],
+        top_brand_share=ai["top_brand_share"], strong_new_brands=ai["strong_new_brands"],
+        net_margin=net_margin_from_inputs(inp), thresholds=await db.get_user_thresholds(uid))
+    criteria = assessment["criteria"]
+    for c in criteria:
+        if c["label"] == "ACOS":
+            c["manual"] = acos_manual
+            c["market_value"] = market_acos
+        elif c["label"] == "Net Kar Marjı (kar analizi)":
+            c["manual"] = True   # her zaman kâr hesaplayıcısının değerleriyle
+    profit = None
+    if inp["sale"] > 0:
+        profit = calc_profit(cogs=inp["cogs"], sale_price=inp["sale"], fba_fee=inp["fba"],
+                             referral_fee=inp["ref_rate"] / 100 * inp["sale"], acos=inp["acos"] / 100,
+                             return_rate=inp["ret"] / 100, overhead_rate=inp["gen"] / 100)
+    return {"v": 1, "verdict": assessment["verdict"], "negative_count": assessment["negative_count"],
+            "rule": assessment["rule"], "criteria": criteria, "profit_inputs": inp, "profit": profit,
+            "acos_manual": acos_manual, "market_acos": market_acos,
+            "acos_info": {k: ai["acos_detail"].get(k) for k in _SNAPSHOT_ACOS_INFO},
+            "data_fetched_at": int(fetched_at or 0), "analysis_mode": payload.get("analysis_mode") or "keyword",
+            "from_panel": bool(profit_in)}
+
+
 @app.post("/api/decision")
 async def save_decision(req: DecisionRequest, user: dict = Depends(require_auth)):
     uid = user.get("user_id", 0)
-    await db.save_decision(uid, _analysis_key(req.keyword), req.marketplace, req.decision, req.note.strip(),
-                           user.get("email", req.decided_by))
-    return {"ok": True}
+    key = _analysis_key(req.keyword)
+    try:
+        snapshot = await _decision_snapshot(uid, key, req.marketplace,
+                                            req.profit_inputs.model_dump() if req.profit_inputs else None,
+                                            req.pre_cost.model_dump(exclude_none=True) if req.pre_cost else None)
+    except Exception as e:   # anlık görüntü kurulamasa da karar kaydedilsin
+        print(f"[decision] snapshot kurulamadı ({key}): {e!r}")
+        snapshot = None
+    await db.save_decision(uid, key, req.marketplace, req.decision, req.note.strip(),
+                           user.get("email", req.decided_by), snapshot)
+    return {"ok": True, "decision": req.decision, "decided_at": int(time.time()), "snapshot": snapshot}
+
+
+@app.get("/api/decision/latest")
+async def latest_decision(keyword: str = Query(..., min_length=1, max_length=500),
+                          marketplace: str = Query("US", max_length=10), user: dict = Depends(require_auth)):
+    """Kişinin bu ürün için son kararı + karar anındaki veriler (yoksa decision=null)."""
+    return {"decision": await db.latest_decision(user.get("user_id", 0), _analysis_key(keyword), marketplace)}
 
 
 @app.get("/api/decisions")
@@ -899,7 +978,7 @@ async def _report_items(user_id) -> list[dict]:
                 "keyword": _analysis_key(it["keyword"]), "marketplace": it["marketplace"], "decision": decision,
                 "note": it.get("note") or "", "decided_at": it.get("decided_at"),
                 "decided_by": _person(names, it.get("decided_by")) or "",
-                "verdict": None, "queried_at": None}
+                "verdict": None, "queried_at": None, "snapshot": it.get("snapshot")}
     for r in recent:
         cur = items.get(key(r["keyword"], r["marketplace"]))
         if cur:
@@ -908,10 +987,14 @@ async def _report_items(user_id) -> list[dict]:
         else:
             items[key(r["keyword"], r["marketplace"])] = {
                 "keyword": _analysis_key(r["keyword"]), "marketplace": r["marketplace"], "decision": None, "note": "",
-                "decided_at": None, "decided_by": "", "verdict": r["verdict"], "queried_at": r["fetched_at"]}
+                "decided_at": None, "decided_by": "", "verdict": r["verdict"], "queried_at": r["fetched_at"],
+                "snapshot": None}
     for it in items.values():
-        # Ekip kararı algoritmik ön öneriden farklı mı (ikisi de varsa)
-        it["conflict"] = bool(it["decision"] and it["verdict"] and it["decision"] != it["verdict"])
+        # Ekip kararı algoritmik ön öneriden farklı mı (ikisi de varsa). Karar anındaki veriler kayıtlıysa
+        # KARAR ANINDAKİ ön öneriyle (kişinin girdiği ACOS/maliyetlerle) karşılaştırılır; yoksa son sorgununkiyle.
+        ref = (it.get("snapshot") or {}).get("verdict") or it["verdict"]
+        it["decision_verdict"] = (it.get("snapshot") or {}).get("verdict")
+        it["conflict"] = bool(it["decision"] and ref and it["decision"] != ref)
     return sorted(items.values(), key=_report_ts, reverse=True)
 
 
@@ -4516,6 +4599,8 @@ async def team_activity(user_id: int | None = Query(None, ge=0), team_id: int | 
     for r in await db.team_verdict_log([r["keyword"] for r in d_rows]):
         vindex.setdefault((r["user_id"], r["keyword"], r["marketplace"]), []).append((r["queried_at"], r["verdict"]))
 
+    snaps = await db.decision_snapshots([r["id"] for r in d_rows])
+
     def who(uid, email):
         return names.get(uid) or emails.get(uid) or "—"
 
@@ -4525,7 +4610,8 @@ async def team_activity(user_id: int | None = Query(None, ge=0), team_id: int | 
     d_out = [{"id": r["id"], "user_id": r["user_id"], "user": who(r["user_id"], r.get("email")), "title": titles.get(r["user_id"], ""), "email": emails.get(r["user_id"]),
               "keyword": r["keyword"], "marketplace": r["marketplace"], "at": r["decided_at"],
               "decision": r["decision"], "note": r.get("note") or "",
-              "verdict": _verdict_for(vindex, r["user_id"], r["keyword"], r["marketplace"], r["decided_at"])}
+              "verdict": _verdict_for(vindex, r["user_id"], r["keyword"], r["marketplace"], r["decided_at"]),
+              "snapshot": snaps.get(r["id"])}
              for r in d_rows]
 
     # Özet: seçili tarih aralığı (since/until), aralık yoksa TÜM ZAMANLAR. Kişi/karar/arama filtreleri özete uygulanmaz.

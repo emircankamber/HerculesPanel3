@@ -657,6 +657,23 @@ yüzden backend'e hiç bağlanmamalı, sahte veri olur.
 - Geçmiş kayıtlardaki (`user_query_log.verdict`, `keyword_analysis.verdict`) ön öneriler
   kaydedildikleri andaki kurala göredir; yeniden hesaplanmaz.
 
+## Kâr hesaplayıcısındaki ACOS → Kriter 03 → ön öneri (canlı) & karar anındaki veriler
+
+- **Canlı:** Kâr sekmesinde ACOS alanı başlangıç değerinden (sunucunun `profit_inputs.acos` = hesaplanan ağırlıklı ACOS,
+  1 ondalık) FARKLIYSA Kriter 03 o değerle (eşik/yön aynı) değerlendirilir, kartta "Kâr hesaplayıcısında girilen ACOS ·
+  hesaplanan: X" yazar; aynı değere dönülünce sunucunun kriteri aynen geri gelir. Kriter 06 (net marj) zaten bu
+  değerlerle. Ön öneri `verdictFor` ile yeniden (`app.js::applyLiveCriteria`).
+- **Karar kaydı:** `POST /api/decision` panelden `profit_inputs {cogs, sale, fba, ref_rate, acos, ret, gen}` (kâr
+  hesaplayıcısının SON değerleri) alır; `index._decision_snapshot` pazar verisini KAYITLI analizden (`db.get_latest_analysis`,
+  süre sınırı yok — istemci pazar değeri göndermez), kişinin eşikleriyle, panelle AYNI kuralla (ACOS farklıysa `manual`)
+  kurar → `market_decision.snapshot_json` (v9): verdict, negative_count, criteria (+ ACOS `manual`/`market_value`),
+  profit_inputs, profit, acos_info, data_fetched_at, `from_panel`. Raporlar'dan verilen kararda `profit_inputs` yok →
+  kayıtlı analizin başlangıç değerleri + `pre_cost`. Kayıtlı analiz yoksa snapshot None (karar yine kaydedilir).
+- **Görüntüleme:** "Karar anındaki veriler" (`app.js::decisionSnapshotHtml`) — Ürün Analizi'nde "Son kararınız"
+  (`GET /api/decision/latest`), Kararlar kartları, Raporlar, Ekip Aktivitesi. Raporlar'da `conflict` artık karar anındaki
+  öneriyle karşılaştırılır (`decision_verdict`; yoksa son sorgunun önerisi). Eski kararlarda snapshot yok → "veri yok".
+  Geçmiş/Ana Sayfa'daki sorgu ön önerisi (`user_query_log.verdict`) DEĞİŞMEZ (başlangıç değerleriyle).
+
 ## Kriter 03 — ACOS (ilgili ilk 20 keyword, ağırlıklı, hesaplanan)
 
 - **Yalnızca SUNUCUDA:** `scoring.weighted_top_acos()` → `ACOS = Σ(bid × clicks) ÷ Σ(purchases × fiyat)`
