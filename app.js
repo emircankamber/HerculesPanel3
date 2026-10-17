@@ -1030,11 +1030,13 @@ function renderPanel(data) {
     const tbody = root.querySelector(".comp-tbody");
     tbody.innerHTML = "";
     if (!rows.length) {
-      tbody.innerHTML = "<tr><td colspan='7' class='muted'>Otomatik rakip bulunamadı — ASIN'leri manuel gir.</td></tr>";
+      tbody.innerHTML = "<tr><td colspan='8' class='muted'>Otomatik rakip bulunamadı — ASIN'leri manuel gir.</td></tr>";
       return;
     }
+    const domain = AMAZON_DOMAIN[data.marketplace] || "amazon.com";
     rows.forEach(r => {
       const tr = document.createElement("tr");
+      const asinOk = /^[A-Z0-9]{10}$/i.test(String(r.asin || ""));
       const isNew = isWithinLastYear(r.availableDate);
       tr.innerHTML = `<td class="l">
           <div class="flex items-center gap-2"><span class="mono font-semibold">${esc(r.asin ?? "")}</span>${isNew ? '<span class="chip warn">Yeni Giriş</span>' : ""}</div>
@@ -1045,7 +1047,10 @@ function renderPanel(data) {
         <td class="font-semibold" title="$${fmtNum(Math.round(r.revenue || 0))}">$${fmtCompact(Math.round(r.revenue || 0))}</td>
         <td>${r.bsr != null ? '<span class="chip">#' + fmtNum(r.bsr) + "</span>" : "n/a"}</td>
         <td>${r.rating != null ? '<span class="inline-flex items-center gap-1"><span class="material-symbols-outlined text-tertiary-container" style="font-size:15px">star</span>' + r.rating + "</span>" : "n/a"}</td>
-        <td title="${fmtNum(r.reviews ?? r.ratings)} yorum">${fmtCompact(r.reviews ?? r.ratings)}</td>`;
+        <td title="${fmtNum(r.reviews ?? r.ratings)} yorum">${fmtCompact(r.reviews ?? r.ratings)}</td>
+        <td class="!text-center">${asinOk
+          ? `<a class="icon-btn" href="https://www.${domain}/dp/${encodeURIComponent(r.asin)}" target="_blank" rel="noopener noreferrer" title="Amazon'da aç" aria-label="Amazon'da aç"><span class="material-symbols-outlined">open_in_new</span></a>`
+          : ""}</td>`;
       tbody.appendChild(tr);
     });
   }
@@ -1068,7 +1073,7 @@ function renderPanel(data) {
     if (!asinsRaw) return;
     const asins = asinsRaw.split(",").map(s => s.trim()).filter(Boolean);
     const tbody = root.querySelector(".comp-tbody");
-    tbody.innerHTML = "<tr><td colspan='7' class='muted'>yükleniyor…</td></tr>";
+    tbody.innerHTML = "<tr><td colspan='8' class='muted'>yükleniyor…</td></tr>";
     try {
       const res = await apiFetch(`${API_BASE}/api/competitors`, {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -1084,7 +1089,7 @@ function renderPanel(data) {
       }));
       renderCompetitorRows(competitorRows);
     } catch (err) {
-      tbody.innerHTML = `<tr><td colspan='7' class='muted'>Hata: ${esc(err.message)}</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan='8' class='muted'>Hata: ${esc(err.message)}</td></tr>`;
     }
   });
 
