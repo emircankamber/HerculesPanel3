@@ -616,7 +616,7 @@ yüzden backend'e hiç bağlanmamalı, sahte veri olur.
   yoklar), `POST /api/notifications/read {ids | all}` — hepsi `require_user`, yalnızca kişinin kendi kayıtları.
 - Panel: üst bardaki zil (`app.js::ntStart/ntPoll/ntGo`); tıklama ilgili başlığa (cevaba kaydırıp vurgular) ya da
   Eğitim'e götürür. Zil başlatma kodu dosyanın BAŞINDA çalışır — orada `$` yardımcısı henüz tanımlı DEĞİL
-  (`getElementById` kullan). E-posta / web push / Slack-Teams bu tabloyu kaynak (giden kutusu) olarak kullanacak.
+  (`getElementById` kullan). E-posta (`notify_email`) ve Slack DM'i (`slack_notify`) her kayıtta buradan tetiklenir.
 
 ## E-posta (Resend) — doğrulama, şifre sıfırlama, bildirimler (`api/mailer.py`, `api/notify_email.py`)
 
@@ -665,6 +665,35 @@ yüzden backend'e hiç bağlanmamalı, sahte veri olur.
   nedenler alıcıya özel: doğrulanmamış adres, kapatılmış tercih ya da DÜZENLEMEDE kişinin dersi zaten görüyor olması.
   Düzenlemede artık "Seçilen kişiler"e AÇIKÇA yeni eklenen herkes de bildirim alır (`lesson_explicit_assignees`).
 - Test: `mailer.httpx.AsyncClient`'ı `httpx.MockTransport`'lu istemciyle değiştirip giden gövdeleri doğrula (gerçek Resend'e gitme).
+
+## Slack (`api/slack.py` + `api/slack_notify.py` + `/api/slack/*`) — bildirimler + Slack'ten forum cevabı
+
+- **Ortam değişkenleri (istek anında):** `SLACK_BOT_TOKEN` (xoxb-; yoksa Slack tamamen KAPALI, hiçbir çağrı yapılmaz),
+  `SLACK_SIGNING_SECRET` (yoksa Slack'ten yanıt KAPALI, bildirimler gider). Bağlantılar `APP_BASE_URL`'den. Uygulama
+  panelin verdiği manifest'le kurulur (`slack.manifest`, kapsamlar `BOT_SCOPES`, olaylar message.channels/groups/im;
+  Request URL = `APP_BASE_URL/api/slack/events`). Ayarlar `app_settings.slack`, yalnızca owner (Ekip Yönetimi → "Slack").
+- **Kişi eşleştirme** `slack_users`: panelde DOĞRULANMIŞ e-posta = Slack e-postası → otomatik (`users.lookupByEmail`,
+  bulunamayan günde bir yeniden). Owner elle bağlar ya da kapatır (`source=manual`, NULL = kapalı → ne DM gider ne
+  Slack'ten yazdığı panele bağlanır). Bir Slack hesabı tek kişiye (409).
+- **DM:** `notify.add` → `slack_notify.dispatch_dm` (e-postayla aynı kayıttan). Owner ayarı `dm` + kişinin tercihi
+  (`notification_prefs.prefs_json.slack` gruplar `notify_email.SLACK_GROUPS`, `slack_off`; Profilim → Bildirim Ayarları).
+  Herkese giden new_thread/new_reply ve bültenler DM DEĞİL → kanala. PUT prefs `slack` göndermezse kayıtlı Slack tercihi korunur.
+- **Kanal** (`channel_id`; özel kanalda bot üye olmalı, herkese açıkta kaydederken katılır): `events.forum` yeni başlık/bülten
+  (kök mesaj), `events.replies` cevaplar kökün altına thread (kök yoksa yeni kök açılır), `events.lessons` yeni ders,
+  `events.due` son tarih. "Sadece ekip" başlıkları yalnızca `team_threads` açıksa (kanalda ekip dışı varsa kapat).
+- **Slack'ten cevap** `POST /api/slack/events`: imza (v0 HMAC, 5 dk), `slack_events` ile olay bir kez (Slack 3 sn'de yanıt
+  alamazsa yeniden gönderir). Yalnızca `slack_messages`'ta kayıtlı bir mesajın (kanal kökü / DM bildirimi) ALTINA thread
+  yanıtı işlenir; düzenleme/silme/bot mesajı yok sayılır. Cevap `index._post_reply` ile — panel ucuyla AYNI yol (görünürlük
+  `forum.visible`, kilit 423, paylaşım sınırı 429, bildirimler, kanala kopya; geldiği thread'e geri yazılmaz). Ret
+  sebebi kişiye ephemeral (DM'de thread) mesajla söylenir; başarıda ✅ tepkisi. Metin `slack.to_plain` (<@U> → @kullanıcıadı,
+  bağlantılar, *kalın*); dosyalar aktarılmaz. `url_verification` signing secret henüz yoksa da yanıtlanır (kurulum).
+- **Son tarih hatırlatması** cron `GET /api/cron/slack-daily` 06:20 UTC (`CRON_SECRET`): kayıtlı saat diliminde yaklaşan
+  (`due_days`, varsayılan 2) / bugün / geçen (≤7 gün) dersler → kanala TEK özet ("x/y kişi tamamladı") + tamamlamamış
+  kişilere DM (tercih `lesson`). `slack_reminders` (ders, kişi|0=kanal, aşama, son tarih) bir kez; tarih değişirse yeniden.
+- **Güvenlik:** Slack'e giden HER kullanıcı metni (blocks VE yedek `text`) `slack.esc` ile — "<!channel>" toplu etiket
+  üretilemez. Hiçbir Slack hatası panel isteğini düşürmez (loglanır). Hesap silinince `slack_users/reminders/messages` silinir.
+- Test: `slack.httpx.AsyncClient`'ı `httpx.MockTransport`'lu istemciyle değiştir (gerçek Slack'e gitme); olayları
+  `SLACK_SIGNING_SECRET` ile imzalayıp `/api/slack/events`'e gönder.
 
 ## Ön öneri kuralı (Uygun / Sınırda / Elenmiş)
 

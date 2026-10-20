@@ -6,8 +6,8 @@ burada yalnızca olayın türü, kimin yaptığı (actor_id) ve hedefi (başlık
 (`data_json`: başlık adı vb. — hedef sonradan silinse de bildirim okunabilsin) saklanır.
 
 Görünürlük kuralı ÇIKTIDA da uygulanır: "Sadece ekip" başlığına ait bildirim, kişi artık hiçbir ekipte değilse
-listede/sayımda görünmez (index._visible_notifications). E-posta / web push / Slack gibi kanallar ileride bu
-tabloyu kaynak olarak kullanacak (giden kutusu).
+listede/sayımda görünmez (index._visible_notifications). E-posta (notify_email) ve Slack DM'i (slack_notify) her
+bildirim kaydında buradan tetiklenir.
 """
 import json
 import time
@@ -79,7 +79,19 @@ async def add(user_ids, kind: str, actor_id: int | None, thread_id: int | None =
     if ids:
         import notify_email   # döngüsel içe aktarmayı önlemek için geç yükleme
         await notify_email.dispatch(kind, set(ids), actor_id, thread_id, reply_id, lesson_id, data or {})
+        await _slack_dm(kind, set(ids), actor_id, thread_id, reply_id, lesson_id, data or {})
     return len(ids)
+
+
+async def _slack_dm(kind, ids, actor_id, thread_id, reply_id, lesson_id, data):
+    """Slack DM'i (slack_notify.dispatch_dm — hata fırlatmaz). Forum geneli/bülten türleri orada elenir."""
+    import slack
+    if not slack.enabled():
+        return
+    import slack_notify
+    actor = await fetch_one("SELECT first_name, last_name FROM users WHERE id = ?", (actor_id,)) if actor_id else None
+    name = " ".join(x for x in ((actor or {}).get("first_name") or "", (actor or {}).get("last_name") or "") if x)
+    await slack_notify.dispatch_dm(kind, ids, name, thread_id, reply_id, lesson_id, data)
 
 
 async def add_vote(owner_id: int, actor_id: int, thread_id: int, reply_id: int | None, data: dict):

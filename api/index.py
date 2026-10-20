@@ -72,6 +72,8 @@ import excel_export
 import team_perf
 import watch as trn_watch
 import trello
+import slack
+import slack_notify
 import supplier_scoring as sup
 import launch_control as lc
 
@@ -2481,6 +2483,8 @@ async def training_create(req: LessonIn, user: dict = Depends(require_staff)):
     lesson_id = await db.create_lesson(data, user["user_id"])
     await notify.add(await db.lesson_audience(lesson_id), "lesson", user["user_id"], lesson_id=lesson_id,
                      data={"title": data["title"]})
+    if slack.enabled():
+        await slack_notify.on_lesson(data, db.display_name(await db.user_brief(user["user_id"])) or "")
     return {"ok": True, "id": lesson_id}
 
 
@@ -3017,6 +3021,8 @@ async def forum_create(req: ThreadIn, user: dict = Depends(require_user)):
                                {"title": d["title"], "excerpt": _excerpt(d["body"], 140),
                                 "label": "soru" if d["kind"] == "question" else "tartışma"},
                                team_only=d["visibility"] == "team", exclude=mentioned)
+    if slack.enabled():
+        await slack_notify.on_thread(thread, db.display_name(await db.user_brief(v["id"])) or "Biri")
     return {"ok": True, "id": tid}
 
 
@@ -3080,7 +3086,14 @@ def _clean_reply(body: str) -> str:
 async def forum_reply(tid: int, req: ReplyIn, user: dict = Depends(require_user)):
     v = await _forum_viewer(user)
     t = await _visible_thread(tid, v)
-    body = _clean_reply(req.body)
+    return {"ok": True, "id": await _post_reply(t, v, _clean_reply(req.body), req.image_ids)}
+
+
+async def _post_reply(t: dict, v: dict, body: str, image_ids: list[int], origin: tuple[str, str] | None = None) -> int:
+    """Cevap yazma — panel ucu ve Slack'ten gelen yanıt (slack_events) AYNI yoldan: kilit (423), paylaşım sınırı (429),
+    bildirimler, Slack kanalı. Görünürlük çağıranda denetlenir (_visible_thread). origin: yanıtın geldiği Slack thread'i
+    (kanal, kök ts) — aynı thread'e geri yazılmaz."""
+    tid = t["id"]
     if t["locked"]:
         raise HTTPException(423, "Başlık kilitli — cevap yazılamaz")
     msg = await forum.rate_limited(v["id"], new_thread=False)
@@ -3089,7 +3102,7 @@ async def forum_reply(tid: int, req: ReplyIn, user: dict = Depends(require_user)
     rid = await forum.add_reply(tid, v["id"], body)
     if rid is None:   # bu arada kilitlendi
         raise HTTPException(423, "Başlık kilitli — cevap yazılamaz")
-    await forum.set_post_images(v["id"], tid, rid, req.image_ids)
+    await forum.set_post_images(v["id"], tid, rid, image_ids)
     # Bildirimler — öncelik: başlık sahibi "cevap", bahsedilen "bahsetme", diğer takipçiler "takip edilen başlık"
     data = {"title": t["title"], "excerpt": _excerpt(body, 140)}
     owner = {t["user_id"]} - {v["id"]}
@@ -3103,7 +3116,9 @@ async def forum_reply(tid: int, req: ReplyIn, user: dict = Depends(require_user)
     # Kalan herkese "forumda yeni cevap" (kullanıcı isteği: her paylaşım herkese); aynı kişiye iki bildirim gitmez
     await notify.broadcast("new_reply", v["id"], tid, data, team_only=t["visibility"] == "team",
                            exclude=owner | mentioned | rest, reply_id=rid)
-    return {"ok": True, "id": rid}
+    if slack.enabled():
+        await slack_notify.on_reply(t, rid, body, db.display_name(await db.user_brief(v["id"])) or "Biri", origin=origin)
+    return rid
 
 
 @app.put("/api/forum/replies/{rid}")
@@ -3382,23 +3397,48 @@ async def notifications_read(req: NotifReadIn, user: dict = Depends(require_user
 
 
 # --- E-posta bildirim tercihleri (kişi yalnızca KENDİ ayarı) ---
+SLACK_GROUP_LABELS = {**{g: notify_email.GROUP_LABELS[g] for g in notify_email.SLACK_GROUPS},
+                      "lesson": "Eğitim — bana yeni ders atanması ve tamamlamadığım derslerin son tarih hatırlatmaları"}
+
+
 @app.get("/api/notification-prefs")
 async def notification_prefs(user: dict = Depends(require_user)):
     u = await db.user_brief(user["user_id"])
+    sl = {"enabled": slack.enabled(), "two_way": slack.two_way(), "groups": SLACK_GROUP_LABELS}
+    if slack.enabled():
+        cfg = await slack_notify.get_settings()
+        try:
+            linked = bool(await slack_notify.slack_ids([user["user_id"]]))
+        except Exception as e:   # Slack'e ulaşılamasa da ayarlar açılsın
+            print(f"[slack] eşleşme okunamadı: {e}", flush=True)
+            linked = None
+        row = (await slack_notify.mapping_rows([user["user_id"]])).get(user["user_id"])
+        sl.update({"dm_enabled": bool(cfg.get("dm", True)), "linked": linked,
+                   "disabled_by_owner": bool(row and row["source"] == "manual" and not row["slack_user_id"]),
+                   "channel_name": cfg.get("channel_name")})
     return {"prefs": await notify_email.get_prefs(user["user_id"]), "groups": notify_email.GROUP_LABELS,
             "email_enabled": mailer.enabled(), "email": (u or {}).get("email"),
-            "email_verified": bool((u or {}).get("email_verified_at")), "is_staff": user["role"] in ("owner", "admin")}
+            "email_verified": bool((u or {}).get("email_verified_at")), "is_staff": user["role"] in ("owner", "admin"),
+            "slack": sl}
 
 
 class PrefsIn(BaseModel):
     instant: dict[str, bool] = Field(default_factory=dict)
     weekly: bool = True
     email_off: bool = False
+    slack: dict[str, bool] | None = None      # verilmezse kayıtlı Slack tercihi korunur (eski istemci)
+    slack_off: bool | None = None
 
 
 @app.put("/api/notification-prefs")
 async def notification_prefs_update(req: PrefsIn, user: dict = Depends(require_user)):
-    return {"ok": True, "prefs": await notify_email.set_prefs(user["user_id"], req.model_dump())}
+    cur = await notify_email.get_prefs(user["user_id"])
+    data = req.model_dump()
+    if data["slack"] is None:
+        data["slack"] = cur["slack"]
+    if data["slack_off"] is None:
+        data["slack_off"] = cur["slack_off"]
+    return {"ok": True, "prefs": await notify_email.set_prefs(user["user_id"], data)}
 
 
 @app.get("/api/notifications/unsubscribe")
@@ -3470,6 +3510,303 @@ async def cron_weekly_digest(authorization: str | None = Header(default=None)):
     for uid in sent_ids:
         await db.execute("UPDATE notification_prefs SET digest_sent_at = ? WHERE user_id = ?", (now, uid))
     return {"ok": True, "sent": len(msgs)}
+
+
+# ---------------------------------------------------------------------------
+# SLACK — bildirimler (DM), kanal paylaşımları, son tarih hatırlatmaları ve Slack'ten forum cevabı.
+# Ayrıntı: api/slack.py (API), api/slack_notify.py (kayıtlar/mantık). Ayarlar yalnızca owner.
+# ---------------------------------------------------------------------------
+SLACK_ID_RE = re.compile(r"^[A-Z0-9]{8,15}$")
+
+
+def _slack_http(e: "slack.SlackError") -> HTTPException:
+    if e.status == 503:
+        return HTTPException(503, "Slack bağlı değil — Vercel'e SLACK_BOT_TOKEN ekleyin")
+    if e.error in ("invalid_auth", "not_authed", "account_inactive", "token_revoked", "token_expired"):
+        return HTTPException(502, "Slack bot token'ı geçersiz — Vercel'deki SLACK_BOT_TOKEN değerini kontrol edin")
+    if e.error == "missing_scope":
+        return HTTPException(502, "Slack uygulamasında izin eksik — paneldeki bildirimle (manifest) uygulamayı güncelleyip "
+                                  "yeniden kurun (Reinstall to Workspace)")
+    return HTTPException(502, f"Slack hatası: {e.error}")
+
+
+def _slack_events_url() -> str | None:
+    return mailer.link("/api/slack/events") if mailer.base_url() else None
+
+
+@app.get("/api/slack/status")
+async def slack_status(user: dict = Depends(require_owner)):
+    out = {"enabled": slack.enabled(), "two_way": slack.two_way(), "events_url": _slack_events_url(),
+           "base_url_set": bool(mailer.base_url()), "manifest": slack.manifest(_slack_events_url()),
+           "settings": await slack_notify.get_settings(), "workspace": None}
+    if slack.enabled():
+        try:
+            out["workspace"] = await slack.auth_test()
+        except slack.SlackError as e:
+            out["error"] = _slack_http(e).detail
+    return out
+
+
+@app.get("/api/slack/channels")
+async def slack_channels(user: dict = Depends(require_owner)):
+    try:
+        return {"channels": await slack.channels()}
+    except slack.SlackError as e:
+        raise _slack_http(e)
+
+
+class SlackEventsIn(BaseModel):
+    forum: bool = True
+    replies: bool = True
+    lessons: bool = True
+    due: bool = True
+
+
+class SlackSettingsIn(BaseModel):
+    channel_id: str | None = Field(None, max_length=20)
+    events: SlackEventsIn = Field(default_factory=SlackEventsIn)
+    team_threads: bool = True
+    due_days: int = Field(2, ge=0, le=14)
+    dm: bool = True
+    tz: int = Field(180, ge=-840, le=840)
+
+
+@app.put("/api/slack/settings")
+async def slack_settings(req: SlackSettingsIn, user: dict = Depends(require_owner)):
+    if not slack.enabled():
+        raise HTTPException(503, "Slack bağlı değil — Vercel'e SLACK_BOT_TOKEN ekleyin")
+    name = None
+    if req.channel_id:
+        if not SLACK_ID_RE.match(req.channel_id):
+            raise HTTPException(422, "Geçersiz kanal kimliği")
+        try:   # kanal bu çalışma alanında mı, bot üye mi — sunucuda doğrula
+            ch = next((c for c in await slack.channels() if c["id"] == req.channel_id), None)
+            if not ch:
+                raise HTTPException(422, "Kanal bulunamadı — özel kanalsa önce botu davet edin (/invite @Hercules)")
+            if not ch["is_member"]:
+                if ch["private"]:
+                    raise HTTPException(422, f"Bot #{ch['name']} kanalında değil — Slack'te kanalda /invite @Hercules yazın")
+                await slack.join(ch["id"])
+        except slack.SlackError as e:
+            raise _slack_http(e)
+        name = ch["name"]
+    old = await slack_notify.get_settings()
+    cfg = {**old, "channel_id": req.channel_id or None, "channel_name": name, "events": req.events.model_dump(),
+           "team_threads": req.team_threads, "due_days": req.due_days, "dm": req.dm, "tz": req.tz,
+           "updated_by": user["user_id"], "updated_at": int(time.time())}
+    await slack_notify.save_settings(cfg)
+    return {"ok": True, "settings": cfg}
+
+
+@app.post("/api/slack/test")
+async def slack_test(user: dict = Depends(require_owner)):
+    try:
+        await slack_notify.test_message(db.display_name(await db.user_brief(user["user_id"])) or "Owner")
+    except slack.SlackError as e:
+        if e.error == "no_channel":
+            raise HTTPException(422, "Önce bir kanal seçip kaydedin")
+        raise _slack_http(e)
+    return {"ok": True}
+
+
+async def _slack_people(force: bool = False) -> dict:
+    users = await db.fetch_all("SELECT id, email, first_name, last_name, title, email_verified_at FROM users")
+    try:
+        await slack_notify.slack_ids([u["id"] for u in users], force=force)   # eksikleri e-postayla eşleştir
+        ws = await slack.workspace_users()
+    except slack.SlackError as e:
+        raise _slack_http(e)
+    rows = await slack_notify.mapping_rows()
+    ws_by_id = {w["id"]: w for w in ws}
+    people = []
+    for u in users:
+        r = rows.get(u["id"]) or {}
+        sid = r.get("slack_user_id")
+        people.append({"id": u["id"], "name": db.display_name(u) or "—", "title": u.get("title") or "", "email": u["email"],
+                       "email_verified": bool(u.get("email_verified_at")), "slack_user_id": sid,
+                       "slack_name": (ws_by_id.get(sid) or {}).get("name") if sid else None,
+                       "mode": "off" if r.get("source") == "manual" and not sid else (r.get("source") or "auto")})
+    people.sort(key=lambda p: p["name"].lower())
+    return {"people": people, "slack_users": [{"id": w["id"], "name": w["name"], "handle": w["handle"]} for w in ws],
+            "linked": sum(1 for p in people if p["slack_user_id"])}
+
+
+@app.get("/api/slack/people")
+async def slack_people(force: bool = Query(False), user: dict = Depends(require_owner)):
+    if not slack.enabled():
+        raise HTTPException(503, "Slack bağlı değil — Vercel'e SLACK_BOT_TOKEN ekleyin")
+    return await _slack_people(force)
+
+
+class SlackPersonIn(BaseModel):
+    mode: str = Field(..., pattern=r"^(auto|manual|off)$")
+    slack_user_id: str | None = Field(None, max_length=20)
+
+
+@app.put("/api/slack/people/{target_id}")
+async def slack_person(target_id: int, req: SlackPersonIn, user: dict = Depends(require_owner)):
+    """auto = e-postayla eşleştir · manual = seçilen Slack hesabı · off = bu kişiye Slack'ten hiçbir şey gitmesin ve
+    Slack'ten yazdığı yanıt panele bağlanmasın."""
+    if not slack.enabled():
+        raise HTTPException(503, "Slack bağlı değil — Vercel'e SLACK_BOT_TOKEN ekleyin")
+    if not await db.user_brief(target_id):
+        raise HTTPException(404, "Kullanıcı bulunamadı")
+    if req.mode == "auto":
+        await slack_notify.clear_manual(target_id)
+        try:
+            await slack_notify.slack_ids([target_id], force=True)
+        except slack.SlackError as e:
+            raise _slack_http(e)
+    elif req.mode == "off":
+        await slack_notify.set_manual(target_id, None)
+    else:
+        sid = req.slack_user_id or ""
+        if not SLACK_ID_RE.match(sid):
+            raise HTTPException(422, "Geçersiz Slack kullanıcısı")
+        try:
+            info = await slack.user_info(sid)
+        except slack.SlackError as e:
+            raise _slack_http(e)
+        if not info or info["deleted"] or info["is_bot"]:
+            raise HTTPException(422, "Bu Slack kullanıcısı çalışma alanında bulunamadı")
+        other = await db.fetch_one("SELECT user_id FROM slack_users WHERE slack_user_id = ? AND user_id <> ?", (sid, target_id))
+        if other:
+            raise HTTPException(409, "Bu Slack hesabı başka bir kişiyle eşleşmiş — önce onunkini değiştirin")
+        await slack_notify.set_manual(target_id, sid)
+    row = (await slack_notify.mapping_rows([target_id])).get(target_id) or {}
+    return {"ok": True, "slack_user_id": row.get("slack_user_id"),
+            "mode": "off" if row.get("source") == "manual" and not row.get("slack_user_id") else (row.get("source") or "auto")}
+
+
+SLACK_DM_HINT = ("Merhaba! Buradan panele cevap yazmak için ilgili bildirimin altındaki *Yanıtla* (thread) seçeneğini "
+                 "kullan — yazdığın, o forum başlığına senin adınla cevap olarak eklenir.")
+
+
+@app.post("/api/slack/events")
+async def slack_events(request: Request):
+    """Slack Events API. İmza (SLACK_SIGNING_SECRET) doğrulanır; Slack 3 sn içinde yanıt bekler ve alamazsa yeniden
+    gönderir → olay kimliğiyle bir kez işlenir. Bağlı bir Slack mesajının altına (thread) yazılan yanıt, yazanın panel
+    hesabıyla o başlığa cevap olur (görünürlük, kilit ve paylaşım sınırı panelle aynı — _post_reply)."""
+    raw = await request.body()
+    try:
+        payload = json.loads(raw or b"{}")
+    except ValueError:
+        raise HTTPException(400, "Geçersiz istek")
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "Geçersiz istek")
+    ok_sig = slack.verify_signature(raw, request.headers.get("X-Slack-Request-Timestamp"),
+                                    request.headers.get("X-Slack-Signature"))
+    if payload.get("type") == "url_verification":
+        # İlk kurulumda (signing secret henüz Vercel'e girilmeden) Slack adresi doğrulayabilsin: yalnızca challenge döner
+        if ok_sig or not (os.environ.get("SLACK_SIGNING_SECRET") or "").strip():
+            return {"challenge": str(payload.get("challenge") or "")[:200]}
+        raise HTTPException(401, "İmza geçersiz")
+    if not ok_sig:
+        raise HTTPException(401, "İmza geçersiz")
+    if payload.get("type") != "event_callback" or not slack.two_way():
+        return {"ok": True}
+    event_id = str(payload.get("event_id") or "")[:100]
+    if not event_id or not await slack_notify.claim_event(event_id):
+        return {"ok": True}   # Slack'in yeniden denemesi
+    try:
+        await _slack_message(payload.get("event") or {})
+    except Exception as e:   # Slack'e hata dönmek yeniden denemeye yol açar; logla
+        print(f"[slack] olay işlenemedi: {e}", flush=True)
+    return {"ok": True}
+
+
+async def _slack_message(ev: dict):
+    if ev.get("type") != "message" or ev.get("subtype") or ev.get("bot_id") or not ev.get("user"):
+        return   # düzenleme/silme/bot mesajı (kendi mesajlarımız dahil) işlenmez
+    channel, ts, thread_ts, suser = ev.get("channel"), ev.get("ts"), ev.get("thread_ts"), ev["user"]
+    is_dm = ev.get("channel_type") == "im"
+    if not channel or not ts:
+        return
+    if not thread_ts or thread_ts == ts:
+        if is_dm:
+            try:
+                await slack.post(channel, slack_notify._plain(SLACK_DM_HINT), slack_notify._blocks(SLACK_DM_HINT))
+            except slack.SlackError as e:
+                print(f"[slack] DM ipucu gönderilemedi: {e}", flush=True)
+        return
+    tgt = await slack_notify.target(channel, thread_ts)
+    if not tgt or not tgt.get("thread_id"):
+        return
+
+    async def tell(msg: str):
+        try:
+            text = slack.esc(msg)
+            if is_dm:
+                await slack.post(channel, text, thread_ts=thread_ts)
+            else:
+                await slack.post_ephemeral(channel, suser, text, thread_ts=thread_ts)
+        except slack.SlackError as e:
+            print(f"[slack] uyarı gönderilemedi: {e}", flush=True)
+
+    uid = await slack_notify.panel_user_for(suser)
+    if not uid:
+        await tell(":warning: Slack hesabın panelde bir hesapla eşleşmedi, cevabın panele eklenmedi. Slack'teki e-postan "
+                   "paneldeki (doğrulanmış) e-postanla aynı olmalı — ya da owner Ekip Yönetimi → Slack'ten eşleştirsin.")
+        return
+    if tgt["kind"] == "dm" and tgt.get("user_id") not in (None, uid):
+        return
+    brief, role = await db.user_brief(uid), await db.get_user_role(uid)
+    if not brief or not role:
+        return
+    if not (brief.get("first_name") or "").strip() or not (brief.get("last_name") or "").strip():
+        await tell(":warning: Cevap yazmadan önce panelde adını ve soyadını girmen gerekiyor.")
+        return
+    if mailer.verification_enforced() and not brief.get("email_verified_at"):
+        await tell(":warning: Önce panelde e-posta adresini doğrulaman gerekiyor.")
+        return
+    v = {"id": uid, "role": role, "staff": role in ("owner", "admin"), "can_see_team": await db.is_in_team(uid)}
+    t = await forum.get_thread(tgt["thread_id"])
+    if not forum.visible(t, v["can_see_team"]):
+        await tell(":warning: Bu başlık panelde bulunamadı (silinmiş olabilir) — cevabın eklenmedi.")
+        return
+    sids = slack.mentioned_ids(ev.get("text") or "")
+    usernames = {}
+    if sids:
+        marks = ",".join("?" * len(sids))
+        for r in await db.fetch_all(f"SELECT s.slack_user_id, u.username FROM slack_users s JOIN users u ON u.id = s.user_id "
+                                    f"WHERE s.slack_user_id IN ({marks})", tuple(sids)):
+            if r.get("username"):
+                usernames[r["slack_user_id"]] = r["username"]
+    try:
+        body = forum.clean_text(slack.to_plain(ev.get("text") or "", usernames), "Cevap", 1, forum.REPLY_MAX)
+    except forum.ForumError as e:
+        await tell(f":warning: Cevap panele eklenemedi: {e}")
+        return
+    try:
+        await _post_reply(t, v, body, [], origin=(channel, thread_ts))
+    except HTTPException as e:
+        await tell(f":warning: Cevap panele eklenemedi: {e.detail}")
+        return
+    await notify.mark_read(uid, thread_id=t["id"])
+    try:
+        await slack.react(channel, ts)
+    except slack.SlackError as e:
+        print(f"[slack] tepki eklenemedi: {e}", flush=True)
+    if ev.get("files"):
+        await tell("Cevabın panele eklendi; Slack'te eklediğin dosyalar panele aktarılmaz.")
+
+
+@app.get("/api/cron/slack-daily")
+async def cron_slack_daily(authorization: str | None = Header(default=None)):
+    """Her gün (Vercel cron): son tarihi yaklaşan / bugün / geçen dersler için kanal özeti + tamamlamamış kişilere DM."""
+    secret = (os.environ.get("CRON_SECRET") or "").strip()
+    if not secret:
+        raise HTTPException(503, "CRON_SECRET tanımlı değil")
+    if (authorization or "") != f"Bearer {secret}":
+        raise HTTPException(401, "Yetkisiz")
+    if not slack.enabled():
+        return {"ok": True, "skipped": "Slack bağlı değil"}
+    cfg = await slack_notify.get_settings()
+    res = await slack_notify.due_reminders(slack_notify.local_today(int(cfg.get("tz") or 0)), db.lesson_audience)
+    cfg = await slack_notify.get_settings()
+    cfg["last_reminder"] = {**res, "at": int(time.time())}
+    await slack_notify.save_settings(cfg)
+    return {"ok": True, **res}
 
 
 # ---------------------------------------------------------------------------

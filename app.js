@@ -5186,23 +5186,46 @@ async function npLoad() {
       .filter(([g]) => g !== "report" || d.is_staff)
       .map(([g, label]) => `<label class="pf-check"><input type="checkbox" data-g="${esc(g)}" ${p.instant[g] ? "checked" : ""}><span>${esc(label)}</span></label>`).join("");
     $("#np-off").checked = p.email_off; $("#np-weekly").checked = p.weekly;
+    const sl = d.slack || {}, sbox = $("#np-slack");
+    sbox.style.display = sl.enabled ? "" : "none";
+    if (sl.enabled) {
+      $("#np-slack-intro").textContent = sl.disabled_by_owner ? "Owner Slack bildirimlerini senin için kapattı."
+        : sl.dm_enabled === false ? "Slack DM'leri owner tarafından şu an kapalı — tercihlerin kaydedilir."
+        : sl.linked === false ? "Slack hesabın henüz eşleşmedi: Slack'teki e-postan paneldeki doğrulanmış e-postanla aynı olmalı (ya da owner Ekip Yönetimi → Slack'ten eşleştirir)."
+        : sl.linked === null ? "Slack'e şu an ulaşılamadı — tercihlerin yine kaydedilir."
+        : `Slack hesabın eşleşti.${sl.two_way ? " DM'deki bir bildirimi Slack'te yanıtlarsan cevabın panelde o başlığa eklenir." : ""}${sl.channel_name ? ` Forum paylaşımları ve ders hatırlatmaları #${sl.channel_name} kanalına gider.` : ""}`;
+      $("#np-slack-groups").innerHTML = `<legend class="text-[13px] font-semibold mb-1">Slack DM'i gönderilsin:</legend>` + Object.entries(sl.groups || {})
+        .filter(([g]) => g !== "report" || d.is_staff)
+        .map(([g, label]) => `<label class="pf-check"><input type="checkbox" data-sg="${esc(g)}" ${(p.slack || {})[g] !== false ? "checked" : ""}><span>${esc(label)}</span></label>`).join("");
+      $("#np-slack-off").checked = !!p.slack_off;
+    }
+    npState.slack = !!sl.enabled;
     npSyncDisabled();
   } catch (err) { intro.textContent = `Yüklenemedi: ${err.message}`; }
 }
+const npState = { slack: false };
 function npSyncDisabled() {
   const off = $("#np-off").checked;
   $$("#np-groups input, #np-weekly").forEach(i => { i.disabled = off; });
+  const soff = $("#np-slack-off").checked;
+  $$("#np-slack-groups input").forEach(i => { i.disabled = soff; });
 }
 
 (function initProfile() {
   if (!$("#view-profile")) return;
   $("#np-off").addEventListener("change", npSyncDisabled);
+  $("#np-slack-off").addEventListener("change", npSyncDisabled);
   $("#np-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const msg = $("#np-msg"), instant = {};
     $$("#np-groups input[data-g]").forEach(i => { instant[i.dataset.g] = i.checked; });
     try {
-      await pfApi("/api/notification-prefs", { method: "PUT", body: JSON.stringify({ instant, weekly: $("#np-weekly").checked, email_off: $("#np-off").checked }) });
+      const body = { instant, weekly: $("#np-weekly").checked, email_off: $("#np-off").checked };
+      if (npState.slack) {   // Slack bölümü görünmüyorsa gönderilmez → sunucu kayıtlı Slack tercihini korur
+        body.slack = {}; $$("#np-slack-groups input[data-sg]").forEach(i => { body.slack[i.dataset.sg] = i.checked; });
+        body.slack_off = $("#np-slack-off").checked;
+      }
+      await pfApi("/api/notification-prefs", { method: "PUT", body: JSON.stringify(body) });
       msg.className = "text-xs text-primary"; msg.textContent = "Kaydedildi.";
     } catch (err) { msg.className = "text-xs text-error"; msg.textContent = err.message; }
   });
@@ -6511,3 +6534,143 @@ async function trSend() {
   } catch (err) { msg.className = "text-xs text-error"; msg.textContent = `Hata: ${err.message}`; }
   finally { const b = $("#tr-send"); if (b) b.disabled = false; }
 }
+
+// --- Slack (Ekip Yönetimi → Slack; yalnızca owner) — bildirim DM'leri, kanal paylaşımları, Slack'ten forum cevabı ---
+const slState = { status: null, channels: null, people: null };
+function slClose() { $("#sl-modal").style.display = "none"; }
+async function slOpen() {
+  $("#sl-modal").style.display = "flex";
+  $("#sl-body").innerHTML = `<div class="status-line loading">yükleniyor…</div>`;
+  try {
+    slState.status = await pfApi("/api/slack/status");
+    if (!slState.status.enabled) { slRenderSetup(); return; }
+    if (slState.status.error) { $("#sl-body").innerHTML = `<div class="status-line error">${esc(slState.status.error)}</div>` + slSetupHtml(true); slBindCopy(); return; }
+    slState.channels = (await pfApi("/api/slack/channels")).channels;
+    slRenderForm();
+  } catch (err) { $("#sl-body").innerHTML = `<div class="status-line error">Hata: ${esc(err.message)}</div>`; }
+}
+function slSetupHtml(collapsed) {
+  const st = slState.status || {};
+  const manifest = JSON.stringify(st.manifest || {}, null, 2);
+  const steps = `
+    <ol class="text-sm list-decimal pl-5 flex flex-col gap-2 leading-relaxed">
+      ${st.base_url_set ? "" : `<li class="text-error">Önce Vercel'e <code>APP_BASE_URL</code> (panelin https adresi) girin — Slack'teki bağlantılar ve yanıt adresi buradan kurulur.</li>`}
+      <li><a class="text-primary underline" href="https://api.slack.com/apps?new_app=1" target="_blank" rel="noopener noreferrer">api.slack.com/apps</a> → <b>Create New App</b> → <b>From a manifest</b> → çalışma alanını seçin → aşağıdaki bildirimi (JSON) yapıştırıp <b>Create</b>.</li>
+      <li><b>Install to Workspace</b> → izin verin. <b>OAuth &amp; Permissions</b> sayfasındaki <b>Bot User OAuth Token</b>'ı (xoxb-…) kopyalayın.</li>
+      <li><b>Basic Information</b> → <b>Signing Secret</b>'ı kopyalayın (Slack'ten yanıt yazabilmek için).</li>
+      <li>Vercel → proje → Settings → Environment Variables'a <code>SLACK_BOT_TOKEN</code> ve <code>SLACK_SIGNING_SECRET</code> olarak ekleyin (Production), ardından yeniden deploy edin.</li>
+      <li>Slack'te bildirimlerin düşeceği kanalı açın (özel kanalsa içinde <code>/invite @Hercules</code> yazın), sonra bu pencereyi tekrar açıp kanalı seçin.</li>
+      <li>Slack <b>Event Subscriptions</b> sayfasında adres "Verified" görünmüyorsa <b>Retry</b>'a basın.</li>
+    </ol>
+    ${st.events_url ? `<div class="text-xs text-secondary">Yanıt adresi (Request URL): <code class="break-all">${esc(st.events_url)}</code></div>` : ""}
+    <div class="flex flex-col gap-1.5"><div class="flex items-center justify-between gap-2"><span class="text-xs font-semibold uppercase tracking-wide text-secondary">Uygulama bildirimi (manifest)</span>
+      <button type="button" id="sl-copy" class="btn btn-outline !py-1 text-xs"><span class="material-symbols-outlined">content_copy</span>Kopyala</button></div>
+      <textarea id="sl-manifest" class="field font-mono text-[11px] h-40" readonly>${esc(manifest)}</textarea></div>
+    <p class="text-xs text-secondary">Token ve secret'ı panele ya da sohbete yazmayın; yalnızca Vercel'e girin. Mesajlar "Hercules" botu adına gider.</p>`;
+  return collapsed ? `<details class="border-t border-hairline pt-3"><summary class="text-sm cursor-pointer text-secondary">Kurulum adımları ve uygulama bildirimi</summary><div class="flex flex-col gap-3 mt-3">${steps}</div></details>` : steps;
+}
+function slBindCopy() {
+  const b = $("#sl-copy"); if (!b) return;
+  b.addEventListener("click", async () => {
+    const ta = $("#sl-manifest");
+    try { await navigator.clipboard.writeText(ta.value); } catch { ta.select(); document.execCommand("copy"); }
+    b.innerHTML = `<span class="material-symbols-outlined">check</span>Kopyalandı`;
+  });
+}
+function slRenderSetup() {
+  $("#sl-body").innerHTML = `<p class="text-sm">Slack henüz bağlı değil. Bir kez yapılacak kurulum:</p>` + slSetupHtml(false);
+  slBindCopy();
+}
+function slRenderForm() {
+  const st = slState.status, cfg = st.settings || {}, ev = cfg.events || {}, ws = st.workspace || {};
+  const chans = slState.channels || [];
+  const chk = (id, on, text, hint = "") => `<label class="flex items-start gap-2 text-sm"><input type="checkbox" id="${id}" class="mt-1" ${on ? "checked" : ""}><span>${text}${hint ? `<span class="block text-xs text-secondary">${hint}</span>` : ""}</span></label>`;
+  const lr = cfg.last_reminder;
+  $("#sl-body").innerHTML = `
+    <div class="text-sm">Bağlı çalışma alanı: <b>${esc(ws.team || "—")}</b></div>
+    ${st.two_way ? "" : `<div class="text-xs rounded-lg p-2.5 bg-amber-50 text-amber-900">Slack'ten yanıt yazma kapalı: Vercel'e <code>SLACK_SIGNING_SECRET</code> ekleyin. Bildirimler yine gider.</div>`}
+    ${st.base_url_set ? "" : `<div class="text-xs rounded-lg p-2.5 bg-amber-50 text-amber-900"><code>APP_BASE_URL</code> tanımlı değil — Slack mesajlarında panele bağlantı olmaz.</div>`}
+    <div class="text-xs font-semibold uppercase tracking-wide text-secondary">Kanal</div>
+    <label class="flex flex-col gap-1 text-sm">Paylaşımlar hangi kanala?<select id="sl-channel" class="field"><option value="">— kanala paylaşma —</option>${chans.map(c => `<option value="${esc(c.id)}" ${c.id === cfg.channel_id ? "selected" : ""}>${c.private ? "🔒" : "#"} ${esc(c.name)}${c.is_member ? "" : (c.private ? " (bot üye değil)" : "")}</option>`).join("")}</select>
+      <span class="text-xs text-secondary">Özel kanal listede yoksa Slack'te kanalda <code>/invite @Hercules</code> yazıp pencereyi yeniden açın.</span></label>
+    ${chk("sl-ev-forum", ev.forum !== false, "Forumdaki yeni başlıklar ve bültenler", "Her başlık kanala bir mesaj olarak düşer; altına yazılan yanıt panelde cevap olur.")}
+    ${chk("sl-ev-replies", ev.replies !== false, "Başlıklara gelen cevaplar", "Başlığın kanal mesajının altına (thread) eklenir.")}
+    ${chk("sl-ev-lessons", ev.lessons !== false, "Yeni dersler / görevler")}
+    ${chk("sl-ev-due", ev.due !== false, "Ders/görev son tarih hatırlatmaları", "Her sabah: son tarihi yaklaşan, bugün olan ve geçen (7 güne kadar) dersler, kaç kişinin tamamladığıyla.")}
+    <label class="flex items-center gap-2 text-sm">Son tarihten kaç gün önce hatırlatılsın?<input type="number" id="sl-due-days" class="field !w-20 !py-1" min="0" max="14" value="${esc(cfg.due_days ?? 2)}"></label>
+    ${chk("sl-team", cfg.team_threads !== false, "\"Sadece ekip\" başlıkları da kanala gitsin", "Kanalda ekip dışından kişi varsa kapatın — o başlıklar yalnızca panelde ve ekip üyelerinin DM'lerinde kalır.")}
+    <div class="text-xs font-semibold uppercase tracking-wide text-secondary mt-1">Kişiye özel mesaj (DM)</div>
+    ${chk("sl-dm", cfg.dm !== false, "Panel bildirimleri kişilere Slack DM'i olarak da gitsin", "Başlığına cevap, bahsetme, çözüm, faydalı oy, ders ataması ve tamamlamadığı derslerin son tarihi. Her kişi Profilim → Bildirim Ayarları'ndan kendi DM'lerini kapatabilir.")}
+    <div class="flex flex-wrap gap-2 border-t border-hairline pt-4"><button type="button" id="sl-save" class="btn btn-primary">Kaydet</button>
+      <button type="button" id="sl-test" class="btn btn-outline" ${cfg.channel_id ? "" : "disabled"}><span class="material-symbols-outlined">send</span>Kanala deneme mesajı</button></div>
+    <div id="sl-msg" class="text-xs"></div>
+    ${lr ? `<div class="text-xs text-secondary">Son hatırlatma taraması: ${esc(new Date(lr.at * 1000).toLocaleString("tr-TR"))} · ${esc(lr.lessons)} ders · kanala ${esc(lr.channel)} · ${esc(lr.dms)} kişiye DM</div>` : ""}
+    <div class="border-t border-hairline pt-4 flex flex-col gap-2">
+      <div class="flex items-center justify-between gap-2"><div class="text-sm">Kişi ↔ Slack hesabı <span class="text-xs text-secondary block">Doğrulanmış panel e-postası Slack'teki e-postayla aynı olan kişiler otomatik eşleşir. Farklıysa elle seçin.</span></div>
+        <button type="button" id="sl-rematch" class="btn btn-outline !py-1 text-xs shrink-0">Yeniden eşleştir</button></div>
+      <div id="sl-people" class="flex flex-col gap-1.5 max-h-72 overflow-y-auto pr-1"><div class="status-line loading">yükleniyor…</div></div>
+    </div>
+    ${slSetupHtml(true)}`;
+  slBindCopy();
+  $("#sl-save").addEventListener("click", slSave);
+  $("#sl-test").addEventListener("click", slTest);
+  $("#sl-rematch").addEventListener("click", () => slLoadPeople(true));
+  slLoadPeople(false);
+}
+async function slLoadPeople(force) {
+  const box = $("#sl-people");
+  box.innerHTML = `<div class="status-line loading">${force ? "eşleştiriliyor…" : "yükleniyor…"}</div>`;
+  try {
+    slState.people = await pfApi(`/api/slack/people${force ? "?force=true" : ""}`);
+    slRenderPeople();
+  } catch (err) { box.innerHTML = `<div class="text-xs text-error">Kişiler alınamadı: ${esc(err.message)}</div>`; }
+}
+function slRenderPeople() {
+  const d = slState.people, box = $("#sl-people");
+  if (!d.people.length) { box.innerHTML = `<div class="text-xs text-secondary">Kullanıcı yok.</div>`; return; }
+  box.innerHTML = `<div class="text-xs text-secondary">${esc(d.linked)} / ${esc(d.people.length)} kişi eşleşti.</div>` + d.people.map(p => {
+    const val = p.mode === "off" ? "off" : p.mode === "manual" ? p.slack_user_id : "auto";
+    const state = p.mode === "off" ? `<span class="chip na">kapalı</span>`
+      : p.slack_user_id ? `<span class="chip ok" title="${esc(p.slack_name || "")}">eşleşti</span>`
+      : `<span class="chip warn" title="${p.email_verified ? "Slack'te bu e-postayla kimse yok" : "panel e-postası doğrulanmamış"}">${p.email_verified ? "eşleşmedi" : "e-posta doğrulanmadı"}</span>`;
+    return `<div class="flex items-center gap-2 text-sm"><span class="flex-1 min-w-0 truncate" title="${esc(p.email)}">${esc(p.name)}${p.title ? ` <span class="text-xs text-secondary">${esc(p.title)}</span>` : ""}${p.mode === "auto" && p.slack_name ? ` <span class="text-xs text-secondary">→ ${esc(p.slack_name)}</span>` : ""}</span>
+      <select class="field !py-1 text-sm max-w-[50%]" data-uid="${esc(p.id)}">
+        <option value="auto" ${val === "auto" ? "selected" : ""}>Otomatik (e-posta)</option>
+        ${d.slack_users.map(u => `<option value="${esc(u.id)}" ${val === u.id ? "selected" : ""}>${esc(u.name)}${u.handle ? ` (@${esc(u.handle)})` : ""}</option>`).join("")}
+        <option value="off" ${val === "off" ? "selected" : ""}>Slack kapalı</option>
+      </select>${state}</div>`;
+  }).join("");
+  $$("#sl-people select[data-uid]").forEach(sel => sel.addEventListener("change", async () => {
+    const v = sel.value, mode = v === "auto" || v === "off" ? v : "manual";
+    sel.disabled = true;
+    try {
+      await pfApi(`/api/slack/people/${encodeURIComponent(sel.dataset.uid)}`, { method: "PUT", body: JSON.stringify({ mode, slack_user_id: mode === "manual" ? v : null }) });
+      await slLoadPeople(false);
+    } catch (err) { sel.disabled = false; $("#sl-msg").className = "text-xs text-error"; $("#sl-msg").textContent = `Hata: ${err.message}`; }
+  }));
+}
+async function slSave() {
+  const msg = $("#sl-msg"); msg.className = "text-xs"; msg.textContent = "kaydediliyor…";
+  try {
+    const r = await pfApi("/api/slack/settings", { method: "PUT", body: JSON.stringify({
+      channel_id: $("#sl-channel").value || null,
+      events: { forum: $("#sl-ev-forum").checked, replies: $("#sl-ev-replies").checked, lessons: $("#sl-ev-lessons").checked, due: $("#sl-ev-due").checked },
+      team_threads: $("#sl-team").checked, due_days: Math.max(0, Math.min(14, Number($("#sl-due-days").value) || 0)),
+      dm: $("#sl-dm").checked, tz: -new Date().getTimezoneOffset() }) });
+    slState.status.settings = r.settings;
+    msg.className = "text-xs text-primary"; msg.textContent = r.settings.channel_name ? `Kaydedildi · #${r.settings.channel_name}` : "Kaydedildi.";
+    $("#sl-test").disabled = !r.settings.channel_id;
+  } catch (err) { msg.className = "text-xs text-error"; msg.textContent = `Hata: ${err.message}`; }
+}
+async function slTest() {
+  const msg = $("#sl-msg"); msg.className = "text-xs"; msg.textContent = "gönderiliyor…";
+  try { await pfApi("/api/slack/test", { method: "POST" }); msg.className = "text-xs text-primary"; msg.textContent = "Deneme mesajı kanala gönderildi."; }
+  catch (err) { msg.className = "text-xs text-error"; msg.textContent = `Hata: ${err.message}`; }
+}
+(function initSlack() {
+  if (!$("#sl-modal")) return;
+  $("#tg-slack").addEventListener("click", slOpen);
+  $("#sl-close").addEventListener("click", slClose);
+  $("#sl-modal").addEventListener("click", (e) => { if (e.target.id === "sl-modal") slClose(); });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") slClose(); });
+})();
