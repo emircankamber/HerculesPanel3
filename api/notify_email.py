@@ -26,6 +26,8 @@ GROUPS = {
     "forum": ("new_thread", "new_reply"),
 }
 GROUP_OF = {k: g for g, kinds in GROUPS.items() for k in kinds}
+# Slack DM'i alabilen gruplar (forum geneli ve bültenler Slack'te KANALA gider — slack_notify.py)
+SLACK_GROUPS = ("direct", "follow", "vote", "lesson", "report")
 GROUP_LABELS = {
     "direct": "Bana yazılanlar — başlığıma cevap, benden bahsedilmesi, cevabımın çözüm seçilmesi",
     "lesson": "Eğitim — bana yeni ders atanması",
@@ -38,7 +40,8 @@ GROUP_LABELS = {
 # Varsayılan: HEPSİ açık (kullanıcı isteği) — isteyen Profilim → Bildirim Ayarları'ndan kapatır.
 DEFAULTS = {"instant": {"direct": True, "lesson": True, "report": True, "follow": True, "bulletin": True, "vote": True,
                         "forum": True},
-            "weekly": True, "email_off": False}
+            "weekly": True, "email_off": False,
+            "slack": {g: True for g in SLACK_GROUPS}, "slack_off": False}
 # İlk sürümün varsayılanı (takip/bülten/oy kapalı). Bu değerde KAYITLI satırlar (kişi ayarı hiç değiştirmemiş, satır
 # abonelik bağlantısı için oluşmuş) bir kez yeni varsayılana çekilir — migrate_defaults_once.
 _OLD_DEFAULTS = {"instant": {"direct": True, "lesson": True, "report": True, "follow": False, "bulletin": False, "vote": False,
@@ -56,9 +59,16 @@ SCHEMAS = [
 def clean_prefs(raw: dict | None) -> dict:
     raw = raw if isinstance(raw, dict) else {}
     inst = raw.get("instant") if isinstance(raw.get("instant"), dict) else {}
+    sl = raw.get("slack") if isinstance(raw.get("slack"), dict) else {}
     return {"instant": {g: bool(inst.get(g, DEFAULTS["instant"][g])) for g in GROUPS},
             "weekly": bool(raw.get("weekly", DEFAULTS["weekly"])),
-            "email_off": bool(raw.get("email_off", DEFAULTS["email_off"]))}
+            "email_off": bool(raw.get("email_off", DEFAULTS["email_off"])),
+            "slack": {g: bool(sl.get(g, True)) for g in SLACK_GROUPS},
+            "slack_off": bool(raw.get("slack_off", False))}
+
+
+def _email_part(p: dict) -> dict:
+    return {k: p[k] for k in ("instant", "weekly", "email_off")}
 
 
 async def migrate_defaults_once():
@@ -71,7 +81,7 @@ async def migrate_defaults_once():
     except Exception:
         return   # başka bir örnek yapıyor
     for r in await fetch_all("SELECT user_id, prefs_json FROM notification_prefs"):
-        if clean_prefs(json.loads(r["prefs_json"])) == _OLD_DEFAULTS:
+        if _email_part(clean_prefs(json.loads(r["prefs_json"]))) == _OLD_DEFAULTS:
             await execute("UPDATE notification_prefs SET prefs_json = ? WHERE user_id = ?", (json.dumps(DEFAULTS), r["user_id"]))
 
 

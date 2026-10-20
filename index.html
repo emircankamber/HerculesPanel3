@@ -110,6 +110,18 @@
   </div>
 </div>
 
+<div id="sl-modal" class="login-overlay !items-start overflow-y-auto" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="sl-title">
+  <div class="bg-surface-container-lowest rounded-2xl w-full max-w-xl my-6 shadow-xl">
+    <div class="flex items-start justify-between gap-3 p-5 border-b border-hairline">
+      <div class="flex items-center gap-3 min-w-0"><span class="material-symbols-outlined text-primary">forum</span>
+        <div class="min-w-0"><div class="font-display font-semibold text-lg" id="sl-title">Slack</div>
+          <div class="text-xs text-secondary">Bildirimler kişilere DM olarak, forum ve dersler kanala gider; Slack'te yanıtlanan mesaj panelde cevap olur.</div></div></div>
+      <button type="button" id="sl-close" class="icon-btn shrink-0" aria-label="Kapat"><span class="material-symbols-outlined">close</span></button>
+    </div>
+    <div id="sl-body" class="p-5 flex flex-col gap-4"></div>
+  </div>
+</div>
+
 <div id="fm-editor" class="login-overlay !items-start overflow-y-auto" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="fm-ed-title">
   <form id="fm-ed-form" class="bg-surface-container-lowest rounded-2xl w-full max-w-2xl my-6 shadow-xl p-5 sm:p-6 flex flex-col gap-4" novalidate>
     <div class="flex items-start justify-between gap-3"><h2 id="fm-ed-title" class="font-display text-lg font-semibold">Yeni başlık</h2>
@@ -1243,6 +1255,11 @@
               <label class="pf-check"><input type="checkbox" id="np-off"><span><b>Tüm e-posta bildirimlerini kapat</b> <span class="text-secondary">(panel içi bildirimler sürer)</span></span></label>
               <fieldset id="np-groups" class="flex flex-col gap-2"><legend class="text-[13px] font-semibold mb-1">Anlık e-posta gönderilsin:</legend></fieldset>
               <label class="pf-check"><input type="checkbox" id="np-weekly"><span><b>Haftalık özet</b> <span class="text-secondary">— pazartesi sabahı: okunmamış bildirimlerin, haftanın bültenleri ve cevap bekleyen sorular</span></span></label>
+              <div id="np-slack" class="border-t border-hairline pt-4 flex flex-col gap-3" style="display:none;">
+                <div><div class="eyebrow">Slack bildirimleri</div><p id="np-slack-intro" class="text-sm text-secondary mt-1"></p></div>
+                <label class="pf-check"><input type="checkbox" id="np-slack-off"><span><b>Slack'ten bana özel mesaj (DM) gönderilmesin</b> <span class="text-secondary">(kanal paylaşımları kanal ayarına bağlı)</span></span></label>
+                <fieldset id="np-slack-groups" class="flex flex-col gap-2"><legend class="text-[13px] font-semibold mb-1">Slack DM'i gönderilsin:</legend></fieldset>
+              </div>
               <div class="flex flex-wrap items-center gap-3"><button type="submit" class="btn btn-primary"><span class="material-symbols-outlined">save</span>Kaydet</button><span id="np-msg" class="text-xs"></span></div>
               <p class="text-[11px] text-secondary">Aynı başlık için 30 dakika içinde birden fazla anlık e-posta gönderilmez; kaçırdıkların haftalık özete girer.</p>
             </form>
@@ -1359,7 +1376,8 @@
         <div class="card card-pad hero-bg">
           <div class="max-w-2xl">
             <div class="flex flex-wrap items-center gap-2"><span class="chip chip-dot ok">Yalnızca owner</span></div>
-            <h1 class="font-display text-[26px] sm:text-[32px] font-semibold tracking-tight leading-tight mt-3">Ekip Yönetimi</h1>
+            <div class="flex flex-wrap items-end justify-between gap-3 mt-3"><h1 class="font-display text-[26px] sm:text-[32px] font-semibold tracking-tight leading-tight">Ekip Yönetimi</h1>
+              <button type="button" id="tg-slack" class="btn btn-outline" title="Slack bildirimleri ve kanal ayarları"><span class="material-symbols-outlined">forum</span>Slack</button></div>
             <p class="text-sm text-on-surface-variant mt-2 leading-relaxed">Ekipleri, üyeleri ve davet bağlantılarını yönet; ekiplerin aramalarını ve kararlarını izle. Bir kişi birden fazla ekipte olabilir. Hiçbir ekipte olmayan kişi <b>ekip dışı</b>dır: paneli normal kullanır ama aktivitede, eğitimde ve ekip listelerinde görünmez.</p>
           </div>
         </div>

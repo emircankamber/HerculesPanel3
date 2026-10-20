@@ -12,6 +12,7 @@ from db_adapter import execute, execute_returning_id, execute_fetch, fetch_all, 
 import forum
 import notify
 import notify_email
+import slack_notify
 
 # ANALİZ ÖNBELLEĞİ (kullanıcı isteği): aynı anahtar + pazar son 72 saatte çekildiyse MCP'ye GİDİLMEZ, kayıtlı
 # ham veri döner (kişiye özel eşik/maliyet kısmı index.py'de yeniden hesaplanır). "Canlı veriyle yenile" atlar.
@@ -317,13 +318,14 @@ async def _ensure_staff_in_team():
 # ŞEMAYA/MİGRASYONA HER DEĞİŞİKLİKTE (yeni tablo, sütun, indeks, veri düzeltmesi, tohum) BU SAYIYI ARTIR —
 # artırmazsan canlı veritabanında migrasyon hiç çalışmaz.
 # ---------------------------------------------------------------------------
-SCHEMA_VERSION = 10  # v2: banned_categories · v3: training_notes · v4: bildirimler, forum okunma/rapor/görsel, analiz/ders bağı
+SCHEMA_VERSION = 11  # v2: banned_categories · v3: training_notes · v4: bildirimler, forum okunma/rapor/görsel, analiz/ders bağı
                     # v5: e-posta doğrulama/sıfırlama, deneme sınırı, bildirim tercihleri
                     # v6: mcp_cache (Trendler 72 saat), bildirim varsayılanı hepsi açık
                     # v7: doğrulama bağlantısı hiç gönderilmemiş (eski) kullanıcılar doğrulanmış sayılır
                     # v8: app_settings, trello_cards (Trello aktarımı)
                     # v9: market_decision.snapshot_json (karar anındaki veriler)
                     # v10: training_watch (eğitim videosu izleme takibi)
+                    # v11: slack_users, slack_messages, slack_events, slack_reminders (Slack entegrasyonu)
 
 
 def _migration_env_hash() -> str:
@@ -345,7 +347,7 @@ async def init_db():
     if await _schema_is_current():
         return
     async with db_adapter.single_connection():
-        for schema in _SCHEMAS + forum.SCHEMAS + notify.SCHEMAS + notify_email.SCHEMAS:
+        for schema in _SCHEMAS + forum.SCHEMAS + notify.SCHEMAS + notify_email.SCHEMAS + slack_notify.SCHEMAS:
             await execute(schema)
         await _migrate_schema()
         await seed_cert_requirements_if_empty()
@@ -1610,7 +1612,8 @@ EMAIL_REF_COLUMNS = [
 # Kişinin KENDİ satırları (user_id ile) — tamamen silinir.
 USER_ID_TABLES = ["sessions", "user_thresholds", "user_query_log", "market_decision",
                   "training_completions", "training_assignments", "team_members", "competency_forms",
-                  "training_notes", "training_watch", "email_tokens", "notification_prefs"]
+                  "training_notes", "training_watch", "email_tokens", "notification_prefs",
+                  "slack_users", "slack_reminders", "slack_messages"]
 # Başkalarına ait kayıtlarda kişiyi id ile anan alanlar: NULL yapılır.
 ID_REF_COLUMNS = [("training_lessons", "created_by"), ("team_invites", "created_by"),
                   ("banned_categories", "banned_by")]
