@@ -4289,6 +4289,100 @@ async def profile_password(req: PasswordIn, user: dict = Depends(require_profile
 
 
 # ---------------------------------------------------------------------------
+# E-POSTA ADRESİ DEĞİŞTİRME — hesap (user_id) aynı kalır, geçmiş korunur (db.change_user_email).
+# Kullanıcı isteği: doğrulama bağlantısı YOK, adres HEMEN değişir (kişi kendisi: mevcut şifreyle; owner: başkası için).
+# Eski adrese yalnızca bilgi e-postası gider (onay değil; hesap ele geçirildiyse kişi fark etsin).
+# ---------------------------------------------------------------------------
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+EMAIL_CHANGE_PW_MAX = 5          # 15 dk'da en fazla hatalı şifre denemesi (e-posta değiştirme)
+
+
+def _clean_new_email(v: str | None) -> str:
+    e = (v or "").strip().lower()
+    if not e or len(e) > 254 or not EMAIL_RE.match(e):
+        raise HTTPException(422, "Geçerli bir e-posta adresi gir")
+    return e
+
+
+async def _check_email_change(target: dict, new: str, by_owner: bool):
+    """Ortak kurallar. Kalıcı owner (OWNER_EMAILS) yetkisi e-postadan geldiği için: listedeki bir adrese yalnızca
+    zaten kalıcı owner olan geçebilir; kalıcı owner listede olmayan bir adrese geçemez (yetkisini kaybederdi)."""
+    old = (target.get("email") or "").strip().lower()
+    if new == old:
+        raise HTTPException(422, "Yeni adres mevcut adresle aynı")
+    old_perm, new_perm = db._is_permanent(old), db._is_permanent(new)
+    if old_perm and not new_perm:
+        raise HTTPException(409, "Kalıcı owner'ın (OWNER_EMAILS) e-postası, yeni adres önce OWNER_EMAILS ortam "
+                                 "değişkenine eklenmeden değiştirilemez")
+    if new_perm and not old_perm:
+        raise HTTPException(409, "Bu adres kalıcı owner listesinde (OWNER_EMAILS) — başka bir hesaba verilemez"
+                            if by_owner else "Bu e-posta adresi kullanılamıyor")
+    if await db.email_in_use(new, target["id"]):
+        raise HTTPException(409, "Bu e-posta adresi başka bir hesapta kayıtlı")
+
+
+async def _change_email(target: dict, new: str, by_owner: bool) -> str:
+    await _check_email_change(target, new, by_owner)
+    try:
+        old = await db.change_user_email(target["id"], new, verified=True)
+    except db.EmailTakenError as e:
+        raise HTTPException(409, str(e))
+    await _send_email_changed_notice(old, target["id"], by_owner)
+    return old
+
+
+async def _send_email_changed_notice(old_email: str, user_id: int, by_owner: bool):
+    u = await db.user_brief(user_id)
+    if not u or not old_email or not mailer.enabled():
+        return
+    subject, html_body, text = mailer.email_changed_notice(db.display_name(u), u["email"], by_owner, mailer.link("/"))
+    try:
+        await mailer.send(old_email, subject, html_body, text)
+    except mailer.MailError as e:
+        print(f"[mail] e-posta değişti bildirimi gönderilemedi: {e}", flush=True)
+
+
+class EmailChangeIn(BaseModel):
+    new_email: str = Field(..., max_length=320)
+    current_password: str = Field(..., max_length=200)
+
+
+@app.post("/api/profile/email")
+async def profile_email(req: EmailChangeIn, user: dict = Depends(require_profile_user)):
+    """Kişi kendi giriş e-postasını mevcut şifresiyle HEMEN değiştirir (ad soyad / doğrulama kapısından muaf: kayıtta
+    adresini yanlış yazan da düzeltebilsin)."""
+    uid = user["user_id"]
+    if await db.count_attempts("email_change_pw", str(uid), LOGIN_WINDOW) >= EMAIL_CHANGE_PW_MAX:
+        raise HTTPException(429, "Çok fazla hatalı deneme — 15 dakika sonra tekrar dene")
+    if not await db.check_password(uid, req.current_password):
+        await db.record_attempt("email_change_pw", str(uid))
+        raise HTTPException(403, "Mevcut şifre hatalı")
+    new = _clean_new_email(req.new_email)
+    target = await db.user_brief(uid)
+    if not target:
+        raise HTTPException(401, "Kullanıcı bulunamadı — lütfen tekrar giriş yapın")
+    old = await _change_email(target, new, by_owner=False)
+    return {"ok": True, "email": new, "old_email": old}
+
+
+class OwnerEmailIn(BaseModel):
+    new_email: str = Field(..., max_length=320)
+
+
+@app.post("/api/users/{target_id}/email")
+async def users_set_email(target_id: int, req: OwnerEmailIn, user: dict = Depends(require_owner)):
+    """Owner başkasının giriş e-postasını HEMEN değiştirir (ör. kişi eski adresine erişemiyor). Hesap ve geçmiş aynı kalır."""
+    if target_id == user["user_id"]:
+        raise HTTPException(409, "Kendi e-postanı Profilim → Hesap & Güvenlik'ten değiştir")
+    target = await db.user_brief(target_id)
+    if not target:
+        raise HTTPException(404, "Kullanıcı bulunamadı")
+    new = _clean_new_email(req.new_email)
+    old = await _change_email(target, new, by_owner=True)
+    return {"ok": True, "id": target_id, "email": new, "old_email": old}
+
+
+# ---------------------------------------------------------------------------
 # YETKİNLİK FORMU — yalnızca kişinin KENDİSİ ve OWNER'lar görür (admin/diğer üyeler 403)
 # ---------------------------------------------------------------------------
 def _form_meta(form: dict | None) -> dict:

@@ -439,6 +439,8 @@ async def get_session(token: str) -> dict | None:
         return None
     exists = row.pop("u_id") is not None
     email, role, in_team = row.pop("u_email"), row.pop("u_role"), row.pop("u_in_team")
+    if exists and email:
+        row["email"] = email   # güncel adres users'tan (e-posta değiştirildiyse oturumdaki kopya eski olabilir)
     row["email_verified"] = bool(row.pop("u_verified"))
     row["role"] = ("owner" if _is_permanent(email) else _norm_role(role)) if exists else None
     row["in_team"] = bool(in_team)
@@ -478,6 +480,63 @@ async def consume_email_token(code: str, kind: str) -> int | None:
         "UPDATE email_tokens SET used_at = ? WHERE token_hash = ? AND kind = ? AND used_at IS NULL AND expires_at > ? "
         "RETURNING user_id", (now, _token_hash(code), kind, now))
     return rows[0]["user_id"] if rows else None
+
+
+async def check_password(user_id: int, password: str) -> bool:
+    user = await fetch_one("SELECT password_hash, salt FROM users WHERE id = ?", (user_id,))
+    return bool(user) and _hash_password(password or "", user["salt"]) == user["password_hash"]
+
+
+class EmailTakenError(ValueError):
+    pass
+
+
+async def email_in_use(email: str, except_id: int | None = None) -> bool:
+    return bool(await fetch_one("SELECT id FROM users WHERE LOWER(email) = ? AND id <> ?",
+                                ((email or "").strip().lower(), except_id or 0)))
+
+
+async def change_user_email(user_id: int, new_email: str, verified: bool) -> str:
+    """
+    Hesabın giriş e-postasını değiştirir; GEÇMİŞ KORUNUR. Kişinin kendi kayıtları zaten user_id ile bağlı; e-postayla
+    anılan yerler (EMAIL_REF_COLUMNS, kontrol listesi sahibi, olay ayrıntıları, oturum kopyaları) yeni adrese
+    taşınır — yoksa o kayıtlarda ad "—" görünürdü. Eski adrese gönderilmiş doğrulama/sıfırlama/değiştirme
+    bağlantıları geçersizleşir, otomatik Slack eşleşmesi yeni adresle yeniden aranır. Eski adresi döner.
+    Kullanıcı isteği: doğrulama bağlantısı YOK, yeni adres hemen geçerli ve doğrulanmış sayılır (verified=True).
+    Yetki/kalıcı owner kuralları çağıran tarafta (index.py).
+    """
+    row = await fetch_one("SELECT id, email FROM users WHERE id = ?", (user_id,))
+    if not row:
+        raise ValueError("Kullanıcı bulunamadı")
+    old = (row["email"] or "").strip().lower()
+    new = (new_email or "").strip().lower()
+    if old == new:
+        return old
+    if await email_in_use(new, user_id):
+        raise EmailTakenError("Bu e-posta adresi başka bir hesapta kayıtlı")
+    now = int(time.time())
+    try:
+        await execute("UPDATE users SET email = ?, email_verified_at = ? WHERE id = ?",
+                      (new, now if verified else None, user_id))
+    except Exception as e:   # eşzamanlı aynı adres: UNIQUE kısıtı
+        if "unique" in str(e).lower() or "duplicate" in str(e).lower():
+            raise EmailTakenError("Bu e-posta adresi başka bir hesapta kayıtlı") from e
+        raise
+    await execute("UPDATE sessions SET email = ? WHERE user_id = ?", (new, user_id))
+    for t, col in EMAIL_REF_COLUMNS:
+        await execute(f"UPDATE {t} SET {col} = ? WHERE LOWER({col}) = ?", (new, old))
+    await execute("UPDATE checklists SET user_email = ? WHERE LOWER(user_email) = ?", (new, old))
+    for ev in await fetch_all("SELECT id, details_json FROM checklist_events WHERE LOWER(details_json) LIKE ?",
+                              (f"%{old}%",)):
+        try:
+            moved = json.dumps(_scrub_json(json.loads(ev["details_json"]), old, new), ensure_ascii=False)
+        except (TypeError, ValueError):
+            continue
+        await execute("UPDATE checklist_events SET details_json = ? WHERE id = ?", (moved, ev["id"]))
+    await execute("DELETE FROM auth_attempts WHERE scope = 'login_email' AND key = ?", (old,))
+    await execute("UPDATE email_tokens SET used_at = ? WHERE user_id = ? AND used_at IS NULL", (now, user_id))
+    await execute("DELETE FROM slack_users WHERE user_id = ? AND source = 'auto'", (user_id,))
+    return old
 
 
 async def mark_email_verified(user_id: int):
@@ -1619,13 +1678,14 @@ ID_REF_COLUMNS = [("training_lessons", "created_by"), ("team_invites", "created_
                   ("banned_categories", "banned_by")]
 
 
-def _scrub_json(value, email: str):
+def _scrub_json(value, email: str, replacement=None):
+    """JSON içindeki `email` değerlerini `replacement` ile değiştirir (silmede None, e-posta değişiminde yeni adres)."""
     if isinstance(value, dict):
-        return {k: _scrub_json(v, email) for k, v in value.items()}
+        return {k: _scrub_json(v, email, replacement) for k, v in value.items()}
     if isinstance(value, list):
-        return [_scrub_json(v, email) for v in value]
+        return [_scrub_json(v, email, replacement) for v in value]
     if isinstance(value, str) and value.strip().lower() == email:
-        return None
+        return replacement
     return value
 
 

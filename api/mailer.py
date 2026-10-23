@@ -156,6 +156,18 @@ def password_changed_email(name: str, url: str) -> tuple[str, str, str]:
         "Bunu sen yapmadıysan hemen şifreni sıfırla ve panel yöneticine haber ver:", url)
 
 
+def email_changed_notice(name: str, new_email: str, by_owner: bool, url: str) -> tuple[str, str, str]:
+    """ESKİ adrese gider: hesap ele geçirildiyse kişi fark etsin."""
+    subject = "Hesabının e-posta adresi değiştirildi"
+    who = "panel yöneticisi (owner) tarafından " if by_owner else ""
+    body = (f"<p>Merhaba {E(name or '')},</p><p>{E(BRAND)} hesabının giriş e-postası {E(who)}<b>{E(new_email)}</b> "
+            f"olarak değiştirildi. Artık bu adresle giriş yapacaksın; geçmişin ve kayıtların korunur.</p>"
+            f"<p><b>Bunu sen istemediysen</b> hemen panel yöneticine haber ver.</p>")
+    return subject, layout(subject, body, ("Panele git", url)), _plain(
+        f"Merhaba {name},", f"Hesabının giriş e-postası {who}{new_email} olarak değiştirildi.",
+        "Bunu sen istemediysen hemen panel yöneticine haber ver:", url)
+
+
 def notify_footer(settings_url: str, unsub_url: str) -> tuple[str, str]:
     h = (f'Bu e-postayı bildirim ayarların nedeniyle aldın. <a href="{E(settings_url)}" style="color:#005c55">Bildirim '
          f'ayarlarını değiştir</a> · <a href="{E(unsub_url)}" style="color:#565e74">Tüm e-postaları kapat</a>')
