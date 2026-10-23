@@ -666,6 +666,24 @@ yüzden backend'e hiç bağlanmamalı, sahte veri olur.
   Düzenlemede artık "Seçilen kişiler"e AÇIKÇA yeni eklenen herkes de bildirim alır (`lesson_explicit_assignees`).
 - Test: `mailer.httpx.AsyncClient`'ı `httpx.MockTransport`'lu istemciyle değiştirip giden gövdeleri doğrula (gerçek Resend'e gitme).
 
+## E-posta adresi değiştirme (hesap ve geçmiş korunur)
+
+- Kişinin kayıtları `user_id` ile bağlı; `db.change_user_email` yalnızca `users.email`'i değiştirir ve e-postayla anılan
+  yerleri yeni adrese TAŞIR: `EMAIL_REF_COLUMNS`, `checklists.user_email`, `checklist_events.details_json`,
+  `sessions.email` (ayrıca `get_session` adresi artık `users`'tan okur). Eski adrese giden kullanılmamış
+  doğrulama/sıfırlama bağlantıları geçersizleşir, `login_email` deneme sayacı silinir, otomatik Slack eşleşmesi
+  (`source=auto`) silinip yeni adresle yeniden aranır. **E-postayla kişiyi anan yeni bir sütun eklersen
+  `EMAIL_REF_COLUMNS`'a ekle — hem silme hem değiştirme oradan çalışır.**
+- **Doğrulama bağlantısı YOK (kullanıcı isteği):** değişiklik HEMEN uygulanır, yeni adres doğrulanmış sayılır.
+  Eski adrese yalnızca bilgi e-postası gider (`mailer.email_changed_notice`; e-posta kapalıysa gitmez).
+- **Kişi kendisi:** `POST /api/profile/email {new_email, current_password}` (`require_profile_user` — ad soyad/doğrulama
+  kapısından muaf, kayıtta adresini yanlış yazan düzeltebilsin; hatalı şifre 15 dk'da 5 → 429).
+- **Owner (başkası için):** `POST /api/users/{id}/email {new_email}` (`require_owner`; kendi hesabına 409 → Profilim).
+- **Kurallar (her iki yol):** geçerli biçim (422), aynı adres (422), başka hesapta kayıtlı (409),
+  `OWNER_EMAILS` — listedeki bir adrese yalnızca zaten kalıcı owner olan geçebilir, kalıcı owner listede olmayan adrese
+  geçemez (409; kişiye "kullanılamıyor" der, listeyi sızdırmaz). Panel: Profilim → Hesap & Güvenlik, Ekip Yönetimi →
+  Üyeler → "e-postayı değiştir".
+
 ## Slack (`api/slack.py` + `api/slack_notify.py` + `/api/slack/*`) — bildirimler + Slack'ten forum cevabı
 
 - **Ortam değişkenleri (istek anında):** `SLACK_BOT_TOKEN` (xoxb-; yoksa Slack tamamen KAPALI, hiçbir çağrı yapılmaz),

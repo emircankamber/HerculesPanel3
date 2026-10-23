@@ -4722,7 +4722,7 @@ function tgRenderMembers() {
     row.innerHTML = `
       <div class="min-w-0">
         <div class="flex items-center gap-2 min-w-0"><span class="pf-avatar !w-8 !h-8 !text-[11px]">${esc(initials(u.name || u.email))}</span>
-          <div class="min-w-0"><div class="font-medium break-words tg-mem-name">${esc(u.name || "(ad girilmemiş)")}${titleChip(u.title)}</div><div class="text-[11px] text-secondary break-all">${esc(u.email)}${u.username ? ` · @${esc(u.username)}` : ""}</div></div></div>
+          <div class="min-w-0"><div class="font-medium break-words tg-mem-name">${esc(u.name || "(ad girilmemiş)")}${titleChip(u.title)}</div><div class="text-[11px] text-secondary break-all">${esc(u.email)}${u.username ? ` · @${esc(u.username)}` : ""}</div>${isMe ? "" : perm ? `<span class="text-[11px] text-secondary" title="Kalıcı owner'ın adresi OWNER_EMAILS ortam değişkeninden yönetilir">e-posta değiştirilemez</span>` : `<button type="button" class="text-[11px] text-primary hover:underline tg-email-btn">e-postayı değiştir</button>`}</div></div>
         <div class="flex flex-wrap gap-1 mt-1">${isMe ? '<span class="chip na !text-[10px]">sen</span>' : ""}${perm ? '<span class="chip ok !text-[10px]"><span class="material-symbols-outlined !text-[12px]" aria-hidden="true">lock</span>kalıcı owner</span>' : ""}${tgIsNew(u) ? '<span class="chip warn !text-[10px] tg-new">yeni</span>' : ""}</div>
         <div class="text-[11px] text-secondary mt-1">Kayıt: ${esc(tgDate(u.created_at))}</div>
         ${tgMailStatus(u)}
@@ -4749,6 +4749,14 @@ function tgRenderMembers() {
           <input type="text" class="field !h-9 text-xs flex-1 min-w-[180px] tg-del-input" autocomplete="off" spellcheck="false" aria-label="Onay için e-posta" placeholder="${esc(u.email)}">
           <button type="button" class="btn btn-danger tg-del-go" disabled>Kalıcı olarak sil</button>
           <button type="button" class="btn btn-outline btn-sm tg-del-cancel">Vazgeç</button>
+        </div>
+      </div>
+      <div class="tg-email-box hidden md:col-span-4 p-3 rounded border border-hairline">
+        <div class="text-[12px] text-secondary leading-snug">Giriş e-postasını değiştir — hesap, geçmiş, kararlar, eğitim ve ekip üyelikleri aynen kalır. Değişiklik hemen geçerli olur; kişi bundan sonra yeni adresle giriş yapar. E-posta servisi açıksa eski adrese bilgi e-postası gider.</div>
+        <div class="flex flex-wrap gap-2 mt-2">
+          <input type="email" class="field !h-9 text-xs flex-1 min-w-[180px] tg-email-input" autocomplete="off" spellcheck="false" aria-label="Yeni e-posta" placeholder="yeni@adres.com">
+          <button type="button" class="btn btn-primary btn-sm tg-email-go">Değiştir</button>
+          <button type="button" class="btn btn-outline btn-sm tg-email-cancel">Vazgeç</button>
         </div>
       </div>
       <div class="tg-act-msg text-[12px] text-error md:col-span-4 empty:hidden"></div>`;
@@ -4807,6 +4815,23 @@ function tgRenderMembers() {
     };
     tIn.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); tIn.blur(); } });
     tIn.addEventListener("change", saveTitle);
+    // e-posta değiştirme (owner, başkası için)
+    const emBox = row.querySelector(".tg-email-box"), emIn = row.querySelector(".tg-email-input");
+    row.querySelector(".tg-email-btn")?.addEventListener("click", () => { emBox.classList.toggle("hidden"); emIn.value = ""; emIn.focus(); });
+    row.querySelector(".tg-email-cancel").addEventListener("click", () => { emBox.classList.add("hidden"); emIn.value = ""; });
+    const emGo = row.querySelector(".tg-email-go");
+    const doEmail = async () => {
+      const v = emIn.value.trim();
+      if (!v) { emIn.focus(); return; }
+      if (!confirm(`${u.name || u.email} adlı kişinin giriş e-postası\n${u.email} → ${v}\nolarak değiştirilsin mi? Kişi bundan sonra yeni adresle giriş yapar.`)) return;
+      emGo.disabled = true; actMsg.textContent = "";
+      try {
+        await tgApi(`/api/users/${encodeURIComponent(u.id)}/email`, { method: "POST", body: JSON.stringify({ new_email: v }) });
+        await tgLoad();
+      } catch (err) { emGo.disabled = false; actMsg.textContent = err.message; }
+    };
+    emGo.addEventListener("click", doEmail);
+    emIn.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); doEmail(); } });
     // kalıcı silme
     const delBox = row.querySelector(".tg-del-box"), delInput = row.querySelector(".tg-del-input"), delGo = row.querySelector(".tg-del-go");
     const norm = v => String(v || "").trim().toLowerCase();
@@ -5289,6 +5314,22 @@ function npSyncDisabled() {
       ["#pf-pass-cur", "#pf-pass-new", "#pf-pass-new2"].forEach(s => { $(s).value = ""; });
       msg.textContent = "Şifre değiştirildi; diğer oturumların kapatıldı."; msg.className = "text-xs text-primary";
     } catch (err) { fail(err.message); }
+  });
+  $("#pf-email-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const msg = $("#pf-email-msg"), neu = $("#pf-email-new").value.trim(), pw = $("#pf-email-pass").value;
+    const fail = (t) => { msg.textContent = t; msg.className = "text-xs text-error"; };
+    if (!neu || !pw) return fail("Yeni e-posta ve mevcut şifre gerekli.");
+    const btn = e.submitter || $("#pf-email-form button[type=submit]"); btn.disabled = true;
+    try {
+      const r = await pfApi("/api/profile/email", { method: "POST", body: JSON.stringify({ new_email: neu, current_password: pw }) });
+      $("#pf-email-new").value = ""; $("#pf-email-pass").value = "";
+      msg.className = "text-xs text-primary";
+      msg.textContent = `Giriş e-postan ${r.email} olarak değiştirildi — bundan sonra bu adresle giriş yap.`;
+      pfState.profile = await pfApi("/api/profile"); pfRenderHeader(); pfRenderSecurity();
+      await checkAuthStatus();
+    } catch (err) { fail(err.message); }
+    finally { btn.disabled = false; }
   });
   $("#pf-map-btn").addEventListener("click", () => { tgState.tab = "skills"; showView("team"); });
 })();

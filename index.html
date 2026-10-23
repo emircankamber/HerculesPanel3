@@ -1273,6 +1273,14 @@
                   <dt class="text-secondary">Rol</dt><dd id="pf-role"></dd>
                   <dt class="text-secondary">Kayıt</dt><dd id="pf-created"></dd>
                 </dl>
+                <form id="pf-email-form" class="flex flex-col gap-3 mt-5 pt-4 border-t border-hairline" novalidate>
+                  <div class="eyebrow">E-posta adresini değiştir</div>
+                  <input type="email" id="pf-email-new" class="field" placeholder="Yeni e-posta adresi" autocomplete="email" aria-label="Yeni e-posta adresi" maxlength="254">
+                  <input type="password" id="pf-email-pass" class="field" placeholder="Mevcut şifre" autocomplete="current-password" aria-label="Mevcut şifre (e-posta değiştirme)">
+                  <div class="flex flex-wrap items-center gap-3"><button type="submit" class="btn btn-primary"><span class="material-symbols-outlined">alternate_email</span>E-postayı değiştir</button>
+                    <span id="pf-email-msg" class="text-xs"></span></div>
+                  <span class="text-[11px] text-secondary">Değişiklik hemen geçerli olur; bundan sonra yeni adresle giriş yaparsın. Hesabın, geçmişin, kararların, eğitim ilerlemen ve ekip üyeliklerin aynen korunur. E-posta servisi açıksa eski adresine bilgi e-postası gider.</span>
+                </form>
               </div>
               <form id="pf-pass-form" class="card card-pad flex flex-col gap-3" novalidate>
                 <div class="eyebrow">Şifre değiştir</div>
