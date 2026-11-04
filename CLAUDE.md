@@ -372,6 +372,26 @@ yüzden backend'e hiç bağlanmamalı, sahte veri olur.
   zorunda; videoyu açıp başka iş yapanı ayırt edemeyiz. API yüklenemezse (engelleyici) video düz iframe ile açılır,
   takip edilmez → tamamlama açılmaz (panel uyarır).
 
+## Video içi sorular (`api/quiz.py` + `/api/training/lessons/{id}/questions/{qid}/answer`)
+
+- **Kullanıcı isteği:** dersi ekleyen (owner/admin) YouTube dersinde istediği saniyeye çoktan seçmeli soru koyar
+  (2–4 şık, tek doğru, isteğe bağlı açıklama; ders başına ≤20). Ders formunda "Video içi sorular" (dk:sn). Sorular
+  `LessonIn.questions` ile ders kaydıyla birlikte gider: **None = dokunma** (eski istemci), `[]` = hepsini sil.
+  YouTube olmayan derse soru → 422; video YouTube olmaktan çıkarsa sorular silinir.
+- Tablolar `training_questions` (at_sec, options_json, correct) + `training_answers` (kişi × soru: attempts, wrong_json,
+  first_correct, solved_at) — v12. `db.replace_questions` kümeyi eşitler: aynı id güncellenir; **şıklar ya da doğru
+  şık değişirse o sorunun cevapları sıfırlanır** (yalnızca metin/zaman/açıklama değişirse korunur); listede olmayan
+  soru cevaplarıyla silinir. Ders silinince sorular/cevaplar, hesap silinince cevaplar (`USER_ID_TABLES`) silinir.
+- **Doğru şık SUNUCUDA kalır:** izleyiciye (`my_lessons[].questions`) doğru şık ve açıklama yalnızca kişi soruyu
+  ÇÖZDÜKTEN sonra gider (`quiz.viewer_view`); owner/admin `all_lessons[].questions`'ta görür. Cevap ucu yalnızca
+  kendi kaydı + atanmış ders (404); doğruyu bulana kadar denenir (kullanıcı isteği), aynı yanlış şık iki kez sayılmaz,
+  çözülmüş soruda kayıt değişmez. **Tamamlama şartı DEĞİL** (kullanıcı isteği).
+- Panel (`app.js::embedYouTube`): oynarken 250 ms'de bir konum okunur; çözülmemiş ve anı gelmiş İLK soru (ileri
+  sarılarak geçilmiş olsa da) videoyu durdurur, tam ekrandan çıkarır, videonun üstünü örter (oynatma engellenir) ve
+  altında kart açar: yanlış şık kırmızı (devre dışı), doğru şık yeşil + açıklama + "Devam et". Çözülmüş soru tekrar
+  sorulmaz. YouTube API yüklenemezse sorular gösterilemez (uyarı). İlerleme matrisinde ipucu: cevaplanan / ilk
+  denemede doğru (`/api/training/progress` → `quiz`, `lessons[].question_count`).
+
 ## Çoklu ekip, Ekip Yönetimi & kalıcı hesap silme (yalnızca owner)
 
 - **Model:** `teams` (ad, created_at) + `team_members` (team_id, user_id, added_at). Bir kişi birden fazla ekipte
