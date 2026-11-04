@@ -12,6 +12,7 @@ from db_adapter import execute, execute_returning_id, execute_fetch, fetch_all, 
 import forum
 import notify
 import notify_email
+import quiz
 import slack_notify
 
 # ANALİZ ÖNBELLEĞİ (kullanıcı isteği): aynı anahtar + pazar son 72 saatte çekildiyse MCP'ye GİDİLMEZ, kayıtlı
@@ -118,6 +119,17 @@ _SCHEMAS = [
         lesson_id INTEGER NOT NULL, user_id INTEGER NOT NULL, duration DOUBLE PRECISION, segments_json TEXT NOT NULL,
         watched DOUBLE PRECISION NOT NULL DEFAULT 0, last_at DOUBLE PRECISION, updated_at INTEGER NOT NULL,
         PRIMARY KEY (lesson_id, user_id))""",
+    # VİDEO İÇİ SORULAR (quiz.py): dersi ekleyen istediği saniyeye çoktan seçmeli soru koyar.
+    """CREATE TABLE IF NOT EXISTS training_questions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, lesson_id INTEGER NOT NULL, at_sec DOUBLE PRECISION NOT NULL,
+        text TEXT NOT NULL, options_json TEXT NOT NULL, correct INTEGER NOT NULL, explanation TEXT,
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)""",
+    # Kişi × soru: doğruyu bulana kadar dener; yanlış denenen şıklar, deneme sayısı, ilk denemede doğru mu.
+    """CREATE TABLE IF NOT EXISTS training_answers (
+        question_id INTEGER NOT NULL, lesson_id INTEGER NOT NULL, user_id INTEGER NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0, wrong_json TEXT NOT NULL DEFAULT '[]',
+        first_correct INTEGER NOT NULL DEFAULT 0, solved_at INTEGER, updated_at INTEGER NOT NULL,
+        PRIMARY KEY (question_id, user_id))""",
     # E-POSTA BAĞLANTILARI (doğrulama / şifre sıfırlama): bağlantıdaki kod YALNIZCA sha256 olarak saklanır,
     # tek kullanımlık (used_at), süreli (expires_at). Hesap silinince silinir (USER_ID_TABLES).
     """CREATE TABLE IF NOT EXISTS email_tokens (
@@ -318,7 +330,7 @@ async def _ensure_staff_in_team():
 # ŞEMAYA/MİGRASYONA HER DEĞİŞİKLİKTE (yeni tablo, sütun, indeks, veri düzeltmesi, tohum) BU SAYIYI ARTIR —
 # artırmazsan canlı veritabanında migrasyon hiç çalışmaz.
 # ---------------------------------------------------------------------------
-SCHEMA_VERSION = 11  # v2: banned_categories · v3: training_notes · v4: bildirimler, forum okunma/rapor/görsel, analiz/ders bağı
+SCHEMA_VERSION = 12  # v2: banned_categories · v3: training_notes · v4: bildirimler, forum okunma/rapor/görsel, analiz/ders bağı
                     # v5: e-posta doğrulama/sıfırlama, deneme sınırı, bildirim tercihleri
                     # v6: mcp_cache (Trendler 72 saat), bildirim varsayılanı hepsi açık
                     # v7: doğrulama bağlantısı hiç gönderilmemiş (eski) kullanıcılar doğrulanmış sayılır
@@ -326,6 +338,7 @@ SCHEMA_VERSION = 11  # v2: banned_categories · v3: training_notes · v4: bildir
                     # v9: market_decision.snapshot_json (karar anındaki veriler)
                     # v10: training_watch (eğitim videosu izleme takibi)
                     # v11: slack_users, slack_messages, slack_events, slack_reminders (Slack entegrasyonu)
+                    # v12: training_questions, training_answers (eğitim videosu içi sorular)
 
 
 def _migration_env_hash() -> str:
@@ -1671,7 +1684,7 @@ EMAIL_REF_COLUMNS = [
 # Kişinin KENDİ satırları (user_id ile) — tamamen silinir.
 USER_ID_TABLES = ["sessions", "user_thresholds", "user_query_log", "market_decision",
                   "training_completions", "training_assignments", "team_members", "competency_forms",
-                  "training_notes", "training_watch", "email_tokens", "notification_prefs",
+                  "training_notes", "training_watch", "training_answers", "email_tokens", "notification_prefs",
                   "slack_users", "slack_reminders", "slack_messages"]
 # Başkalarına ait kayıtlarda kişiyi id ile anan alanlar: NULL yapılır.
 ID_REF_COLUMNS = [("training_lessons", "created_by"), ("team_invites", "created_by"),
@@ -1854,6 +1867,8 @@ async def delete_lesson(lesson_id: int):
     await execute("DELETE FROM training_completions WHERE lesson_id = ?", (lesson_id,))
     await execute("DELETE FROM training_notes WHERE lesson_id = ?", (lesson_id,))
     await execute("DELETE FROM training_watch WHERE lesson_id = ?", (lesson_id,))
+    await execute("DELETE FROM training_answers WHERE lesson_id = ?", (lesson_id,))
+    await execute("DELETE FROM training_questions WHERE lesson_id = ?", (lesson_id,))
     await forum.unlink_lesson(lesson_id)
     await notify.delete_for(lesson_id=lesson_id)
     await execute("DELETE FROM training_assignments WHERE lesson_id = ?", (lesson_id,))
@@ -1939,6 +1954,86 @@ async def all_watch() -> list[dict]:
 
 async def all_training_notes() -> list[dict]:
     return await fetch_all("SELECT lesson_id, user_id, note, updated_at FROM training_notes")
+
+
+# --- Video içi sorular (quiz.py) ---
+_Q_COLS = "id, lesson_id, at_sec AS at, text, options_json, correct, explanation"
+
+
+async def questions_for_lessons(lesson_ids: list[int] | None = None) -> dict[int, list[dict]]:
+    """Ders id → zamana göre sıralı sorular (None = tüm dersler)."""
+    if lesson_ids is not None and not lesson_ids:
+        return {}
+    if lesson_ids is None:
+        rows = await fetch_all(f"SELECT {_Q_COLS} FROM training_questions ORDER BY lesson_id, at_sec, id")
+    else:
+        marks = ",".join("?" * len(lesson_ids))
+        rows = await fetch_all(f"SELECT {_Q_COLS} FROM training_questions WHERE lesson_id IN ({marks}) "
+                               "ORDER BY lesson_id, at_sec, id", tuple(lesson_ids))
+    out: dict[int, list[dict]] = {}
+    for r in rows:
+        out.setdefault(r["lesson_id"], []).append(r)
+    return out
+
+
+async def get_question(question_id: int) -> dict | None:
+    return await fetch_one(f"SELECT {_Q_COLS} FROM training_questions WHERE id = ?", (question_id,))
+
+
+async def replace_questions(lesson_id: int, questions: list[dict]):
+    """Dersin sorularını verilen listeye eşitler. id'si bu derse ait olan güncellenir (şıklar/doğru şık değiştiyse
+    o sorunun cevapları sıfırlanır), id'siz ya da başka derse ait id yeni eklenir, listede olmayan silinir."""
+    existing = {q["id"]: q for q in (await questions_for_lessons([lesson_id])).get(lesson_id, [])}
+    now = int(time.time())
+    keep = set()
+    for q in questions:
+        old = existing.get(q["id"]) if q["id"] else None
+        if old and q["id"] not in keep:
+            keep.add(q["id"])
+            await execute("UPDATE training_questions SET at_sec = ?, text = ?, options_json = ?, correct = ?, "
+                          "explanation = ?, updated_at = ? WHERE id = ? AND lesson_id = ?",
+                          (q["at"], q["text"], json.dumps(q["options"], ensure_ascii=False), q["correct"],
+                           q["explanation"] or None, now, q["id"], lesson_id))
+            if quiz.content_changed(old, q):
+                await execute("DELETE FROM training_answers WHERE question_id = ?", (q["id"],))
+        else:
+            await execute_returning_id(
+                "INSERT INTO training_questions (lesson_id, at_sec, text, options_json, correct, explanation, "
+                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (lesson_id, q["at"], q["text"], json.dumps(q["options"], ensure_ascii=False), q["correct"],
+                 q["explanation"] or None, now, now))
+    for qid in set(existing) - keep:
+        await execute("DELETE FROM training_answers WHERE question_id = ?", (qid,))
+        await execute("DELETE FROM training_questions WHERE id = ?", (qid,))
+
+
+async def answers_for_user(user_id: int) -> dict[int, dict]:
+    rows = await fetch_all("SELECT question_id, attempts, wrong_json, first_correct, solved_at "
+                           "FROM training_answers WHERE user_id = ?", (user_id,))
+    return {r["question_id"]: r for r in rows}
+
+
+async def get_answer(question_id: int, user_id: int) -> dict | None:
+    return await fetch_one("SELECT question_id, attempts, wrong_json, first_correct, solved_at FROM training_answers "
+                           "WHERE question_id = ? AND user_id = ?", (question_id, user_id))
+
+
+async def set_answer(question_id: int, lesson_id: int, user_id: int, ans: dict):
+    await execute(
+        "INSERT INTO training_answers (question_id, lesson_id, user_id, attempts, wrong_json, first_correct, solved_at, "
+        "updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (question_id, user_id) DO UPDATE SET "
+        "attempts = excluded.attempts, wrong_json = excluded.wrong_json, first_correct = excluded.first_correct, "
+        "solved_at = excluded.solved_at, updated_at = excluded.updated_at",
+        (question_id, lesson_id, user_id, ans.get("attempts") or 0, ans.get("wrong_json") or "[]",
+         ans.get("first_correct") or 0, ans.get("solved_at"), int(time.time())))
+
+
+async def all_answer_stats() -> list[dict]:
+    """İlerleme ekranı: kişi × ders çözülen ve ilk denemede doğru bilinen soru sayısı (yalnızca var olan sorular)."""
+    return await fetch_all(
+        "SELECT a.lesson_id, a.user_id, SUM(CASE WHEN a.solved_at IS NOT NULL THEN 1 ELSE 0 END) AS solved, "
+        "SUM(a.first_correct) AS first_try, SUM(a.attempts) AS attempts FROM training_answers a "
+        "JOIN training_questions q ON q.id = a.question_id GROUP BY a.lesson_id, a.user_id")
 
 
 

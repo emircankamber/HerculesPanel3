@@ -3305,7 +3305,7 @@ function renderHome(recent, grouped) {
 // ---------------------------------------------------------------------------
 const YT_ID_RE = /^[A-Za-z0-9_-]{11}$/;
 const ROLE_LABEL = { owner: "Owner", admin: "Admin", member: "Üye" };
-const trnState = { data: null, users: [], progress: null, editing: null };
+const trnState = { data: null, users: [], progress: null, editing: null, qDraft: [] };
 
 const isStaff = () => currentUser.role === "owner" || currentUser.role === "admin";
 const todayISO = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
@@ -3365,8 +3365,11 @@ const segsTotal = (segs) => segs.reduce((t, [a, b]) => t + (b - a), 0);
 const trnTrackers = new Set();
 function trnStopTrackers() { trnTrackers.forEach(t => t.stop()); trnTrackers.clear(); }
 
-/** Oynatıcıyı kurar ve izlemeyi takip eder; onChange(oran) her ilerlemede çağrılır. */
-function embedYouTube(slot, l, onChange) {
+/** Oynatıcıyı kurar ve izlemeyi takip eder; onChange(oran) her ilerlemede çağrılır.
+ *  Video içi sorular (l.questions): çözülmemiş bir sorunun anına gelince (ileri sarılsa da) video durur, soru kartı
+ *  açılır; kişi doğruyu bulana kadar dener (sunucu doğru/yanlış döner), "Devam et" ile video sürer. onQuiz() her
+ *  çözümde çağrılır. */
+function embedYouTube(slot, l, onChange, onQuiz = () => {}) {
   const id = l.youtube_id;
   if (!YT_ID_RE.test(id)) return;
   const req = trnState.data?.requirements || {};
@@ -3376,7 +3379,17 @@ function embedYouTube(slot, l, onChange) {
   wrap.className = "trn-video";
   const host = document.createElement("div");
   wrap.appendChild(host);
-  slot.replaceChildren(wrap);
+  const questions = l.questions || [];
+  // Soru açıkken videonun üstünü örter (tıklayıp oynatmayı engeller); soru kartı videonun hemen altında
+  const shade = document.createElement("div");
+  shade.className = "qz-shade"; shade.hidden = true;
+  shade.innerHTML = `<span><span class="material-symbols-outlined">quiz</span>Devam etmek için aşağıdaki soruyu cevapla</span>`;
+  wrap.appendChild(shade);
+  const quizBox = document.createElement("div");
+  quizBox.className = "qz-box"; quizBox.hidden = true;
+  quizBox.setAttribute("role", "dialog"); quizBox.setAttribute("aria-live", "polite");
+  slot.replaceChildren(wrap, quizBox);
+  let quizOpen = null, qTimer = null;
   let player = null, lastT = null, lastWall = 0, pending = [], tickTimer = null, beatTimer = null, busy = false, started = false;
   const ratioNow = () => {
     const d = w.duration || (player && player.getDuration ? player.getDuration() : 0) || 0;
@@ -3410,11 +3423,72 @@ function embedYouTube(slot, l, onChange) {
     } catch { pending = mergeSegs([...send, ...pending]); }   // ağ hatası: bir sonraki bildirimde yeniden
     finally { busy = false; }
   };
-  const stopTimers = () => { clearInterval(tickTimer); clearInterval(beatTimer); tickTimer = beatTimer = null; };
+  const stopTimers = () => { clearInterval(tickTimer); clearInterval(beatTimer); clearInterval(qTimer); tickTimer = beatTimer = qTimer = null; };
+  const closeQuiz = () => { quizOpen = null; quizBox.hidden = true; shade.hidden = true; quizBox.replaceChildren(); };
+  const openQuiz = (q) => {
+    quizOpen = q;
+    try { if (document.fullscreenElement) document.exitFullscreen().catch(() => {}); } catch {}
+    const idx = questions.indexOf(q) + 1;
+    quizBox.innerHTML = `
+      <div class="flex flex-wrap items-center gap-2"><span class="chip warn">Soru ${idx}/${questions.length} · ${esc(fmtClock(q.at))}</span>
+        <span class="text-[11px] text-secondary">Doğruyu bulana kadar deneyebilirsin.</span></div>
+      <p class="qz-q">${esc(q.text)}</p>
+      <div class="qz-opts">${q.options.map((o, j) => `<button type="button" class="qz-opt" data-j="${j}"><span class="qz-letter">${"ABCD"[j]}</span><span class="min-w-0 break-words">${esc(o)}</span></button>`).join("")}</div>
+      <p class="qz-feedback" aria-live="polite"></p>
+      <div class="flex justify-end"><button type="button" class="qz-continue btn btn-primary btn-sm" hidden><span class="material-symbols-outlined">play_arrow</span>Devam et</button></div>`;
+    const btns = [...quizBox.querySelectorAll(".qz-opt")];
+    const fb = quizBox.querySelector(".qz-feedback"), cont = quizBox.querySelector(".qz-continue");
+    const paint = () => {
+      const my = q.my || {};
+      btns.forEach((b, j) => {
+        const right = my.solved && my.correct === j, wrong = (my.wrong || []).includes(j);
+        b.classList.toggle("right", right); b.classList.toggle("wrong", wrong);
+        b.disabled = !!my.solved || wrong;
+        b.setAttribute("aria-label", `${"ABCD"[j]}: ${q.options[j]}${right ? " — doğru" : wrong ? " — yanlış" : ""}`);
+      });
+      if (my.solved) {
+        fb.className = "qz-feedback ok";
+        fb.innerHTML = `<b>Doğru!</b>${my.explanation ? ` ${esc(my.explanation)}` : ""}`;
+        cont.hidden = false; cont.focus();
+      }
+    };
+    btns.forEach((b, j) => b.addEventListener("click", async () => {
+      if (b.disabled) return;
+      btns.forEach(x => { x.disabled = true; });
+      try {
+        const r = await apiFetch(`${API_BASE}/api/training/lessons/${encodeURIComponent(l.id)}/questions/${encodeURIComponent(q.id)}/answer`, {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ choice: j }),
+        });
+        const res = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(apiErrorText(res, r.status));
+        q.my = res.my;
+        if (!res.is_correct) { fb.className = "qz-feedback bad"; fb.innerHTML = `<b>Yanlış.</b> Tekrar dene.`; }
+        paint();
+        if (q.my.solved) onQuiz();
+      } catch (err) {
+        fb.className = "qz-feedback bad"; fb.textContent = `Cevap gönderilemedi: ${err.message}`;
+        paint();
+      }
+    }));
+    cont.addEventListener("click", () => { closeQuiz(); try { player.playVideo(); } catch {} });
+    quizBox.hidden = false; shade.hidden = false;
+    paint();
+    quizBox.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  };
+  // Çözülmemiş ve anı gelmiş (ya da ileri sarılarak geçilmiş) ilk soru → videoyu durdur, soruyu aç
+  const checkQuiz = () => {
+    if (quizOpen || !questions.length || !player || !player.getCurrentTime) return;
+    const t = player.getCurrentTime();
+    const q = questions.filter(x => !(x.my && x.my.solved) && x.at <= t + 0.2).sort((a, b) => a.at - b.at)[0];
+    if (!q) return;
+    tick(true); lastT = null;
+    openQuiz(q);
+    try { player.pauseVideo(); } catch {}
+  };
   const onVis = () => { if (document.visibilityState !== "visible") { lastT = null; if (pending.length) beat(); } };
   document.addEventListener("visibilitychange", onVis);
   const tracker = { stop() {
-    tick(playing()); stopTimers(); document.removeEventListener("visibilitychange", onVis);
+    tick(playing()); stopTimers(); closeQuiz(); document.removeEventListener("visibilitychange", onVis);
     if (pending.length) beat();
     try { player && player.destroy && player.destroy(); } catch {}
   } };
@@ -3427,12 +3501,15 @@ function embedYouTube(slot, l, onChange) {
       events: {
         onStateChange: (e) => {
           if (e.data === YT.PlayerState.PLAYING) {
+            if (quizOpen) { try { player.pauseVideo(); } catch {} return; }   // soru cevaplanmadan oynatılamaz
             if (!started) { started = true; beat(); }   // sunucu zaman ölçümünü başlatır
             // Başlangıç noktası hemen alınır (ilk saniye kaybolmasın; atlamadan sonra da yeni konumdan başlar)
             lastT = player.getCurrentTime(); lastWall = performance.now();
             if (!tickTimer) { tickTimer = setInterval(tick, 1000); beatTimer = setInterval(beat, 10000); }
+            if (questions.length && !qTimer) { qTimer = setInterval(checkQuiz, 250); checkQuiz(); }
           } else if (e.data === YT.PlayerState.PAUSED || e.data === YT.PlayerState.ENDED) {
             tick(true); lastT = null; stopTimers(); beat();
+            if (e.data === YT.PlayerState.ENDED) checkQuiz();   // videonun sonundaki soru
           }
         },
       },
@@ -3445,7 +3522,8 @@ function embedYouTube(slot, l, onChange) {
     wrap.replaceChildren(f);
     const warn = document.createElement("p");
     warn.className = "text-xs text-error mt-1";
-    warn.textContent = "İzleme takip edilemiyor: YouTube oynatıcı arayüzü yüklenemedi (reklam/içerik engelleyiciyi kapatıp sayfayı yenileyin). Tamamlamak için izlemenin kaydedilmesi gerekir.";
+    warn.textContent = "İzleme takip edilemiyor: YouTube oynatıcı arayüzü yüklenemedi (reklam/içerik engelleyiciyi kapatıp sayfayı yenileyin). Tamamlamak için izlemenin kaydedilmesi gerekir."
+      + (questions.length ? " Video içi sorular da bu yüzden gösterilemiyor." : "");
     slot.appendChild(warn);
   });
 }
@@ -3506,6 +3584,7 @@ function renderTraining() {
       </div>
       ${l.description ? `<p class="trn-desc text-[13.5px] text-on-surface-variant leading-relaxed">${esc(l.description)}</p>` : ""}
       ${lessonVideoHtml(l)}
+      ${(l.questions || []).length ? `<div class="trn-quiz-sum text-[12px] text-secondary flex items-center gap-1.5"><span class="material-symbols-outlined !text-[16px]">quiz</span><span></span></div>` : ""}
       <div class="trn-note flex flex-col gap-1.5">
         <label class="eyebrow" for="trn-note-${esc(l.id)}">Kazanımlarım · Neler öğrendim?</label>
         <textarea id="trn-note-${esc(l.id)}" class="trn-note-input field !h-auto py-2 text-[13px] leading-relaxed" rows="3" maxlength="${TRN_NOTE_MAX}"
@@ -3545,8 +3624,16 @@ function renderTraining() {
       toggle.disabled = !(watchOk && noteOk);
       toggle.title = toggle.disabled ? "Önce koşulları tamamla" : "";
     };
+    const qsum = card.querySelector(".trn-quiz-sum span:last-child");
+    const refreshQuiz = () => {
+      if (!qsum) return;
+      const qs = l.questions || [], solved = qs.filter(q => q.my && q.my.solved).length;
+      qsum.textContent = `Videoda ${qs.length} soru var — video o anlarda durur · cevaplanan: ${solved}/${qs.length}`;
+      qsum.parentElement.className = `trn-quiz-sum text-[12px] flex items-center gap-1.5 ${solved === qs.length ? "text-primary" : "text-secondary"}`;
+    };
+    refreshQuiz();
     const play = card.querySelector(".trn-play");
-    if (play) play.addEventListener("click", () => embedYouTube(play.parentElement, l, (r) => { watchRatio = r; refreshReqs(); }));
+    if (play) play.addEventListener("click", () => embedYouTube(play.parentElement, l, (r) => { watchRatio = r; refreshReqs(); }, refreshQuiz));
     const noteCtl = bindLessonNote(card, l, refreshReqs);
     refreshReqs();
     card.querySelector(".trn-qa").addEventListener("click", (e) => openLessonDiscussion(l, e.currentTarget));
@@ -3602,7 +3689,7 @@ function resetLessonForm() {
   $("#trn-f-order").value = maxOrder + 1; $("#trn-f-due").value = "";
   $$('input[name="trn-assign"]').forEach(r => { r.checked = r.value === "all"; });
   trnShowAssignPick("all");
-  renderUserPicker([]); renderTeamPicker([]);
+  renderUserPicker([]); renderTeamPicker([]); qzLoad([]);
   $("#trn-form-mode").textContent = "Yeni ders"; $("#trn-form-mode").className = "chip na";
   $("#trn-f-cancel").style.display = "none";
 }
@@ -3614,7 +3701,7 @@ function fillLessonForm(l) {
   const radio = TRN_MODE_RADIO[l.assign_mode] || (l.assign_all ? "all" : "some");
   $$('input[name="trn-assign"]').forEach(r => { r.checked = r.value === radio; });
   trnShowAssignPick(radio);
-  renderUserPicker(l.assignee_ids || []); renderTeamPicker(l.team_ids || []);
+  renderUserPicker(l.assignee_ids || []); renderTeamPicker(l.team_ids || []); qzLoad(l.questions || []);
   $("#trn-form-mode").textContent = `Düzenleniyor: #${l.id}`; $("#trn-form-mode").className = "chip warn";
   $("#trn-f-cancel").style.display = "";
   $("#trn-form").scrollIntoView({ behavior: "smooth", block: "start" });
@@ -3628,7 +3715,7 @@ function renderLessonAdmin() {
   tbody.innerHTML = lessons.length ? "" : `<tr><td colspan="6" class="muted !text-center !py-6">Henüz ders yok — yukarıdan ekleyin.</td></tr>`;
   lessons.forEach(l => {
     const tr = document.createElement("tr");
-    const video = l.youtube_id ? `<span class="chip ok">YouTube</span>` : safeHttpsUrl(l.video_url) ? `<span class="chip na">Link</span>` : `<span class="muted">—</span>`;
+    const video = l.youtube_id ? `<span class="chip ok">YouTube</span>${(l.questions || []).length ? ` <span class="chip na" title="Video içi soru">${l.questions.length} soru</span>` : ""}` : safeHttpsUrl(l.video_url) ? `<span class="chip na">Link</span>` : `<span class="muted">—</span>`;
     const tname = new Map((trnState.teams || []).map(t => [t.id, t.name]));
     const assign = l.assign_mode === "teams"
       ? (l.team_ids || []).map(id => `<span class="chip na mr-1 mb-1 max-w-[160px] truncate" title="${esc(tname.get(id) || "")}">${esc(tname.get(id) || "?")}</span>`).join("") || `<span class="chip bad" title="Atanmış ekip kalmadı — ders kimseye görünmüyor">Ekip yok</span>`
@@ -3651,6 +3738,92 @@ function renderLessonAdmin() {
   });
 }
 
+// --- Video içi soru editörü (owner/admin). Sınırlar sunucuda (api/quiz.py); burada yalnızca kolaylık. ---
+const QZ_MAX = 20, QZ_MIN_OPT = 2, QZ_MAX_OPT = 4;
+/** "3:25", "1:02:03", "205" → saniye; geçersizse null */
+function parseClock(v) {
+  const t = String(v || "").trim();
+  if (!t) return null;
+  if (/^\d+(\.\d+)?$/.test(t)) return Number(t);
+  const m = t.match(/^(?:(\d+):)?(\d{1,2}):(\d{1,2})$/);
+  if (!m || Number(m[3]) > 59 || (m[1] != null && Number(m[2]) > 59)) return null;
+  return Number(m[1] || 0) * 3600 + Number(m[2]) * 60 + Number(m[3]);
+}
+function fmtClock(sec) {
+  sec = Math.max(0, Math.floor(Number(sec) || 0));
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), x = sec % 60;
+  const pad = (n) => String(n).padStart(2, "0");
+  return h ? `${h}:${pad(m)}:${pad(x)}` : `${pad(m)}:${pad(x)}`;
+}
+function qzSyncFromDom() {
+  const rows = [...document.querySelectorAll("#trn-f-quiz-list .qz-edit")];
+  trnState.qDraft = rows.map((row, i) => {
+    const prev = (trnState.qDraft || [])[i] || {};
+    const opts = [...row.querySelectorAll(".qz-opt-text")].map(x => x.value);
+    const ci = [...row.querySelectorAll(".qz-opt-correct")].findIndex(x => x.checked);
+    return { id: prev.id || null, atText: row.querySelector(".qz-at").value, text: row.querySelector(".qz-text").value,
+             options: opts, correct: ci, explanation: row.querySelector(".qz-expl").value };
+  });
+}
+function qzRender() {
+  const box = $("#trn-f-quiz-list");
+  const qs = trnState.qDraft || [];
+  box.innerHTML = qs.length ? "" : `<span class="text-xs text-secondary">Henüz soru yok.</span>`;
+  qs.forEach((q, i) => {
+    const row = document.createElement("div");
+    row.className = "qz-edit";
+    row.innerHTML = `
+      <div class="flex flex-wrap items-center gap-2">
+        <span class="chip na">Soru ${i + 1}</span>
+        <label class="inline-flex items-center gap-1.5 text-xs text-secondary">Dakika
+          <input type="text" class="qz-at field !h-8 !w-24 text-center tabular" inputmode="numeric" placeholder="03:25" value="${esc(q.atText ?? "")}" aria-label="Sorunun çıkacağı an (dk:sn)"></label>
+        <button type="button" class="qz-del icon-btn !text-error ml-auto" title="Soruyu sil" aria-label="Soruyu sil"><span class="material-symbols-outlined">delete</span></button>
+      </div>
+      <input type="text" class="qz-text field" maxlength="300" placeholder="Soru metni" value="${esc(q.text || "")}" aria-label="Soru metni">
+      <div class="flex flex-col gap-1.5">
+        ${q.options.map((o, j) => `<div class="flex items-center gap-2">
+          <input type="radio" class="qz-opt-correct" name="qz-correct-${i}" ${q.correct === j ? "checked" : ""} title="Doğru şık" aria-label="Şık ${j + 1} doğru">
+          <input type="text" class="qz-opt-text field !h-9 flex-1 min-w-0" maxlength="200" placeholder="Şık ${j + 1}" value="${esc(o)}" aria-label="Şık ${j + 1}">
+          ${q.options.length > QZ_MIN_OPT ? `<button type="button" class="qz-opt-del icon-btn" data-j="${j}" title="Şıkkı kaldır" aria-label="Şıkkı kaldır"><span class="material-symbols-outlined">close</span></button>` : ""}
+        </div>`).join("")}
+        ${q.options.length < QZ_MAX_OPT ? `<div><button type="button" class="qz-opt-add btn btn-outline btn-sm"><span class="material-symbols-outlined">add</span>Şık ekle</button></div>` : ""}
+      </div>
+      <input type="text" class="qz-expl field" maxlength="500" placeholder="Açıklama (opsiyonel) — doğru cevaptan sonra gösterilir" value="${esc(q.explanation || "")}" aria-label="Açıklama">`;
+    row.querySelector(".qz-del").addEventListener("click", () => { qzSyncFromDom(); trnState.qDraft.splice(i, 1); qzRender(); });
+    row.querySelector(".qz-opt-add")?.addEventListener("click", () => { qzSyncFromDom(); trnState.qDraft[i].options.push(""); qzRender(); });
+    row.querySelectorAll(".qz-opt-del").forEach(b => b.addEventListener("click", () => {
+      qzSyncFromDom();
+      const d = trnState.qDraft[i], j = Number(b.dataset.j);
+      d.options.splice(j, 1);
+      d.correct = d.correct === j ? -1 : d.correct > j ? d.correct - 1 : d.correct;
+      qzRender();
+    }));
+    box.appendChild(row);
+  });
+  $("#trn-f-quiz-add").disabled = qs.length >= QZ_MAX;
+}
+function qzLoad(questions) {
+  trnState.qDraft = (questions || []).map(q => ({ id: q.id, atText: fmtClock(q.at), text: q.text, options: [...q.options],
+                                                   correct: q.correct, explanation: q.explanation || "" }));
+  qzRender();
+}
+/** Taslağı doğrular; { error } ya da sunucuya gidecek { questions } döner. */
+function qzCollect() {
+  qzSyncFromDom();
+  const out = [];
+  for (const [i, q] of trnState.qDraft.entries()) {
+    const n = i + 1, at = parseClock(q.atText);
+    if (at == null) return { error: `${n}. soru: dakikayı dk:sn biçiminde yazın (ör. 03:25).` };
+    if (!q.text.trim()) return { error: `${n}. soru: soru metni boş.` };
+    const opts = q.options.map(o => o.trim());
+    if (opts.some(o => !o)) return { error: `${n}. soru: boş şık var.` };
+    if (new Set(opts.map(o => o.toLocaleLowerCase("tr"))).size !== opts.length) return { error: `${n}. soru: aynı şık iki kez yazılmış.` };
+    if (q.correct < 0 || q.correct >= opts.length) return { error: `${n}. soru: doğru şıkkı işaretleyin.` };
+    out.push({ id: q.id || null, at, text: q.text.trim(), options: opts, correct: q.correct, explanation: q.explanation.trim() });
+  }
+  return { questions: out };
+}
+
 async function saveLesson(e) {
   e.preventDefault();
   const msg = $("#trn-f-msg");
@@ -3666,11 +3839,15 @@ async function saveLesson(e) {
   if (url && !safeHttpsUrl(url)) return fail("Video linki https:// ile başlamalı.");
   if (mode === "users" && !assignees.length) return fail("En az bir kişi seçin ya da 'Tüm ekipler'e atayın.");
   if (mode === "teams" && !teamIds.length) return fail("En az bir ekip seçin ya da 'Tüm ekipler'e atayın.");
+  const qz = qzCollect();
+  if (qz.error) return fail(qz.error);
+  if (qz.questions.length && !/^https:\/\/([a-z0-9-]+\.)*(youtube\.com|youtu\.be|youtube-nocookie\.com)\//i.test(url)) return fail("Video içi sorular yalnızca YouTube videolu derslere eklenebilir.");
   const body = {
     title, description: $("#trn-f-desc").value, video_url: url || null,
     sort_order: Math.max(0, Math.round(Number($("#trn-f-order").value) || 0)),
     due_date: $("#trn-f-due").value || null, assign_all: assignAll, assign_mode: mode,
     assignee_ids: mode === "users" ? assignees : [], team_ids: mode === "teams" ? teamIds : [],
+    questions: qz.questions,
   };
   const id = trnState.editing;
   $("#trn-f-save").disabled = true;
@@ -3788,6 +3965,7 @@ function renderMatrix() {
   const done = new Map(pg.completions.map(c => [`${c.lesson_id}:${c.user_id}`, c.completed_at]));
   const noted = new Set((pg.notes || []).map(n => `${n.lesson_id}:${n.user_id}`));
   const watched = new Map((pg.watch || []).map(w => [`${w.lesson_id}:${w.user_id}`, w.ratio]));
+  const quizOf = new Map((pg.quiz || []).map(x => [`${x.lesson_id}:${x.user_id}`, x]));
   const t = todayISO();
   const head = `<thead><tr><th>Kişi</th><th>İlerleme</th>${pg.lessons.map(l => `<th class="lesson" title="${esc(l.title)}">${esc(l.title.length > 40 ? l.title.slice(0, 40) + "…" : l.title)}</th>`).join("")}</tr></thead>`;
   const rows = pg.users.map(u => {
@@ -3798,7 +3976,9 @@ function renderMatrix() {
       const at = done.get(`${l.id}:${u.id}`);
       const note = noted.has(`${l.id}:${u.id}`) ? " has-note" : "", noteTip = note ? " · kazanım notu var" : "";
       const wr = watched.get(`${l.id}:${u.id}`);
-      const watchTip = wr != null ? ` · video %${Math.floor(wr * 100)} izlendi` : "";
+      const qz = quizOf.get(`${l.id}:${u.id}`);
+      const watchTip = (wr != null ? ` · video %${Math.floor(wr * 100)} izlendi` : "")
+        + (l.question_count ? ` · sorular: ${qz ? qz.solved : 0}/${l.question_count} cevaplandı, ilk denemede doğru: ${qz ? qz.first_try : 0}` : "");
       if (at) return `<td><span class="trn-cell done${note}" title="Tamamlandı: ${esc(fmtStamp(at))}${noteTip}${watchTip}">✓</span></td>`;
       const late = l.due_date && l.due_date < t;
       const part = wr ? ` part` : "";
@@ -3812,6 +3992,13 @@ function renderMatrix() {
 
 (function bindTrainingView() {
   $("#trn-form").addEventListener("submit", saveLesson);
+  $("#trn-f-quiz-add").addEventListener("click", () => {
+    qzSyncFromDom();
+    if (trnState.qDraft.length >= QZ_MAX) return;
+    trnState.qDraft.push({ id: null, atText: "", text: "", options: ["", ""], correct: -1, explanation: "" });
+    qzRender();
+    [...document.querySelectorAll("#trn-f-quiz-list .qz-at")].pop()?.focus();
+  });
   $("#trn-f-cancel").addEventListener("click", () => { trnState.editing = null; resetLessonForm(); $("#trn-f-msg").textContent = ""; });
   $$('input[name="trn-assign"]').forEach(r => r.addEventListener("change", () => trnShowAssignPick($('input[name="trn-assign"]:checked').value)));
   $("#trn-prog-team").addEventListener("change", (e) => { trnState.progTeam = e.target.value || null; loadTraining(); });

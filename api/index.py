@@ -71,6 +71,7 @@ import binascii
 import excel_export
 import team_perf
 import watch as trn_watch
+import quiz
 import trello
 import slack
 import slack_notify
@@ -2388,7 +2389,7 @@ def youtube_video_id(url: str | None) -> str | None:
 
 
 def _lesson_out(row: dict, completed_at: int | None = None, staff: bool = False, note: dict | None = None,
-                watch: dict | None = None) -> dict:
+                watch: dict | None = None, questions: list[dict] | None = None, answers: dict | None = None) -> dict:
     out = {
         "id": row["id"], "title": row["title"], "description": row.get("description") or "",
         "video_url": row.get("video_url"), "youtube_id": youtube_video_id(row.get("video_url")),
@@ -2399,6 +2400,11 @@ def _lesson_out(row: dict, completed_at: int | None = None, staff: bool = False,
     }
     if out["youtube_id"]:
         out["watch"] = trn_watch.summary(watch)   # kişinin KENDİ izleme durumu (yalnızca YouTube derslerinde)
+    qs = questions or []
+    if staff:   # ders yönetimi: doğru şık + açıklama dahil
+        out["questions"] = [quiz.staff_view(q) for q in qs]
+    elif out["youtube_id"]:   # izleyici: doğru şık yalnızca kişi soruyu çözdüyse
+        out["questions"] = [quiz.viewer_view(q, (answers or {}).get(q["id"])) for q in qs]
     if staff:
         out["assign_mode"] = row.get("assign_mode") or ("all" if row.get("assign_all") else "users")
         out["assign_all"] = out["assign_mode"] == "all"
@@ -2421,6 +2427,8 @@ class LessonIn(BaseModel):
     assign_mode: str | None = Field(None, pattern=r"^(all|teams|users)$")
     team_ids: list[int] = Field(default_factory=list, max_length=200)
     assignee_ids: list[int] = Field(default_factory=list, max_length=500)
+    # Video içi sorular (yalnızca YouTube). None = dokunma (eski istemci), [] = hepsini sil.
+    questions: list[dict] | None = Field(None, max_length=quiz.MAX_QUESTIONS + 5)
 
 
 async def _clean_lesson(req: LessonIn) -> dict:
@@ -2456,6 +2464,13 @@ async def _clean_lesson(req: LessonIn) -> dict:
             raise HTTPException(422, "Ekip ataması için en az bir ekip seçin")
     else:
         data["team_ids"] = []
+    if data.get("questions") is not None:
+        try:
+            data["questions"] = quiz.clean_questions(data["questions"])
+        except quiz.QuizError as e:
+            raise HTTPException(422, str(e))
+        if data["questions"] and not youtube_video_id(data["video_url"]):
+            raise HTTPException(422, "Video içi sorular yalnızca YouTube videolu derslere eklenebilir")
     return data
 
 
@@ -2467,13 +2482,18 @@ async def training_lessons(user: dict = Depends(require_user)):
     watches = await db.watch_for_user(user["user_id"])
     staff = user["role"] in ("owner", "admin")
     assigned = await db.list_lessons_for_user(user["user_id"])
+    all_rows = await db.list_lessons_all() if staff else []
+    qmap = await db.questions_for_lessons(None if staff else [r["id"] for r in assigned])
+    answers = await db.answers_for_user(user["user_id"]) if qmap else {}
     disc = await forum.lesson_threads()
-    my_lessons = [{**_lesson_out(r, mine.get(r["id"]), note=notes.get(r["id"]), watch=watches.get(r["id"])),
+    my_lessons = [{**_lesson_out(r, mine.get(r["id"]), note=notes.get(r["id"]), watch=watches.get(r["id"]),
+                                 questions=qmap.get(r["id"]), answers=answers),
                    "discussion": disc.get(r["id"])} for r in assigned]
     resp = {"role": user["role"], "my_lessons": my_lessons, "requirements": TRAINING_REQUIREMENTS,
             "my_progress": {"completed": sum(1 for l in my_lessons if l["completed"]), "total": len(my_lessons)}}
     if staff:
-        resp["all_lessons"] = [_lesson_out(r, mine.get(r["id"]), staff=True) for r in await db.list_lessons_all()]
+        resp["all_lessons"] = [_lesson_out(r, mine.get(r["id"]), staff=True, questions=qmap.get(r["id"]))
+                               for r in all_rows]
     return resp
 
 
@@ -2481,6 +2501,8 @@ async def training_lessons(user: dict = Depends(require_user)):
 async def training_create(req: LessonIn, user: dict = Depends(require_staff)):
     data = await _clean_lesson(req)
     lesson_id = await db.create_lesson(data, user["user_id"])
+    if data.get("questions"):
+        await db.replace_questions(lesson_id, data["questions"])
     await notify.add(await db.lesson_audience(lesson_id), "lesson", user["user_id"], lesson_id=lesson_id,
                      data={"title": data["title"]})
     if slack.enabled():
@@ -2496,6 +2518,10 @@ async def training_update(lesson_id: int, req: LessonIn, user: dict = Depends(re
     before = await db.lesson_audience(lesson_id)
     before_explicit = set(await db.lesson_explicit_assignees(lesson_id))
     await db.update_lesson(lesson_id, data)
+    if data.get("questions") is not None:
+        await db.replace_questions(lesson_id, data["questions"])
+    elif not youtube_video_id(data["video_url"]):   # video YouTube olmaktan çıktıysa sorular anlamsız
+        await db.replace_questions(lesson_id, [])
     after = await db.lesson_audience(lesson_id)
     # Bildirim: dersi YENİ görmeye başlayanlar + "Seçilen kişiler"e AÇIKÇA yeni eklenenler (ders onlara zaten
     # "Tüm ekipler"/ekip üzerinden görünüyor olsa bile — owner'ın kişiyi seçmesi bir atamadır)
@@ -2571,6 +2597,29 @@ async def training_watch(lesson_id: int, req: WatchIn, user: dict = Depends(requ
     out = trn_watch.summary(state)
     await db.set_watch(lesson_id, user["user_id"], state, out["watched"])
     return out
+
+
+class QuizAnswerIn(BaseModel):
+    choice: int = Field(..., ge=0, le=quiz.MAX_OPTIONS - 1)
+
+
+@app.post("/api/training/lessons/{lesson_id}/questions/{question_id}/answer")
+async def training_quiz_answer(lesson_id: int, question_id: int, req: QuizAnswerIn, user: dict = Depends(require_user)):
+    """Video içi soruya cevap — yalnızca KENDİ kaydı, kendisine atanan derste (değilse 404). Doğruyu bulana kadar
+    denenebilir; doğru şık ve açıklama yalnızca doğru cevaptan sonra döner. Tamamlama şartı DEĞİL."""
+    if not await db.is_lesson_assigned(lesson_id, user["user_id"]):
+        raise HTTPException(404, "Ders bulunamadı ya da size atanmamış")
+    q = await db.get_question(question_id)
+    if not q or q["lesson_id"] != lesson_id:
+        raise HTTPException(404, "Soru bulunamadı")
+    if req.choice >= len(quiz.parse_options(q["options_json"])):
+        raise HTTPException(422, "Geçersiz şık")
+    ans, correct, changed = quiz.apply_answer(q, await db.get_answer(question_id, user["user_id"]), req.choice,
+                                              int(time.time()))
+    if changed:
+        await db.set_answer(question_id, lesson_id, user["user_id"], ans)
+    return {"ok": True, "question_id": question_id, "choice": req.choice, "is_correct": correct,
+            "my": quiz.answer_state(q, ans)}
 
 
 TRAINING_NOTE_MAX = 4000
@@ -2651,11 +2700,13 @@ async def training_progress(team_id: int | None = Query(None, ge=1), user: dict 
         return [i for i in shown if i in set(l["assignee_ids"])]
 
     lessons = await db.list_lessons_all()
+    qcount = {lid: len(qs) for lid, qs in (await db.questions_for_lessons(None)).items()}
     return {
         "team_id": team_id, "teams": _team_opts(await db.list_teams()),
         "users": users,
         "lessons": [{"id": l["id"], "title": l["title"], "sort_order": l["sort_order"], "due_date": l.get("due_date"),
-                     "assign_mode": l["assign_mode"], "assignee_ids": assignees(l)} for l in lessons],
+                     "assign_mode": l["assign_mode"], "assignee_ids": assignees(l),
+                     "question_count": qcount.get(l["id"], 0)} for l in lessons],
         "completions": [c for c in await db.all_completions() if c["user_id"] in members],
         # Kişilerin kazanım notları (yalnızca owner/admin bu uçta görür)
         "notes": [n for n in await db.all_training_notes() if n["user_id"] in members],
@@ -2663,6 +2714,10 @@ async def training_progress(team_id: int | None = Query(None, ge=1), user: dict 
         "watch": [{"lesson_id": w["lesson_id"], "user_id": w["user_id"],
                    "ratio": round(min(1.0, (w["watched"] or 0) / w["duration"]), 4) if w["duration"] else 0.0}
                   for w in await db.all_watch() if w["user_id"] in members],
+        # Video içi sorular: kişi × ders çözülen / ilk denemede doğru / toplam deneme
+        "quiz": [{"lesson_id": a["lesson_id"], "user_id": a["user_id"], "solved": int(a["solved"] or 0),
+                  "first_try": int(a["first_try"] or 0), "attempts": int(a["attempts"] or 0)}
+                 for a in await db.all_answer_stats() if a["user_id"] in members],
         "requirements": TRAINING_REQUIREMENTS,
     }
 

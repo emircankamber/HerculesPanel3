@@ -1017,6 +1017,12 @@
               <label class="flex flex-col gap-1.5 md:col-span-2"><span class="eyebrow">Video linki (https)</span>
                 <input type="url" id="trn-f-url" class="field" maxlength="500" placeholder="https://www.youtube.com/watch?v=…  ya da Loom / Drive linki">
                 <span id="trn-f-url-hint" class="text-xs text-secondary">YouTube linkleri sayfada oynatılır; diğer linkler yeni sekmede açılır.</span></label>
+              <fieldset id="trn-f-quiz" class="md:col-span-2 flex flex-col gap-2">
+                <legend class="eyebrow mb-1.5">Video içi sorular (opsiyonel · yalnızca YouTube)</legend>
+                <span class="text-[11px] text-secondary">Video belirttiğin anda durur, izleyici şıkka tıklar: doğruysa yeşil, yanlışsa kırmızı görür ve doğruyu bulana kadar dener. Doğru şıkkı yuvarlak düğmeyle işaretle. Sorular "Tamamladım" şartı değildir.</span>
+                <div id="trn-f-quiz-list" class="flex flex-col gap-3"></div>
+                <div><button type="button" id="trn-f-quiz-add" class="btn btn-outline btn-sm"><span class="material-symbols-outlined">add</span>Soru ekle</button></div>
+              </fieldset>
               <label class="flex flex-col gap-1.5"><span class="eyebrow">Sıra</span>
                 <input type="number" id="trn-f-order" class="field" min="0" max="10000" step="1" value="1"></label>
               <label class="flex flex-col gap-1.5"><span class="eyebrow">Son tarih (opsiyonel)</span>
