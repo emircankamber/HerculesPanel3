@@ -159,12 +159,13 @@ gerçek bir keyword'le test et (henüz denenmedi).
 
 ## Veri politikası (kasıtlı kararlar)
 
-- **72 saatlik analiz önbelleği** (kullanıcı isteği; önceki "hep canlı" kararının yerine): `/api/analyze` ve
+- **30 günlük analiz önbelleği** (kullanıcı isteği; önce "hep canlı", sonra 72 saatti): `/api/analyze` ve
   `/api/analyze-asin`, aynı anahtar (keyword / `ASIN:B0..`) + pazar + istek parametreleri (`_req`: keyword modunda
   top_relevancy, keyword_list_size, category_override_node_id; ASIN'de keyword_list_size) son `db.CACHE_TTL_SECONDS`
-  (72 saat) içinde çekildiyse MCP'ye GİTMEZ, `keyword_analysis` kaydını döner (`source="cache"`, `cache_age_seconds`).
-  Süre İLK çekimden sayılır (önbellekten dönüş kaydı yenilemez). `force_refresh=true` (panelde "Canlı veriyle yenile")
-  her zaman canlı çeker ve kaydı yeniler. Önbellek PAYLAŞIMLI (başka kullanıcının çektiği veri de döner) ama
+  (30 gün) içinde çekildiyse MCP'ye GİTMEZ, `keyword_analysis` kaydını döner (`source="cache"`, `cache_age_seconds`,
+  `cache_ttl_seconds`, `first_fetched_at`). Süre İLK çekimden sayılır (önbellekten dönüş kaydı yenilemez); panel bu anı
+  "İlk rapor tarihi" olarak gösterir (canlıda da `first_fetched_at` = şimdi). `force_refresh=true` (panelde "Yeni veri
+  çek") her zaman canlı çeker ve kaydı yeniler (ekip için yeni ilk rapor tarihi). Önbellek PAYLAŞIMLI (başka kullanıcının çektiği veri de döner) ama
   **kişiye özel kısım yeniden hesaplanır**: payload `_assess_inputs` (avg_price, gross_margin, acos_detail,
   top_brand_share, strong_new_brands, return_rate) taşır, `index._initial_assessment` bu kişinin eşikleri + analiz öncesi
   maliyetiyle `profit_inputs` ve `pre_assessment`'ı üretir (canlı yol da aynı fonksiyonu kullanır). Sorgu Geçmiş'e
@@ -173,7 +174,7 @@ gerçek bir keyword'le test et (henüz denenmedi).
   artık `CACHE_MIN_PAYLOAD_VERSION`=3: `_req` yoksa varsayılan parametreler, `_assess_inputs` yoksa
   `index._assess_inputs_from_payload` payload'dan kurar; (2) anahtar harf/boşluk duyarlıydı → `get_cached`
   `LOWER(keyword)` ile en yeni kaydı alır, `/api/analyze` keyword'deki fazla boşlukları sadeleştirir.
-- **Trendler de 72 saat:** `mcp_cache` tablosu (anahtar = tool + parametrelerin sha256'sı, ham yanıt). `aba_research_*`
+- **Trendler 72 saatte KALDI** (`index.TREND_CACHE_TTL`, analizlerden ayrı — ABA listeleri haftalık değişir): `mcp_cache` tablosu (anahtar = tool + parametrelerin sha256'sı, ham yanıt). `aba_research_*`
   sayfaları ve keyword hacim geçmişi (`aba_research_trend`, keyword küçük harfle) buradan; yalnızca başarılı yanıt
   saklanır. `force_refresh` ("Canlı veriyle tara") atlar ve yeniler. Yanıtta `source` (live|cache|mixed),
   `cache_age_seconds`, `scan.mcp_calls` (GERÇEK çağrı — hata verenler dahil, çağrıdan önce sayılır) / `cached_calls`.
@@ -187,7 +188,7 @@ gerçek bir keyword'le test et (henüz denenmedi).
   since/until verilirse özet de listeler de yalnızca o aralık). SALT OKUNUR: bu
   bölüm için yazma ucu yok; karar/geçmiş silme uçları zaten yalnızca isteği yapanın KENDİ
   `user_id`'siyle çalışır. Kararın "ön öneri"si = aynı kişinin aynı keyword/pazar için karar anına
-  kadarki son sorgusunun verdict'i. Panelde kayda tıklamak `runAnalysis` ile analiz başlatır (72 saat önbellek kuralıyla)
+  kadarki son sorgusunun verdict'i. Panelde kayda tıklamak `runAnalysis` ile analiz başlatır (30 gün önbellek kuralıyla)
   (ASIN kayıtlarındaki `ASIN:` öneki ayıklanır). Giriş ekranı metni bunu kullanıcıya söylüyor.
 - **Giriş sistemi "ilk kullanıcı kaydolunca kilitlenir"** — hiç kullanıcı
   yokken `auth_required=false`, panel açık. İlk `/api/auth/register`'dan
@@ -472,7 +473,7 @@ yüzden backend'e hiç bağlanmamalı, sahte veri olur.
   güncellenmeyen açık liste) > Aktif (dönemde etkinlik) > Sessiz. Son etkinlik = tüm tablolardaki en son an.
 - Panel (`app.js::loadPerf`, `tp-` sınıfları styles.css'te): KPI'lar, günlük hareket (Chart.js), ürün hattı, haftalık
   ritim ısı haritası (gün × saat), karar karışımı, Spot ışığı, İlgi gerekiyor, sıralanabilir kişi tablosu (sparkline) ve
-  kişi yan paneli (son kayıtlar `/api/team/activity?user_id=`; kayda tıklamak `runAnalysis`, 72 saat önbellek kuralı).
+  kişi yan paneli (son kayıtlar `/api/team/activity?user_id=`; kayda tıklamak `runAnalysis`, 30 gün önbellek kuralı).
 
 ## Trello aktarımı (`api/trello.py` + `api/png_chart.py` + `/api/trello/*`, yalnızca owner — TEK YÖNLÜ: panel → Trello)
 
@@ -604,7 +605,7 @@ yüzden backend'e hiç bağlanmamalı, sahte veri olur.
 - **Analizden tartışma:** Ürün Analizi → "Forumda Tartış" → editör `analysis {key, marketplace}` ile açılır; özet
   (`_analysis_brief`: ön öneri, arama, fiyat, ilk 10 ciro, yorum, ilk 3 marka payı, yeni marka) SUNUCUDA
   `keyword_analysis` kaydından alınır (istemci değer göndermez; kayıt yoksa 422) ve `forum_threads.analysis_*`'a
-  yazılır — sonradan değişmez. "Analizi aç" `runAnalysis` (72 saat önbellek kuralı).
+  yazılır — sonradan değişmez. "Analizi aç" `runAnalysis` (30 gün önbellek kuralı).
 - **Ders soru-cevap:** `POST /api/training/lessons/{id}/discussion` (dersi görebilen ya da owner/admin; değilse 404)
   dersin TEK başlığını döner/oluşturur (`forum_threads.lesson_id`, `ux_forum_threads_lesson`; eşzamanlı ikinci oluşturma
   var olanı döner). "Sadece ekip", tür Tartışma, kategori "Genel", yazarı dersi ekleyen (sorular ona bildirilir).

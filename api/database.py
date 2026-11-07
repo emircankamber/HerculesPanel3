@@ -15,9 +15,10 @@ import notify_email
 import quiz
 import slack_notify
 
-# ANALİZ ÖNBELLEĞİ (kullanıcı isteği): aynı anahtar + pazar son 72 saatte çekildiyse MCP'ye GİDİLMEZ, kayıtlı
-# ham veri döner (kişiye özel eşik/maliyet kısmı index.py'de yeniden hesaplanır). "Canlı veriyle yenile" atlar.
-CACHE_TTL_SECONDS = 72 * 3600
+# ANALİZ ÖNBELLEĞİ (kullanıcı isteği): aynı anahtar + pazar son 30 günde (önceden 72 saat) çekildiyse MCP'ye
+# GİDİLMEZ, kayıtlı ham veri döner (kişiye özel eşik/maliyet kısmı index.py'de yeniden hesaplanır). Panel ilk çekim
+# anını "İlk rapor tarihi" olarak gösterir; "Yeni veri çek" (force_refresh) atlar ve kaydı yeniler.
+CACHE_TTL_SECONDS = 30 * 86400
 
 # Payload biçimi her değiştiğinde bu sürüm artırılır. Eski sürümle kaydedilmiş
 # önbellek kayıtları otomatik geçersiz sayılır ve veri yeniden çekilir.

@@ -445,9 +445,9 @@ def _assess_inputs_from_payload(p: dict) -> dict | None:
 
 
 async def _cached_analysis(key: str, marketplace: str, req_params: dict, uid: int, pre_cost: dict | None):
-    """Son db.CACHE_TTL_SECONDS (72 saat) içinde aynı anahtar + pazar + istek parametreleriyle çekilmiş analiz
+    """Son db.CACHE_TTL_SECONDS (30 gün) içinde aynı anahtar + pazar + istek parametreleriyle çekilmiş analiz
     varsa MCP'ye GİTMEDEN döner (ön öneri bu kişinin eşik/maliyetiyle yeniden hesaplanır, sorgu Geçmiş'e yazılır).
-    Kayıt yenilenmez → 72 saat ilk çekimden sayılır."""
+    Kayıt yenilenmez → süre ilk çekimden sayılır (panelde "İlk rapor tarihi")."""
     hit = await db.get_cached(key, marketplace)
     if not hit:
         return None
@@ -462,7 +462,8 @@ async def _cached_analysis(key: str, marketplace: str, req_params: dict, uid: in
     out = {k: v for k, v in payload.items() if not k.startswith("_")}
     return {**out, "profit_inputs": profit_inputs, "pre_assessment": assessment, "source": "cache",
             "cache_age_seconds": max(0, int(time.time()) - int(fetched_at)),
-            "cache_ttl_seconds": db.CACHE_TTL_SECONDS}
+            "cache_ttl_seconds": db.CACHE_TTL_SECONDS,
+            "first_fetched_at": int(fetched_at)}
 
 
 @app.post("/api/analyze")
@@ -471,8 +472,8 @@ async def analyze(req: AnalyzeRequest, user: dict = Depends(require_auth)):
     req.keyword = " ".join((req.keyword or "").split())   # fazla boşluk aynı aramayı farklı anahtar yapmasın
     if not req.keyword:
         raise HTTPException(422, "Keyword boş olamaz")
-    # ÖNBELLEK (kullanıcı isteği, 72 saat): aynı keyword + pazar + parametrelerle son 72 saatte çekildiyse
-    # MCP kotası harcanmaz, kayıtlı veri döner. force_refresh=True ("Canlı veriyle yenile") her zaman çeker.
+    # ÖNBELLEK (kullanıcı isteği, 30 gün): aynı keyword + pazar + parametrelerle son 30 günde çekildiyse
+    # MCP kotası harcanmaz, kayıtlı veri döner. force_refresh=True ("Yeni veri çek") her zaman çeker.
     req_params = {"top_relevancy": req.top_relevancy, "keyword_list_size": req.keyword_list_size,
                   "category_override_node_id": req.category_override_node_id or None}
     pre_cost = req.pre_cost.model_dump() if req.pre_cost else None
@@ -704,7 +705,7 @@ async def analyze(req: AnalyzeRequest, user: dict = Depends(require_auth)):
         await db.save_analysis(req.keyword, req.marketplace,
                                {**payload, "_assess_inputs": assess_inputs, "_req": req_params}, req.requested_by)
         await db.log_user_query(uid, req.keyword, req.marketplace, assessment.get("verdict"))
-        return {**payload, "source": "live"}
+        return {**payload, "source": "live", "first_fetched_at": int(time.time())}
 
     except KeyError as e:
         raise HTTPException(500, f"Ortam değişkeni eksik: {e}")
@@ -1905,7 +1906,7 @@ async def analyze_asin(req: AnalyzeAsinRequest, user: dict = Depends(require_aut
     asin = req.asin.strip().upper()
     cache_key = f"ASIN:{asin}"
     uid = user.get("user_id", 0)
-    # ÖNBELLEK (72 saat) — bkz. /api/analyze'daki aynı not.
+    # ÖNBELLEK (30 gün) — bkz. /api/analyze'daki aynı not.
     req_params = {"keyword_list_size": req.keyword_list_size}
     pre_cost = req.pre_cost.model_dump() if req.pre_cost else None
     if not req.force_refresh:
@@ -2059,7 +2060,7 @@ async def analyze_asin(req: AnalyzeAsinRequest, user: dict = Depends(require_aut
         await db.save_analysis(cache_key, req.marketplace,
                                {**payload, "_assess_inputs": assess_inputs, "_req": req_params}, user.get("email"))
         await db.log_user_query(uid, cache_key, req.marketplace, assessment.get("verdict"))
-        return {**payload, "source": "live"}
+        return {**payload, "source": "live", "first_fetched_at": int(time.time())}
 
     except HTTPException:
         raise
@@ -2099,7 +2100,7 @@ class TrendingRequest(BaseModel):
     max_bid: float | None = Field(None, ge=0)
     max_words: int | None = Field(None, ge=1, le=20)
     size: int = Field(20, ge=1, le=50)
-    force_refresh: bool = False   # "Canlı veriyle tara": 72 saatlik önbelleği atla
+    force_refresh: bool = False   # "Canlı veriyle tara": 72 saatlik Trend önbelleğini atla
 
 
 TREND_FILTER_KEYS = ("min_searches", "max_searches", "min_purchases", "min_purchase_rate",
@@ -2131,7 +2132,8 @@ def _trend_row(it: dict) -> dict:
     }
 
 
-TREND_CACHE_TTL = db.CACHE_TTL_SECONDS   # Trendler de analizlerle aynı 72 saat kuralı
+# Trendler 72 saatte KALDI (ürün analizleri 30 gün): ABA listeleri haftalık değişir, 1 ay eski liste yanıltır.
+TREND_CACHE_TTL = 72 * 3600
 
 
 def _mcp_cache_key(tool: str, args: dict) -> str:
