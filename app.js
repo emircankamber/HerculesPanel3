@@ -478,6 +478,17 @@ function setAnalysisStatus(text, cls = "") {
 }
 
 let lastAnalysisArgs = null;
+/** Analizin ilk çekildiği an (sunucunun first_fetched_at'ı; yoksa payload'daki fetched_at_iso) → "07.11.2026 14:05" */
+function fmtReportDate(data) {
+  const t = data?.first_fetched_at ? new Date(data.first_fetched_at * 1000)
+    : data?.fetched_at_iso ? new Date(data.fetched_at_iso) : null;
+  return t && !isNaN(t) ? t.toLocaleString("tr-TR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }) : "—";
+}
+/** Önbellek süresi (sunucudan) → "30 gün" / "72 saat" */
+function cacheTtlText(data) {
+  const sec = Number(data?.cache_ttl_seconds) || 30 * 86400;
+  return sec >= 86400 && sec % 86400 === 0 ? `${sec / 86400} gün` : `${Math.round(sec / 3600)} saat`;
+}
 /** Önbellek yaşı (sn) → "3 saat önce" */
 function fmtCacheAge(sec) {
   sec = Number(sec) || 0;
@@ -537,7 +548,7 @@ async function runAnalysis(keyword, marketplace, categoryOverride = "", forceRef
     }
     const data = await res.json();
     setAnalysisStatus(data.source === "cache"
-      ? `Kayıtlı veri yüklendi — ${fmtCacheAge(data.cache_age_seconds)} çekilmiş; ${Math.round((data.cache_ttl_seconds || 259200) / 3600)} saat dolmadan MCP kotası harcanmaz. Güncel veri için "Canlı veriyle yenile".`
+      ? `Kayıtlı veri yüklendi — ilk rapor tarihi ${fmtReportDate(data)} (${fmtCacheAge(data.cache_age_seconds)}). ${cacheTtlText(data)} içinde aynı arama MCP kotası harcamaz. Güncel veri için "Yeni veri çek".`
       : "canlı SellerSprite verisi yüklendi");
     lastAnalysisArgs = { keyword, marketplace, categoryOverride };
     lastAnalysis = data;
@@ -580,15 +591,14 @@ function renderPanel(data) {
   const isAsinMode = data.analysis_mode === "asin";
 
   // --- Başlık kartı: chip'ler, başlık, kategori breadcrumb ---
-  const fetchedTime = data.fetched_at_iso ? new Date(data.fetched_at_iso).toLocaleTimeString("tr-TR") : null;
   const chips = [];
   if (isAsinMode && data.asin) chips.push(`<span class="chip">ASIN: ${esc(data.asin)}</span>`);
   chips.push(`<span class="chip">Pazar: ${esc(data.marketplace)}</span>`);
   chips.push(data.source === "cache"
-    ? `<span class="chip chip-dot warn" title="Son 72 saatte çekilmiş kayıtlı SellerSprite verisi — MCP kotası harcanmadı">Kayıtlı veri · ${esc(fmtCacheAge(data.cache_age_seconds))}</span>`
+    ? `<span class="chip chip-dot warn" title="Ekipten biri bu ürünü son ${esc(cacheTtlText(data))} içinde araştırdı; kayıtlı SellerSprite verisi gösteriliyor — MCP kotası harcanmadı">Kayıtlı veri · ${esc(fmtCacheAge(data.cache_age_seconds))}</span>`
     : `<span class="chip chip-dot ok">Canlı SellerSprite MCP Verisi</span>`);
-  if (fetchedTime) chips.push(`<span class="chip na">Çekilme: ${data.source === "cache" ? esc(new Date(data.fetched_at_iso).toLocaleString("tr-TR")) : fetchedTime}</span>`);
-  if (data.source === "cache") chips.push(`<button type="button" class="panel-refresh btn btn-outline btn-sm !h-[30px]"><span class="material-symbols-outlined">refresh</span>Canlı veriyle yenile</button>`);
+  chips.push(`<span class="chip na" title="Bu verinin SellerSprite'tan ilk çekildiği an. Kayıtlı veri ${esc(cacheTtlText(data))} boyunca ekipteki herkese aynen gelir; süre bu tarihten sayılır.">İlk rapor tarihi: ${esc(fmtReportDate(data))}</span>`);
+  if (data.source === "cache") chips.push(`<button type="button" class="panel-refresh btn btn-outline btn-sm !h-[30px]" title="Kayıtlı veriyi atla, SellerSprite'tan güncel veriyi çek (MCP kotası harcar). Yeni veri ekip için yeni kayıt olur."><span class="material-symbols-outlined">refresh</span>Yeni veri çek</button>`);
   root.querySelector(".panel-chips").innerHTML = chips.join("");
   root.querySelector(".panel-refresh")?.addEventListener("click", () => {
     const a = lastAnalysisArgs || {};
@@ -4589,7 +4599,7 @@ async function submitLaunchReport(e) {
 
 // ===========================================================================
 // EKİP AKTİVİTESİ (yalnızca owner; sunucu /api/team/activity -> require_owner, diğerleri 403)
-// Salt okunur. Kayda tıklamak runAnalysis ile analiz başlatır (son 72 saatte çekildiyse kayıtlı veri, değilse canlı).
+// Salt okunur. Kayda tıklamak runAnalysis ile analiz başlatır (son 30 günde çekildiyse kayıtlı veri, değilse canlı).
 // ===========================================================================
 const tmState = { tab: "queries", data: null, timer: null, page: { queries: 1, decisions: 1 } };
 const TM_VERDICT_CLASS = { "Uygun": "ok", "Sınırda": "warn", "Elenmiş": "bad" };
@@ -5103,7 +5113,7 @@ function tgRenderInvites() {
   });
 })();
 
-/** Geçmiş'teki gibi: mevcut runAnalysis ile analiz (son 72 saatte çekildiyse kayıtlı veri — MCP kotası harcanmaz). */
+/** Geçmiş'teki gibi: mevcut runAnalysis ile analiz (son 30 günde çekildiyse kayıtlı veri — MCP kotası harcanmaz). */
 function tmReanalyze(keyword, marketplace) {
   const target = tmAnalysisTarget(keyword);
   if (!target) return;
@@ -5968,7 +5978,7 @@ function fmAnalysisHtml(a) {
       ${cell("İlk 10 rakip cirosu", v.top10_revenue != null ? fmtUsd(v.top10_revenue) : "n/a")}${cell("Ort. yorum", v.reviews != null ? fmtNum(v.reviews) : "n/a")}
       ${cell("İlk 3 marka payı", v.top3_share != null ? "%" + (v.top3_share * 100).toFixed(1) : "n/a")}${cell("Güçlü yeni marka", v.new_brands != null ? fmtNum(v.new_brands) : "n/a")}
     </div>
-    <div class="text-[11px] text-secondary">Başlık açıldığı andaki analiz özeti${b.fetched_at ? ` (veri: ${esc(fmtStamp(b.fetched_at))})` : ""}. "Analizi aç" son 72 saatte çekildiyse kayıtlı veriyi gösterir (MCP kotası harcanmaz).</div>
+    <div class="text-[11px] text-secondary">Başlık açıldığı andaki analiz özeti${b.fetched_at ? ` (veri: ${esc(fmtStamp(b.fetched_at))})` : ""}. "Analizi aç" son 30 günde çekildiyse kayıtlı veriyi gösterir (MCP kotası harcanmaz).</div>
   </div>`;
 }
 
@@ -6609,7 +6619,7 @@ async function tpOpenDrawer(uid) {
       <div class="cursor-pointer tp-d-rec" data-kw="${esc(it.kw)}" data-mp="${esc(it.mp)}" title="Analizi aç">
         <span class="kw">${tmKeywordHtml(it.kw)} <span class="text-[11px] text-secondary">${esc(it.mp)}</span></span>
         <span class="flex items-center gap-1.5">${it.chip}<span class="meta">${esc(fmtAgo(it.at))}</span></span></div>`).join("")}</div>
-      <p class="tp-foot">Kayda tıklamak analizi açar (son 72 saatte çekildiyse kayıtlı veri). Tüm kayıtlar Ekip Yönetimi → Aktivite'de.</p>`
+      <p class="tp-foot">Kayda tıklamak analizi açar (son 30 günde çekildiyse kayıtlı veri). Tüm kayıtlar Ekip Yönetimi → Aktivite'de.</p>`
       : `<div class="text-sm text-secondary">Bu dönemde analiz ya da karar kaydı yok.</div>`;
     $$("#tp-d-recent .tp-d-rec").forEach(row => row.addEventListener("click", () => { tpCloseDrawer(); tmReanalyze(row.dataset.kw, row.dataset.mp); }));
   } catch (err) {
