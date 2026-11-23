@@ -11,6 +11,7 @@ Bu yüzden hiçbir çağrıda returnFields KULLANMIYORUZ — tam objeyi çekip
 Python tarafında filtreliyoruz.
 """
 import os
+import re
 import json
 from contextlib import asynccontextmanager
 from mcp import ClientSession
@@ -57,6 +58,38 @@ async def mcp_session():
             yield session
 
 
+def parse_tool_text(text: str):
+    """MCP metin bloğunu JSON'a çevirir.
+
+    GERÇEK ÜRETİM HATASI (2026-11): SellerSprite her yanıtın BAŞINA bir duyuru metni eklemeye başladı
+    ("ℹ️ 服务迁移提醒：卖家精灵 MCP v1 将于 2026-12-08 下线 … https://mjjl.cn/stoQ0m{"code":"OK",…}") ve
+    yanıt kimi zaman bütünüyle JSON metni ("\"…\"") olarak geliyor. Düz json.loads ya str döndürüyordu
+    (→ "'str' object has no attribute 'get'", Trendler sayfası 500) ya da hiç çözemiyordu (analiz verisi boş).
+    Burada: JSON metniyse bir kez daha çözülür; çözülemezse metindeki İLK geçerli JSON nesnesi alınır
+    (duyuru öneki atlanır). Hiç nesne yoksa {"raw": metin}. Dönüş HER ZAMAN dict ya da list.
+    """
+    value = text
+    for _ in range(3):   # en fazla iki kat JSON metni
+        if not isinstance(value, str):
+            break
+        try:
+            value = json.loads(value)
+            continue
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
+        decoder = json.JSONDecoder()
+        for opener, kind in (("{", dict), ("[", list)):   # önce nesne: duyurudaki "[1]" gibi parça liste sanılmasın
+            for m in re.finditer(re.escape(opener), value):
+                try:
+                    obj, _end = decoder.raw_decode(value, m.start())
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(obj, kind):
+                    return obj
+        return {"raw": value}
+    return value if isinstance(value, (dict, list)) else {"raw": str(value)}
+
+
 async def call_tool(tool_name: str, arguments: dict, wrap_in_request: bool = True) -> dict:
     """
     Tek bir SellerSprite MCP tool'unu çağırır, JSON içeriğini döndürür.
@@ -79,10 +112,7 @@ async def call_tool(tool_name: str, arguments: dict, wrap_in_request: bool = Tru
         result = await session.call_tool(tool_name, payload)
         for block in result.content:
             if hasattr(block, "text"):
-                try:
-                    return json.loads(block.text)
-                except json.JSONDecodeError:
-                    return {"raw": block.text}
+                return parse_tool_text(block.text)
         return {}
 
 
@@ -101,10 +131,7 @@ async def call_many(calls: list[tuple[str, dict]]) -> list[dict]:
             parsed = {}
             for block in result.content:
                 if hasattr(block, "text"):
-                    try:
-                        parsed = json.loads(block.text)
-                    except json.JSONDecodeError:
-                        parsed = {"raw": block.text}
+                    parsed = parse_tool_text(block.text)
                     break
             results.append(parsed)
     return results
