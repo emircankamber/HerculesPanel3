@@ -85,6 +85,14 @@ Gerçek alan adları (varsayılanlar YANLIŞ çıktı):
 - Launch time bar etiketleri Çince geliyor (`"3年以上"` = "3+ yıl") —
   `app.js`'deki `LAUNCH_LABEL_TR` eşlemesi bunu çeviriyor.
 
+### 6b. Yanıt metninin BAŞINDA duyuru olabilir — `mcp_client.parse_tool_text` kullan
+2026-11'de SellerSprite her yanıtın önüne Çince bir duyuru eklemeye başladı ("MCP v1 将于 2026-12-08 下线 … 迁移指南：
+https://mjjl.cn/stoQ0m{"code":"OK",…}"); metin bazen bütünüyle JSON metni olarak geliyor. Düz `json.loads` str döndürüp
+TÜM analiz (502) ve Trendler (500) uçlarını "'str' object has no attribute 'get'" ile düşürdü. `parse_tool_text` iki kat
+JSON metnini çözer, olmazsa metindeki ilk JSON nesnesini alır (duyuruyu atlar). Yeni bir yanıt ayrıştırması yazma, bunu
+kullan. **DİKKAT: duyuruya göre MCP v1 2026-12-08'de kapanıyor; v2'ye geçişte (yalnızca sunucu URL'si değişir, ama
+"script/SDK kullanıcıları v2 yanıt yapısına uyum sağlamalı") yanıt şekli gerçek çağrıyla yeniden doğrulanmalı.**
+
 ### 7. Paket sürümleri — `requirements.txt` SABİT (==), aralık YAZMA
 `mcp==1.2.0`'da Streamable HTTP transport (`streamable_http.py`) YOK (1.8.0'dan itibaren var) — `mcp` en az 1.9.4.
 **Vercel her deploy'da paketleri sıfırdan kurar.** Eskiden `mcp>=1.9.4,<2.0.0` ve `pydantic>=2.10.1,<3.0.0` aralık

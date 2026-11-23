@@ -2234,6 +2234,8 @@ async def discovery_trending(req: TrendingRequest, user: dict = Depends(require_
     stats = {"live": 0, "cached": 0, "oldest": None}
     for page in range(1, trends.MAX_SCAN_PAGES + 1):
         raw = await _cached_tool(tool, {**base, "page": page}, True, req.force_refresh, stats)
+        if not isinstance(raw, dict):   # beklenmeyen yanıt (liste/metin) taramayı 500'le düşürmesin
+            raw = {}
         data = raw.get("data") if isinstance(raw.get("data"), dict) else {}
         items = data.get("items") or []
         pages += 1
