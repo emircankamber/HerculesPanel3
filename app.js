@@ -2878,6 +2878,16 @@ function updateTrendsStale() {
 
 // ---- Kategoriler & yasak listesi (GET /api/trends/categories) ----
 const trdBannedKeys = () => new Set((trdState.cats?.banned || []).map(b => b.name.toLowerCase()));
+const trdBannedWords = () => (trdState.cats?.banned_words || []).map(b => b.name.toLowerCase());
+const _reEsc = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/** Sunucudaki trends.word_ban_hit ile aynı kural: tam kelime/ifade, harf duyarsız, sondaki -s/-es dahil. */
+function trdWordBanned(keyword, words) {
+  const text = String(keyword || "");
+  return words.some(w => {
+    const body = w.split(/\s+/).filter(Boolean).map(_reEsc).join("\\s+");
+    return body && new RegExp(`(?<![\\p{L}\\p{N}])${body}(?:e?s)?(?![\\p{L}\\p{N}])`, "iu").test(text);
+  });
+}
 
 function renderTrendCategoryOptions() {
   const market = $("#trd-market").value;
@@ -2909,22 +2919,26 @@ function renderTrendBans() {
   if (!c) { card.style.display = "none"; return; }
   const manage = !!c.can_manage;
   // Owner olmayan: yalnızca yasak varsa (salt okunur) göster
-  card.style.display = manage || c.banned.length ? "" : "none";
+  const words = c.banned_words || [];
+  card.style.display = manage || c.banned.length || words.length ? "" : "none";
   $("#trd-ban-form").style.display = manage ? "" : "none";
-  $("#trd-ban-count").textContent = `${c.banned.length}`;
+  $("#trd-ban-count").textContent = `${c.banned.length + words.length}`;
   $("#trd-ban-hint").textContent = manage
-    ? "Yasaklı kategorideki keyword'ler (kategorilerinden biri bile yasaklıysa) kimsenin taramasında görünmez. Kartlardaki kategori etiketinden de yasaklayabilirsiniz."
-    : "Bu kategorilerdeki keyword'ler owner kararıyla trendlerde gösterilmez.";
-  const list = $("#trd-ban-list");
-  list.innerHTML = c.banned.length ? "" : `<span class="text-xs text-secondary">Yasaklı kategori yok.</span>`;
-  c.banned.forEach(b => {
-    const chip = document.createElement("span");
-    chip.className = "chip bad inline-flex items-center gap-1";
-    chip.title = `Yasaklayan: ${b.banned_by_name || "—"} · ${fmtStamp(b.banned_at)}`;
-    chip.innerHTML = `${esc(b.name)}${manage ? `<button type="button" class="trd-unban inline-flex" aria-label="Yasağı kaldır"><span class="material-symbols-outlined" style="font-size:14px">close</span></button>` : ""}`;
-    chip.querySelector(".trd-unban")?.addEventListener("click", () => unbanTrendCategory(b.name));
-    list.appendChild(chip);
-  });
+    ? "Yasaklı kategorideki (kategorilerinden biri bile) ya da metninde yasaklı kelime geçen keyword'ler kimsenin taramasında görünmez. Kartlardaki kategori etiketinden de yasaklayabilirsiniz."
+    : "Bu kategorilerdeki ve bu kelimeleri içeren keyword'ler owner kararıyla trendlerde gösterilmez.";
+  const fill = (list, items, kind, emptyText) => {
+    list.innerHTML = items.length ? "" : `<span class="text-xs text-secondary">${emptyText}</span>`;
+    items.forEach(b => {
+      const chip = document.createElement("span");
+      chip.className = "chip bad inline-flex items-center gap-1";
+      chip.title = `Yasaklayan: ${b.banned_by_name || "—"} · ${fmtStamp(b.banned_at)}`;
+      chip.innerHTML = `${esc(b.name)}${manage ? `<button type="button" class="trd-unban inline-flex" aria-label="Yasağı kaldır"><span class="material-symbols-outlined" style="font-size:14px">close</span></button>` : ""}`;
+      chip.querySelector(".trd-unban")?.addEventListener("click", () => unbanTrendCategory(b.name, kind));
+      list.appendChild(chip);
+    });
+  };
+  fill($("#trd-ban-list"), c.banned, "category", "Yasaklı kategori yok.");
+  fill($("#trd-ban-word-list"), words, "word", "Yasaklı kelime yok.");
   const banned = trdBannedKeys();
   const market = $("#trd-market").value;
   const opts = new Set([...(c.marketplace === market ? c.known.map(k => k.name) : []), ...(trdState.seen[market] || [])]);
@@ -2960,19 +2974,24 @@ function dropBannedFromResults() {
   const d = trdState.data;
   if (!d) return;
   const banned = trdBannedKeys();
+  const words = trdBannedWords();
   const before = d.results.length;
-  d.results = d.results.filter(r => !(r.departments || []).some(x => banned.has(String(x).toLowerCase())));
+  d.results = d.results.filter(r => !(r.departments || []).some(x => banned.has(String(x).toLowerCase()))
+                                    && !trdWordBanned(r.keyword, words));
   if (d.scan) d.scan.hidden_banned += before - d.results.length;
   renderTrends();
 }
 
-async function banTrendCategory(name) {
+async function banTrendCategory(name, kind = "category") {
   name = (name || "").trim();
-  if (!name) { setBanStatus("Kategori adı girin.", true); return; }
-  if (!confirm(`"${name}" kategorisi yasaklansın mı? Bu kategorideki keyword'ler herkesin trend taramasından çıkarılır.`)) return;
+  const isWord = kind === "word";
+  if (!name) { setBanStatus(isWord ? "Kelime girin." : "Kategori adı girin.", true); return; }
+  if (!confirm(isWord
+    ? `"${name}" kelimesi yasaklansın mı? Metninde bu kelime geçen keyword'ler (kategorisi ne olursa olsun) herkesin trend taramasından çıkarılır.`
+    : `"${name}" kategorisi yasaklansın mı? Bu kategorideki keyword'ler herkesin trend taramasından çıkarılır.`)) return;
   setBanStatus("kaydediliyor…");
   try {
-    const res = await apiFetch(`${API_BASE}/api/trends/banned-categories?marketplace=${encodeURIComponent($("#trd-market").value)}`, {
+    const res = await apiFetch(`${API_BASE}/api/trends/${isWord ? "banned-words" : "banned-categories"}?marketplace=${encodeURIComponent($("#trd-market").value)}`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }),
     });
     const data = await res.json().catch(() => null);
@@ -2989,12 +3008,13 @@ async function banTrendCategory(name) {
   }
 }
 
-async function unbanTrendCategory(name) {
-  if (!confirm(`"${name}" yasağı kaldırılsın mı? Sonraki taramalarda bu kategori yeniden görünür.`)) return;
+async function unbanTrendCategory(name, kind = "category") {
+  const isWord = kind === "word";
+  if (!confirm(`"${name}" yasağı kaldırılsın mı? Sonraki taramalarda bu ${isWord ? "kelimeyi içeren keyword'ler" : "kategori"} yeniden görünür.`)) return;
   setBanStatus("kaydediliyor…");
   try {
     const qs = `name=${encodeURIComponent(name)}&marketplace=${encodeURIComponent($("#trd-market").value)}`;
-    const res = await apiFetch(`${API_BASE}/api/trends/banned-categories?${qs}`, { method: "DELETE" });
+    const res = await apiFetch(`${API_BASE}/api/trends/${isWord ? "banned-words" : "banned-categories"}?${qs}`, { method: "DELETE" });
     const data = await res.json().catch(() => null);
     if (!res.ok) throw new Error(apiErrorText(data, res.status));
     trdState.cats = data;
@@ -3171,7 +3191,13 @@ function renderTrends() {
     [...TRD_TEXT_FILTERS, ...TRD_NUM_FILTERS].forEach(([sel]) => { $(sel).value = ""; });
     updateTrendsStale();
   });
-  $("#trd-ban-form").addEventListener("submit", (e) => { e.preventDefault(); banTrendCategory($("#trd-ban-input").value); });
+  $("#trd-ban-form").addEventListener("submit", (e) => { e.preventDefault(); banTrendCategory($("#trd-ban-input").value, $("#trd-ban-kind").value); });
+  $("#trd-ban-kind").addEventListener("change", () => {
+    const word = $("#trd-ban-kind").value === "word";
+    const inp = $("#trd-ban-input");
+    inp.placeholder = word ? "Kelime ya da ifade, ör. halloween" : "Kategori adı, ör. Kindle Store";
+    if (word) inp.removeAttribute("list"); else inp.setAttribute("list", "trd-ban-options");
+  });
   $("#trd-sort").addEventListener("change", (e) => { trdState.sort = e.target.value; renderTrends(); });
 })();
 

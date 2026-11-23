@@ -14,6 +14,7 @@ import notify
 import notify_email
 import quiz
 import slack_notify
+import trends
 
 # ANALİZ ÖNBELLEĞİ (kullanıcı isteği): aynı anahtar + pazar son 30 günde (önceden 72 saat) çekildiyse MCP'ye
 # GİDİLMEZ, kayıtlı ham veri döner (kişiye özel eşik/maliyet kısmı index.py'de yeniden hesaplanır). Panel ilk çekim
@@ -110,6 +111,10 @@ _SCHEMAS = [
     # name_key = küçük harfli ad (harf duyarsız tekillik). banned_by = kullanıcı id (hesap silinince NULL).
     """CREATE TABLE IF NOT EXISTS banned_categories (
         name_key TEXT PRIMARY KEY, name TEXT NOT NULL, banned_by INTEGER, banned_at INTEGER NOT NULL)""",
+    # TRENDLER: owner'ın yasakladığı KELİMELER (ör. "halloween") — keyword metninde tam kelime/ifade olarak geçen
+    # (çoğul -s/-es dahil) satırlar kategorisinden bağımsız atılır (trends.word_ban_hit). word_key = küçük harf.
+    """CREATE TABLE IF NOT EXISTS banned_keywords (
+        word_key TEXT PRIMARY KEY, word TEXT NOT NULL, banned_by INTEGER, banned_at INTEGER NOT NULL)""",
     # EĞİTİM KAZANIMLARI: kişinin bir dersten ne öğrendiği (kişi × ders tek kayıt). Yalnızca kişinin kendisi
     # yazar; kendisi ve owner/admin (İlerleme ekranı) okur. Ders/hesap silinince satır da silinir.
     """CREATE TABLE IF NOT EXISTS training_notes (
@@ -289,6 +294,40 @@ async def _migrate_schema():
     await execute("UPDATE users SET email_verified_at = COALESCE(created_at, ?) WHERE email_verified_at IS NULL "
                   "AND NOT EXISTS (SELECT 1 FROM email_tokens t WHERE t.user_id = users.id AND t.kind = 'verify')",
                   (int(time.time()),))
+    await _split_banned_words_once()
+
+
+async def _split_banned_words_once():
+    """v13 (bir kez): kelime yasağı yokken "Yasaklı Kategoriler" kutusuna kelime yazılabiliyordu (ör. "Halloween") ve
+    HİÇBİR keyword'ün kategorisiyle eşleşmediği için hiç uygulanmıyordu. Bilinen bir kategori adı (trends.KNOWN_DEPARTMENTS)
+    olmayan ve son 7 günün Trend yanıtlarında (mcp_cache) hiç kategori olarak görülmemiş kayıtlar kelime yasağına taşınır.
+    İşaret ÖNCE yazılır (eşzamanlı örneklerde tek çalışma)."""
+    if await fetch_one("SELECT 1 AS ok FROM schema_flags WHERE key = 'banned_words_split'"):
+        return
+    try:
+        await execute("INSERT INTO schema_flags (key, value, set_at) VALUES ('banned_words_split', '1', ?)",
+                      (int(time.time()),))
+    except Exception:
+        return
+    known = {n.lower() for names in trends.KNOWN_DEPARTMENTS.values() for n in names}
+    seen = set()
+    for r in await fetch_all("SELECT response_json FROM mcp_cache WHERE cache_key LIKE 'aba_research_%'"):
+        try:
+            data = (json.loads(r["response_json"]) or {}).get("data") or {}
+            for it in (data.get("items") or []) if isinstance(data, dict) else []:
+                seen.update((d or "").lower() for d in (it.get("departments") or []) if isinstance(d, str))
+        except (TypeError, ValueError, AttributeError):
+            continue
+    for r in await fetch_all("SELECT name_key, name, banned_by, banned_at FROM banned_categories"):
+        if r["name_key"] in known or r["name_key"] in seen:
+            continue
+        try:
+            word = trends.clean_ban_word(r["name"])
+        except ValueError:
+            continue
+        await execute("INSERT INTO banned_keywords (word_key, word, banned_by, banned_at) VALUES (?, ?, ?, ?) "
+                      "ON CONFLICT (word_key) DO NOTHING", (word.lower(), word, r["banned_by"], r["banned_at"]))
+        await execute("DELETE FROM banned_categories WHERE name_key = ?", (r["name_key"],))
 
 
 async def _seed_teams_once():
@@ -331,7 +370,7 @@ async def _ensure_staff_in_team():
 # ŞEMAYA/MİGRASYONA HER DEĞİŞİKLİKTE (yeni tablo, sütun, indeks, veri düzeltmesi, tohum) BU SAYIYI ARTIR —
 # artırmazsan canlı veritabanında migrasyon hiç çalışmaz.
 # ---------------------------------------------------------------------------
-SCHEMA_VERSION = 12  # v2: banned_categories · v3: training_notes · v4: bildirimler, forum okunma/rapor/görsel, analiz/ders bağı
+SCHEMA_VERSION = 13  # v2: banned_categories · v3: training_notes · v4: bildirimler, forum okunma/rapor/görsel, analiz/ders bağı
                     # v5: e-posta doğrulama/sıfırlama, deneme sınırı, bildirim tercihleri
                     # v6: mcp_cache (Trendler 72 saat), bildirim varsayılanı hepsi açık
                     # v7: doğrulama bağlantısı hiç gönderilmemiş (eski) kullanıcılar doğrulanmış sayılır
@@ -340,6 +379,7 @@ SCHEMA_VERSION = 12  # v2: banned_categories · v3: training_notes · v4: bildir
                     # v10: training_watch (eğitim videosu izleme takibi)
                     # v11: slack_users, slack_messages, slack_events, slack_reminders (Slack entegrasyonu)
                     # v12: training_questions, training_answers (eğitim videosu içi sorular)
+                    # v13: banned_keywords (Trendler kelime yasağı) + kategori olmayan eski yasakların taşınması
 
 
 def _migration_env_hash() -> str:
@@ -1689,7 +1729,7 @@ USER_ID_TABLES = ["sessions", "user_thresholds", "user_query_log", "market_decis
                   "slack_users", "slack_reminders", "slack_messages"]
 # Başkalarına ait kayıtlarda kişiyi id ile anan alanlar: NULL yapılır.
 ID_REF_COLUMNS = [("training_lessons", "created_by"), ("team_invites", "created_by"),
-                  ("banned_categories", "banned_by")]
+                  ("banned_categories", "banned_by"), ("banned_keywords", "banned_by")]
 
 
 def _scrub_json(value, email: str, replacement=None):
@@ -2283,4 +2323,30 @@ async def ban_category(name: str, user_id: int | None) -> bool:
 
 async def unban_category(name: str) -> bool:
     row = await execute_fetch("DELETE FROM banned_categories WHERE name_key = ? RETURNING name_key", (name.lower(),))
+    return bool(row)
+
+
+async def list_banned_words() -> list[dict]:
+    rows = await fetch_all(
+        "SELECT b.word_key, b.word, b.banned_by, b.banned_at, u.first_name, u.last_name "
+        "FROM banned_keywords b LEFT JOIN users u ON u.id = b.banned_by ORDER BY b.word")
+    return [{"name": r["word"], "key": r["word_key"], "banned_at": r["banned_at"],
+             "banned_by_name": display_name(r) or "—"} for r in rows]
+
+
+async def banned_word_keys() -> list[str]:
+    return [r["word_key"] for r in await fetch_all("SELECT word_key FROM banned_keywords")]
+
+
+async def ban_word(word: str, user_id: int | None) -> bool:
+    """True = yeni eklendi, False = zaten yasaklıydı (harf duyarsız)."""
+    row = await execute_fetch(
+        "INSERT INTO banned_keywords (word_key, word, banned_by, banned_at) VALUES (?, ?, ?, ?) "
+        "ON CONFLICT (word_key) DO NOTHING RETURNING word_key",
+        (word.lower(), word, user_id, int(time.time())))
+    return bool(row)
+
+
+async def unban_word(word: str) -> bool:
+    row = await execute_fetch("DELETE FROM banned_keywords WHERE word_key = ? RETURNING word_key", (word.lower(),))
     return bool(row)

@@ -2210,6 +2210,7 @@ async def discovery_trending(req: TrendingRequest, user: dict = Depends(require_
         except ValueError as e:
             raise HTTPException(422, str(e))
     banned = await db.banned_category_keys()
+    banned_words = await db.banned_word_keys()   # kelime yasağı: keyword metninde geçiyorsa kategoriden bağımsız atılır
     if category and category.lower() in banned:
         raise HTTPException(403, f"\"{category}\" kategorisi owner tarafından yasaklandı")
     alias = trends.department_alias(req.marketplace, category) if category else None
@@ -2250,7 +2251,7 @@ async def discovery_trending(req: TrendingRequest, user: dict = Depends(require_
             scanned += 1
             for d in row["departments"]:
                 dept_counts[d] = dept_counts.get(d, 0) + 1
-            if trends.is_banned(row["departments"], banned):
+            if trends.is_banned(row["departments"], banned) or trends.word_ban_hit(row["keyword"], banned_words):
                 hidden_banned += 1
                 continue
             if category and not alias and not trends.in_category(row["departments"], category):
@@ -2297,11 +2298,13 @@ class BannedCategoryIn(BaseModel):
 
 async def _trend_categories_payload(marketplace: str, can_manage: bool) -> dict:
     banned = await db.list_banned_categories()
+    banned_words = await db.list_banned_words()
     keys = {b["key"] for b in banned}
     known = [{"name": n, "server_filter": True}
              for n in trends.KNOWN_DEPARTMENTS.get(marketplace, []) if n.lower() not in keys]
     return {"marketplace": marketplace, "known": known, "can_manage": can_manage,
-            "banned": [{k: b[k] for k in ("name", "banned_at", "banned_by_name")} for b in banned]}
+            "banned": [{k: b[k] for k in ("name", "banned_at", "banned_by_name")} for b in banned],
+            "banned_words": [{k: b[k] for k in ("name", "banned_at", "banned_by_name")} for b in banned_words]}
 
 
 @app.get("/api/trends/categories")
@@ -2337,6 +2340,32 @@ async def unban_trend_category(name: str = Query(..., min_length=1, max_length=2
         raise HTTPException(422, str(e))
     if not await db.unban_category(name):
         raise HTTPException(404, "Bu kategori yasaklı listesinde değil")
+    return await _trend_categories_payload(marketplace, True)
+
+
+@app.post("/api/trends/banned-words")
+async def ban_trend_word(req: BannedCategoryIn, marketplace: str = Query("US", pattern=r"^[A-Z]{2}$"),
+                         user: dict = Depends(require_owner)):
+    """Kelime yasağı (yalnızca owner): keyword metninde tam kelime/ifade olarak geçen satırlar (çoğul dahil)
+    kategorisinden bağımsız herkesin taramasından atılır — trends.word_ban_hit."""
+    try:
+        word = trends.clean_ban_word(req.name)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    added = await db.ban_word(word, user["user_id"])
+    return {"added": added, **await _trend_categories_payload(marketplace, True)}
+
+
+@app.delete("/api/trends/banned-words")
+async def unban_trend_word(name: str = Query(..., min_length=1, max_length=200),
+                           marketplace: str = Query("US", pattern=r"^[A-Z]{2}$"),
+                           user: dict = Depends(require_owner)):
+    try:
+        word = trends.clean_ban_word(name)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    if not await db.unban_word(word):
+        raise HTTPException(404, "Bu kelime yasaklı listesinde değil")
     return await _trend_categories_payload(marketplace, True)
 
 
