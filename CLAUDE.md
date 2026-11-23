@@ -308,6 +308,13 @@ birim" sanıp düzeltmeye çalışma.
   yalnızca owner (admin/member 403); `GET /api/trends/categories` herkese liste + `can_manage`. Keyword'ün
   kategorilerinden HERHANGİ BİRİ yasaklıysa SUNUCUDA atılır (kategorisiz keyword etkilenmez); yasaklı kategori
   filtre olarak istenirse 403. Panel owner'a kart etiketlerinde yasakla düğmesi gösterir.
+- **Kelime yasağı** (`banned_keywords`, v13; `POST/DELETE /api/trends/banned-words`, yalnızca owner): keyword METNİNDE tam
+  kelime/ifade olarak geçen (harf duyarsız, sondaki -s/-es dahil, başka kelimenin parçası değil: "halloween" →
+  "halloween costumes" ✓, "halloweentown" ✗) satırlar kategorisinden bağımsız SUNUCUDA atılır (`trends.word_ban_hit`;
+  panelde aynı kural `app.js::trdWordBanned`). **Hata geçmişi:** kelime yasağı yokken "Yasaklı Kategoriler" kutusuna
+  "Halloween" yazılabiliyordu → hiçbir kategoriyle eşleşmediği için HİÇ uygulanmıyordu. v13 migrasyonu
+  (`_split_banned_words_once`, bir kez) bilinen kategori olmayan ve `mcp_cache`'teki Trend yanıtlarında kategori olarak
+  görülmemiş kayıtları kelime yasağına taşıdı. Panel formunda tür seçimi (Kategori / Kelime) var.
 
 **Periyot & kart grafiği (`aba_research_trend` — gerçek çağrıyla doğrulandı):** parametreler DÜZ (request sarmalı YOK,
 `wrap_in_request=False`; keyword, marketplace, `timeGranularity="M"`), `data` doğrudan liste

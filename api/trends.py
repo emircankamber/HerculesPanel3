@@ -78,6 +78,34 @@ def is_banned(departments, banned_keys: set[str]) -> bool:
     return any((d or "").lower() in banned_keys for d in (departments or []))
 
 
+def clean_ban_word(word) -> str:
+    """Yasaklı kelime/ifade: boşluklar sadeleşir, kontrol karakterleri atılır, 2–60 karakter, en az bir harf/rakam."""
+    s = " ".join(_CTRL_RE.sub(" ", str(word or "")).split())
+    if len(s) < 2:
+        raise ValueError("Yasaklı kelime en az 2 karakter olmalı")
+    if len(s) > 60:
+        raise ValueError("Yasaklı kelime en fazla 60 karakter olabilir")
+    if not re.search(r"\w", s):
+        raise ValueError("Yasaklı kelime harf ya da rakam içermeli")
+    return s
+
+
+def _word_pattern(word: str) -> re.Pattern:
+    # Tam kelime/ifade, harf duyarsız; sondaki çoğul eki (-s / -es) da yakalanır: "halloween" → "halloween costumes",
+    # "halloweens"; ama "halloweentown" gibi başka kelimenin parçası DEĞİL. İfadedeki boşluklar esnek.
+    body = r"\s+".join(re.escape(p) for p in word.lower().split())
+    return re.compile(r"(?<![^\W_])" + body + r"(?:e?s)?(?![^\W_])", re.IGNORECASE)
+
+
+def word_ban_hit(keyword, banned_words) -> str | None:
+    """Keyword metninde yasaklı kelimelerden biri geçiyorsa o kelimeyi döner (kategoriden bağımsız)."""
+    text = keyword or ""
+    for w in banned_words or []:
+        if w and _word_pattern(w).search(text):
+            return w
+    return None
+
+
 def in_category(departments, name: str) -> bool:
     key = (name or "").lower()
     return any((d or "").lower() == key for d in (departments or []))
